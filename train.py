@@ -170,19 +170,34 @@ def build_dataloaders(config):
         seed=data_cfg["seed"],
     )
 
+    # 防御性检查：在构建 DataLoader 之前检查数据集长度
+    if len(train_dataset) == 0:
+        logger.error("训练数据集为空！请将原始图像与同名 .json 标注放入 data/raw/ 目录。")
+        sys.exit(1)
+
+    if len(val_dataset) == 0:
+        logger.warning("验证数据集为空，将使用训练集进行验证。")
+        val_dataset = train_dataset
+
+    # 当 batch_size 大于数据集长度时，自适应调整 batch_size
+    train_bs = min(data_cfg["batch_size"], len(train_dataset))
+    if train_bs < data_cfg["batch_size"]:
+        logger.warning(f"训练 batch_size ({data_cfg['batch_size']}) > 训练集长度 ({len(train_dataset)})，已调整为 {train_bs}")
+    val_bs = min(data_cfg["batch_size"], len(val_dataset))
+
     train_loader = DataLoader(
         train_dataset,
-        batch_size=data_cfg["batch_size"],
+        batch_size=train_bs,
         shuffle=True,
         num_workers=data_cfg["num_workers"],
         collate_fn=collate_fn,
         pin_memory=True,
-        drop_last=True,
+        drop_last=False,
     )
 
     val_loader = DataLoader(
         val_dataset,
-        batch_size=data_cfg["batch_size"],
+        batch_size=val_bs,
         shuffle=False,
         num_workers=data_cfg["num_workers"],
         collate_fn=collate_fn,
@@ -233,13 +248,7 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, grad_cl
         n_batches += 1
 
         if (batch_idx + 1) % 10 == 0:
-            logger.info(
-                f"  Batch {batch_idx + 1}/{len(loader)}: "
-                f"loss={loss_dict['total'].item():.4f} "
-                f"ce={loss_dict['ce']:.4f} "
-                f"dice={loss_dict['dice']:.4f} "
-                f"boundary={loss_dict['boundary']:.4f}"
-            )
+            logger.info(f"  Batch {batch_idx + 1}/{len(loader)}: loss={loss_dict['total'].item():.4f} ce={loss_dict['ce']:.4f} dice={loss_dict['dice']:.4f} boundary={loss_dict['boundary']:.4f}")
 
     return {
         "loss": total_loss / n_batches,
@@ -296,10 +305,6 @@ def main():
 
     train_loader, val_loader = build_dataloaders(config)
 
-    if len(train_loader) == 0:
-        logger.error("训练数据集为空！请将原始图像与同名 .json 标注放入 data/raw/ 目录。")
-        return
-
     loss_weights = train_cfg["loss_weights"]
     criterion = CombinedLoss(
         ce_weight=loss_weights["ce"],
@@ -309,9 +314,7 @@ def main():
     ).to(device)
 
     decoder_params = list(model.decoder.parameters())
-    optimizer = torch.optim.AdamW(
-        decoder_params, lr=train_cfg["learning_rate"], weight_decay=train_cfg["weight_decay"]
-    )
+    optimizer = torch.optim.AdamW(decoder_params, lr=train_cfg["learning_rate"], weight_decay=train_cfg["weight_decay"])
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=train_cfg["epochs"])
     scaler = GradScaler(enabled=train_cfg["amp"])
@@ -338,59 +341,28 @@ def main():
         epoch_start = time.time()
         logger.info(f"\nEpoch {epoch + 1}/{train_cfg['epochs']}")
 
-        train_metrics = train_one_epoch(
-            model, train_loader, criterion, optimizer, scaler, device,
-            grad_clip=train_cfg["grad_clip"], use_amp=train_cfg["amp"],
-        )
-
+        train_metrics = train_one_epoch(model, train_loader, criterion, optimizer, scaler, device, grad_clip=train_cfg["grad_clip"], use_amp=train_cfg["amp"])
         val_metrics = validate(model, val_loader, criterion, device)
         scheduler.step()
 
         epoch_time = time.time() - epoch_start
         logger.info(f"Epoch {epoch + 1} 完成 ({epoch_time:.1f}s)")
-        logger.info(
-            f"  Train Loss: {train_metrics['loss']:.4f} "
-            f"(ce={train_metrics['ce']:.4f}, dice={train_metrics['dice']:.4f}, "
-            f"boundary={train_metrics['boundary']:.4f})"
-        )
-        logger.info(
-            f"  Val Loss: {val_metrics['loss']:.4f} | "
-            f"Val mIoU: {val_metrics['mean_iou']:.4f} | "
-            f"Val mDice: {val_metrics['mean_dice']:.4f}"
-        )
+        logger.info(f"  Train Loss: {train_metrics['loss']:.4f} (ce={train_metrics['ce']:.4f}, dice={train_metrics['dice']:.4f}, boundary={train_metrics['boundary']:.4f})")
+        logger.info(f"  Val Loss: {val_metrics['loss']:.4f} | Val mIoU: {val_metrics['mean_iou']:.4f} | Val mDice: {val_metrics['mean_dice']:.4f}")
 
         if val_metrics["mean_iou"] > best_val_iou:
             best_val_iou = val_metrics["mean_iou"]
             best_path = os.path.join(output_dir, "best_model.pth")
-            torch.save({
-                "epoch": epoch,
-                "decoder_state_dict": model.decoder.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "scheduler_state_dict": scheduler.state_dict(),
-                "best_val_iou": best_val_iou,
-                "config": config,
-            }, best_path)
+            torch.save({"epoch": epoch, "decoder_state_dict": model.decoder.state_dict(), "optimizer_state_dict": optimizer.state_dict(), "scheduler_state_dict": scheduler.state_dict(), "best_val_iou": best_val_iou, "config": config}, best_path)
             logger.info(f"  新最佳模型已保存: {best_path} (mIoU={best_val_iou:.4f})")
 
         if (epoch + 1) % 10 == 0:
             ckpt_path = os.path.join(output_dir, f"checkpoint_epoch{epoch + 1}.pth")
-            torch.save({
-                "epoch": epoch,
-                "decoder_state_dict": model.decoder.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "scheduler_state_dict": scheduler.state_dict(),
-                "best_val_iou": best_val_iou,
-                "config": config,
-            }, ckpt_path)
+            torch.save({"epoch": epoch, "decoder_state_dict": model.decoder.state_dict(), "optimizer_state_dict": optimizer.state_dict(), "scheduler_state_dict": scheduler.state_dict(), "best_val_iou": best_val_iou, "config": config}, ckpt_path)
             logger.info(f"  Checkpoint 已保存: {ckpt_path}")
 
     final_path = os.path.join(output_dir, "final_model.pth")
-    torch.save({
-        "epoch": train_cfg["epochs"] - 1,
-        "decoder_state_dict": model.decoder.state_dict(),
-        "best_val_iou": best_val_iou,
-        "config": config,
-    }, final_path)
+    torch.save({"epoch": train_cfg["epochs"] - 1, "decoder_state_dict": model.decoder.state_dict(), "best_val_iou": best_val_iou, "config": config}, final_path)
     logger.info(f"训练完成！最终模型: {final_path}")
     logger.info(f"最佳 Val mIoU: {best_val_iou:.4f}")
 
