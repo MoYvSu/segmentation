@@ -84,9 +84,9 @@ def argmax_to_mask(
     """
     if logits.ndim == 3:
         logits = logits.unsqueeze(0)
-        squeeze = True
-    else:
-        squeeze = False
+        pass
+    elif logits.ndim != 4:
+        raise ValueError("logits ndim should be 3 or 4")
 
     if original_size is not None:
         logits = restore_to_original_size(
@@ -97,7 +97,7 @@ def argmax_to_mask(
     pred = torch.argmax(logits, dim=1)
     pred = pred.cpu().numpy().astype(np.uint8)
 
-    if squeeze:
+    if pred.ndim == 3 and pred.shape[0] == 1:
         pred = pred[0]
 
     return pred

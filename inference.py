@@ -80,7 +80,7 @@ def build_model(config, device, checkpoint_path=None):
 
     if checkpoint_path and os.path.exists(checkpoint_path):
         logger.info(f"加载 decoder 权重: {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=device)
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         model.decoder.load_state_dict(checkpoint["decoder_state_dict"])
         logger.info(
             f"权重加载成功 (epoch={checkpoint.get('epoch', '?')}, "
