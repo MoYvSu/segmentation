@@ -3,3 +3,4 @@ models\__pycache__
 config
 weights
 segment-anything-2
+outputs
