@@ -225,7 +225,7 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, grad_cl
 
         if use_amp:
             with autocast():
-                logits = model(images)
+                logits = model(images, output_size=masks.shape[-2:])
                 loss_dict = criterion(logits, masks)
             scaler.scale(loss_dict["total"]).backward()
             if grad_clip > 0:
@@ -234,7 +234,7 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, grad_cl
             scaler.step(optimizer)
             scaler.update()
         else:
-            logits = model(images)
+            logits = model(images, output_size=masks.shape[-2:])
             loss_dict = criterion(logits, masks)
             loss_dict["total"].backward()
             if grad_clip > 0:
@@ -268,7 +268,7 @@ def validate(model, loader, criterion, device):
     for batch in loader:
         images = batch["image"].to(device)
         masks = batch["mask"].to(device)
-        logits = model(images)
+        logits = model(images, output_size=masks.shape[-2:])
         loss_dict = criterion(logits, masks)
         total_loss += loss_dict["total"].item()
         n_batches += 1
