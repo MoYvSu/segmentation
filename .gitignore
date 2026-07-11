@@ -1,7 +1,7 @@
-models\__pycache__
 config
 weights
 segment-anything-2
 outputs
-data\raw
-data\test
+data/raw/
+data/test/
+**/__pycache__/
