@@ -92,12 +92,12 @@ train:
   scheduler: "cosine"
   # warmup 轮数
   warmup_epochs: 25
-  # 梯度裁剪
-  grad_clip: 0.3
+  # 梯度裁剪（固定 1.0，允许初始阶段强纠偏梯度通过）
+  grad_clip: 1.0
   # 混合精度训练（暂时关闭，回退至FP32）
   amp: false
-  # 距离场回归损失权重（BCE + dist_weight * MSE）
-  dist_weight: 5.0
+  # 距离场回归损失权重（FocalLoss + dist_weight * MSE）
+  dist_weight: 10.0
   # 保留checkpoints
   save_checkpoints: true
 

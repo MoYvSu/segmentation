@@ -8,8 +8,8 @@
 1. SAM 2 Hiera trunk 冻结，仅作为特征提取器
 2. FPN 解码头随机初始化，仅训练解码头参数
 3. 在线 Letterbox 数据管道
-4. 双任务输出：二分类掩码 BCE + 连续距离场 MSE 回归
-5. 静态权重 1:5（BCE:MSE）
+4. 双任务输出：分类 Focal Loss + 连续距离场 MSE 回归
+5. 静态权重 1:10（Focal:MSE）
 
 使用方法：
     conda activate sam2_env
@@ -42,7 +42,7 @@ import yaml
 from data.dataset import MetallographicDataset, collate_fn
 from models.fpn_decoder import FPNDecoder, SegmentationModel
 from models.sam2_encoder import SAM2Encoder
-from utils.loss import AdaptiveDistanceFieldLoss
+from utils.loss import FocalDistanceFieldLoss
 from utils.metrics import SegMetrics
 from utils.post_process import output_to_binary_mask
 
@@ -179,10 +179,7 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, grad_cl
     total_dist = 0.0
     n_batches = 0
 
-    # 动态梯度裁剪：追踪历史 loss，检测异常突变
-    loss_history = []
-
-    # 梯度裁剪参数：仅解码器参数（DistanceFieldLoss 无可学习参数）
+    # 梯度裁剪参数：仅解码器参数（FocalDistanceFieldLoss 无可学习参数）
     clip_params = list(model.decoder.parameters())
 
     for batch_idx, batch in enumerate(loader):
@@ -197,18 +194,10 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, grad_cl
                 total_loss_t, seg_val, dist_val = criterion(output, targets)
             scaler.scale(total_loss_t).backward()
 
-            # 动态梯度裁剪：检测 loss 异常
-            current_loss = total_loss_t.item()
-            effective_clip = grad_clip
-            if len(loss_history) > 0:
-                avg_loss = sum(loss_history) / len(loss_history)
-                if current_loss > 5.0 or current_loss > 3.0 * avg_loss:
-                    effective_clip = 0.1
-                    logger.warning(f"  梯度突变检测: loss={current_loss:.4f} avg={avg_loss:.4f} -> grad_clip {grad_clip}->{effective_clip}")
-
-            if effective_clip > 0:
+            # 固定梯度裁剪：硬编码 1.0，允许初始阶段强纠偏梯度通过
+            if grad_clip > 0:
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(clip_params, effective_clip)
+                torch.nn.utils.clip_grad_norm_(clip_params, grad_clip)
             scaler.step(optimizer)
             scaler.update()
         else:
@@ -216,20 +205,11 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, grad_cl
             total_loss_t, seg_val, dist_val = criterion(output, targets)
             total_loss_t.backward()
 
-            # 动态梯度裁剪
-            current_loss = total_loss_t.item()
-            effective_clip = grad_clip
-            if len(loss_history) > 0:
-                avg_loss = sum(loss_history) / len(loss_history)
-                if current_loss > 5.0 or current_loss > 3.0 * avg_loss:
-                    effective_clip = 0.1
-                    logger.warning(f"  梯度突变检测: loss={current_loss:.4f} avg={avg_loss:.4f} -> grad_clip {grad_clip}->{effective_clip}")
-
-            if effective_clip > 0:
-                torch.nn.utils.clip_grad_norm_(clip_params, effective_clip)
+            # 固定梯度裁剪：硬编码 1.0，允许初始阶段强纠偏梯度通过
+            if grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(clip_params, grad_clip)
             optimizer.step()
 
-        loss_history.append(total_loss_t.item())
         total_loss += total_loss_t.item()
         total_seg += seg_val
         total_dist += dist_val
@@ -297,11 +277,11 @@ def main():
 
     train_loader, val_loader = build_dataloaders(config)
 
-    # 批次自适应反比加权 + Dice 混合双任务损失
-    criterion = AdaptiveDistanceFieldLoss().to(device)
-    logger.info("损失函数: AdaptiveDistanceFieldLoss (动态加权BCE + 2*Dice + 5*MSE)")
+    # Focal Loss + 距离场 MSE 双任务损失
+    criterion = FocalDistanceFieldLoss(gamma=2.0, alpha=0.95).to(device)
+    logger.info("损失函数: FocalDistanceFieldLoss (Focal gamma=2.0 alpha=0.95 + 10*MSE)")
 
-    # 仅解码器参数（AdaptiveDistanceFieldLoss 无可学习参数）
+    # 仅解码器参数（FocalDistanceFieldLoss 无可学习参数）
     optimizer = torch.optim.AdamW(
         model.decoder.parameters(),
         lr=train_cfg["learning_rate"],

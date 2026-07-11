@@ -9,8 +9,8 @@
 2. 每个尺度挂载标准残差卷积块（Residual Block），增强非线性拟合能力。
 3. 自上而下通过双线性插值融合（从最低分辨率 Stage 4 逐步上采样与高层分辨率融合）。
 4. 融合后在最高分辨率特征图上追加两层语义平滑头，再输出 2 通道：
-   - 通道 0（分类分支）：原始 logits，后续送入 BCEWithLogitsLoss
-   - 通道 1（回归分支）：经 Sigmoid 的距离场预测 [0,1]，后续送入 MSELoss
+    - 通道 0（分类分支）：原始 logits，后续送入 Focal Loss
+    - 通道 1（回归分支）：经 Sigmoid 的距离场预测 [0,1]，后续送入 MSELoss
 
 输入约定：features = [feat_s1, feat_s2, feat_s3, feat_s4]
     - feat_s1: 最高分辨率, 112ch
@@ -128,13 +128,23 @@ class FPNDecoder(nn.Module):
             nn.Dropout2d(dropout) if dropout > 0 else nn.Identity(),
         )
 
-        # 输出层：1*1 卷积输出 2 通道
-        # 通道 0: 分类 logits（不加激活）
-        # 通道 1: 距离场回归（后续接 Sigmoid）
-        self.output_head = nn.Conv2d(fpn_channels, 2, kernel_size=1, bias=True)
-
-        # Sigmoid 激活函数，仅作用于距离场通道
-        self.dist_sigmoid = nn.Sigmoid()
+        # 解耦双分支输出头
+        # 分类分支：3x3 Conv(通道减半) + BN + ReLU + 1x1 Conv(->1)，输出原始 logits
+        # 回归分支：3x3 Conv(通道减半) + BN + ReLU + 1x1 Conv(->1) + Sigmoid，输出 [0,1]
+        half_channels = fpn_channels // 2
+        self.cls_branch = nn.Sequential(
+            nn.Conv2d(fpn_channels, half_channels, kernel_size=3, padding=1, bias=False),
+            norm_layer(half_channels) if use_bn else nn.Identity(),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(half_channels, 1, kernel_size=1, bias=True),
+        )
+        self.reg_branch = nn.Sequential(
+            nn.Conv2d(fpn_channels, half_channels, kernel_size=3, padding=1, bias=False),
+            norm_layer(half_channels) if use_bn else nn.Identity(),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(half_channels, 1, kernel_size=1, bias=True),
+            nn.Sigmoid(),
+        )
 
         self._init_weights()
 
@@ -188,15 +198,12 @@ class FPNDecoder(nn.Module):
         # Step 3: 语义平滑头
         semantic = self.semantic_head(top_down)
 
-        # Step 4: 输出头（2 通道）
-        raw_output = self.output_head(semantic)
-
-        # Step 5: 距离场通道施加 Sigmoid
-        seg_logits = raw_output[:, 0:1]  # [B, 1, H, W] 分类 logits
-        dist_pred = self.dist_sigmoid(raw_output[:, 1:2])  # [B, 1, H, W] 距离场 [0,1]
+        # Step 4: 解耦双分支输出
+        seg_logits = self.cls_branch(semantic)   # [B, 1, H, W] 分类 logits（无激活）
+        dist_pred = self.reg_branch(semantic)    # [B, 1, H, W] 距离场 [0,1]（内置 Sigmoid）
         output = torch.cat([seg_logits, dist_pred], dim=1)  # [B, 2, H, W]
 
-        # Step 6: 动态上采样到指定尺寸（推理时对齐原图）
+        # Step 5: 动态上采样到指定尺寸（推理时对齐原图）
         if output_size is not None:
             output = F.interpolate(
                 output,
