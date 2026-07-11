@@ -356,7 +356,7 @@ def main():
             torch.save({"epoch": epoch, "decoder_state_dict": model.decoder.state_dict(), "optimizer_state_dict": optimizer.state_dict(), "scheduler_state_dict": scheduler.state_dict(), "best_val_iou": best_val_iou, "config": config}, best_path)
             logger.info(f"  新最佳模型已保存: {best_path} (mIoU={best_val_iou:.4f})")
 
-        if (epoch + 1) % 10 == 0:
+        if (epoch + 1) % 10 == 0 and train_cfg["save_checkpoints"]:
             ckpt_path = os.path.join(output_dir, f"checkpoint_epoch{epoch + 1}.pth")
             torch.save({"epoch": epoch, "decoder_state_dict": model.decoder.state_dict(), "optimizer_state_dict": optimizer.state_dict(), "scheduler_state_dict": scheduler.state_dict(), "best_val_iou": best_val_iou, "config": config}, ckpt_path)
             logger.info(f"  Checkpoint 已保存: {ckpt_path}")
