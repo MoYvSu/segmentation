@@ -178,9 +178,9 @@ def parse_labelme_json(
         points = shape.get("points", [])
         if len(points) < 3:
             continue
-        if label in ("ferrite", "ferrite_core", "铁素体"):
+        if label in ("ferrite", "ferrite_core", "铁素体", "1"):
             ferrite_polys.append(points)
-        elif label in ("pearlite", "珠光体"):
+        elif label in ("pearlite", "珠光体", "0"):
             pearlite_polys.append(points)
 
     ferrite_mask = polygons_to_mask(ferrite_polys, height, width)
