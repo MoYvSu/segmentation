@@ -1,7 +1,8 @@
 # =============================================================================
-# 低碳钢金相图像无监督相区分割 - 全局配置
+# 低碳钢金相图像无监督相区分割 - 全局配置（双任务距离场版本）
 # =============================================================================
 # python 环境: conda activate sam2_env
+# 架构变更：彻底放弃三分类，改用二分类Mask + 连续距离场回归双任务管线
 
 # -----------------------------------------------------------------------------
 # 路径配置
@@ -38,13 +39,13 @@ sam2:
   sam2_repo_path: "segment-anything-2"
 
 # -----------------------------------------------------------------------------
-# FPN 解码头配置（随机初始化，禁止加载 SAM 原生 Mask Decoder）
+# FPN 解码头配置（双任务距离场版本：输出 2 通道 = 分类 logits + 距离场回归）
 # -----------------------------------------------------------------------------
 decoder:
   # FPN 统一通道数（增强型：残差块 + 语义平滑头，参数量 ~6.3M）
   fpn_channels: 256
-  # 输出类别数：0=珠光体, 1=铁素体核, 2=晶界
-  num_classes: 3
+  # 输出通道数：固定为 2（通道0=分类logits, 通道1=距离场回归）
+  num_classes: 2
   # 是否使用 dropout
   dropout: 0.1
   # 是否使用批量归一化
@@ -56,13 +57,14 @@ decoder:
 data:
   # 输入图像长边目标尺寸（Letterbox）
   image_size: 1024
-  # 铁素体晶界收缩像素数（erode kernel size）
+  # 铁素体晶界收缩像素数（已废弃，保留参数兼容性）
   erode_pixels: 5
-  # 类别定义
+  # 距离场非线性缩放因子: dist_norm = dist / (dist + scale_factor)
+  dist_scale_factor: 10.0
+  # 类别定义（二分类）
   classes:
-    0: "pearlite"      # 珠光体
-    1: "ferrite_core"  # 铁素体核
-    2: "grain_boundary" # 晶界
+    0: "pearlite"   # 珠光体
+    1: "ferrite"    # 铁素体（核+晶界统一为前景）
   # 训练集占比
   train_ratio: 0.8
   # 随机种子
@@ -88,20 +90,14 @@ train:
   epochs: 500
   # 学习率调度器
   scheduler: "cosine"
-  # warmup 轮数（拉长至 25，确保前 30 epoch 平稳过渡）
+  # warmup 轮数
   warmup_epochs: 25
   # 梯度裁剪
   grad_clip: 0.3
-  # 混合精度训练（暂时关闭，回退至FP32以确保稀疏晶界梯度不被截断）
+  # 混合精度训练（暂时关闭，回退至FP32）
   amp: false
-  # 损失函数权重
-  loss_weights:
-    ce: 1.0       # 交叉熵
-    dice: 0.5     # Dice
-    boundary: 0.3 # 边界感知损失
-  # 显式类别权重分配（0=珠光体, 1=铁素体核, 2=铁素体晶界）
-  # 极度压低背景惩罚，放大晶界权重，扭转梯度分布
-  class_weights: [0.2, 1.0, 8.0]
+  # 距离场回归损失权重（BCE + dist_weight * MSE）
+  dist_weight: 5.0
   # 保留checkpoints
   save_checkpoints: true
 
@@ -113,6 +109,8 @@ inference:
   test_dir: "data/smoketest"
   # 输出目录
   output_dir: "outputs/inference"
+  # 二分类阈值
+  threshold: 0.5
   # 拓扑后处理最小实例面积过滤（像素）
   min_instance_area: 50
   # 实例 ID 上限（uint8）

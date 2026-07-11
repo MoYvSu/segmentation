@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-评估指标监控
-=============
-提供三分类分割任务的评估指标：
+评估指标监控（二分类版本）
+=========================
+提供二分类分割任务的评估指标：
 - 像素级准确率 (Pixel Accuracy)
 - 平均准确率 (Mean Accuracy)
 - 平均 IoU (Mean IoU)
@@ -10,7 +10,7 @@
 - Dice 系数
 - 混淆矩阵
 
-类别定义：0=珠光体, 1=铁素体核, 2=晶界
+类别定义：0=珠光体, 1=铁素体
 
 安全防御：所有分母均加入 eps=1e-7，防止 0/0 导致的 NaN 假阳性。
 """
@@ -20,14 +20,14 @@ from typing import Dict, Optional
 import numpy as np
 import torch
 
-CLASS_NAMES = ["pearlite", "ferrite_core", "grain_boundary"]
-NUM_CLASSES = 3
+CLASS_NAMES = ["pearlite", "ferrite"]
+NUM_CLASSES = 2
 EPS = 1e-7
 
 
 class SegMetrics:
     """
-    分割评估指标累积器。
+    分割评估指标累积器（二分类版本）。
 
     在验证循环中累积混淆矩阵，最后计算各项指标。
     所有除法运算均加入 eps 安全因子，防止分母为 0 时产生 NaN 假阳性。
@@ -36,7 +36,7 @@ class SegMetrics:
     def __init__(self, num_classes: int = NUM_CLASSES):
         """
         Args:
-            num_classes: 类别数
+            num_classes: 类别数（二分类固定为 2）
         """
         self.num_classes = num_classes
         self.confusion_matrix = np.zeros((num_classes, num_classes), dtype=np.int64)
@@ -168,7 +168,7 @@ class SegMetrics:
 
     def __str__(self) -> str:
         metrics = self.get_metrics()
-        lines = ["=" * 60, "分割评估指标", "=" * 60]
+        lines = ["=" * 60, "分割评估指标 (二分类)", "=" * 60]
         lines.append(f"Pixel Accuracy:  {metrics['pixel_accuracy']:.4f}")
         lines.append(f"Mean Accuracy:   {metrics['mean_accuracy']:.4f}")
         lines.append(f"Mean IoU:        {metrics['mean_iou']:.4f}")

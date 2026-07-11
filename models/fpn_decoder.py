@@ -1,15 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-增强型 FPN 解码头（残差连接 + 语义平滑头）
-=========================================
+增强型 FPN 解码头（残差连接 + 语义平滑头）- 双任务距离场版本
+=============================================================
 完全随机初始化的特征金字塔解码头，禁止加载任何 SAM 2 原生 Mask Decoder 权重。
 
 设计：
 1. 通过 1*1 卷积将 SAM 2 trunk 提取的四个尺度特征统一对齐到 256 维。
 2. 每个尺度挂载标准残差卷积块（Residual Block），增强非线性拟合能力。
 3. 自上而下通过双线性插值融合（从最低分辨率 Stage 4 逐步上采样与高层分辨率融合）。
-4. 融合后在最高分辨率特征图上追加两层语义平滑头，再输出 3 通道 logits
-   （0=珠光体, 1=铁素体核, 2=晶界）。
+4. 融合后在最高分辨率特征图上追加两层语义平滑头，再输出 2 通道：
+   - 通道 0（分类分支）：原始 logits，后续送入 BCEWithLogitsLoss
+   - 通道 1（回归分支）：经 Sigmoid 的距离场预测 [0,1]，后续送入 MSELoss
 
 输入约定：features = [feat_s1, feat_s2, feat_s3, feat_s4]
     - feat_s1: 最高分辨率, 112ch
@@ -30,8 +31,8 @@ class ResidualBlock(nn.Module):
 
     结构：
         input
-          ├── Conv3x3 → BN → ReLU → Conv3x3 → BN ──┐
-          └──────────── Identity ─────────────────────┘──→ ReLU → output
+          -> Conv3x3 -> BN -> ReLU -> Conv3x3 -> BN -+
+          ->              Identity                   +-> ReLU -> output
     """
 
     def __init__(self, channels: int, norm_layer=None):
@@ -61,9 +62,12 @@ class ResidualBlock(nn.Module):
 
 class FPNDecoder(nn.Module):
     """
-    增强型 FPN 解码头（残差连接 + 语义平滑头）。
+    增强型 FPN 解码头（残差连接 + 语义平滑头）- 双任务距离场版本。
 
-    通过残差块增强非线性拟合容量，解决小样本梯度瘫痪问题。
+    输出 2 通道：
+    - 通道 0：分类 logits（铁素体 vs 珠光体）
+    - 通道 1：经 Sigmoid 的距离场回归预测 [0,1]
+
     参数量约 6.3M（fpn_channels=256）。
     """
 
@@ -71,7 +75,7 @@ class FPNDecoder(nn.Module):
         self,
         in_channels: Optional[List[int]] = None,
         fpn_channels: int = 256,
-        num_classes: int = 3,
+        num_classes: int = 2,
         dropout: float = 0.1,
         use_bn: bool = True,
     ):
@@ -80,7 +84,7 @@ class FPNDecoder(nn.Module):
             in_channels: 各 Stage 输入通道数列表，从高分辨率到低分辨率。
                          默认 [112, 224, 448, 896]（Hiera base+）。
             fpn_channels: FPN 统一通道数（默认 256）。
-            num_classes: 输出类别数（三分类：0=珠光体, 1=铁素体核, 2=晶界）。
+            num_classes: 输出通道数（固定为 2：分类 + 距离场）。
             dropout: dropout 概率。
             use_bn: 是否使用 BatchNorm。
         """
@@ -89,6 +93,7 @@ class FPNDecoder(nn.Module):
             in_channels = [112, 224, 448, 896]
 
         assert len(in_channels) == 4, "FPN 解码头需要 4 个尺度的输入特征"
+        assert num_classes == 2, "双任务距离场版本固定输出 2 通道（分类 + 距离场）"
 
         self.in_channels = in_channels
         self.fpn_channels = fpn_channels
@@ -123,8 +128,13 @@ class FPNDecoder(nn.Module):
             nn.Dropout2d(dropout) if dropout > 0 else nn.Identity(),
         )
 
-        # 输出层：1*1 卷积输出 num_classes 通道 logits
-        self.output_head = nn.Conv2d(fpn_channels, num_classes, kernel_size=1, bias=True)
+        # 输出层：1*1 卷积输出 2 通道
+        # 通道 0: 分类 logits（不加激活）
+        # 通道 1: 距离场回归（后续接 Sigmoid）
+        self.output_head = nn.Conv2d(fpn_channels, 2, kernel_size=1, bias=True)
+
+        # Sigmoid 激活函数，仅作用于距离场通道
+        self.dist_sigmoid = nn.Sigmoid()
 
         self._init_weights()
 
@@ -139,16 +149,9 @@ class FPNDecoder(nn.Module):
                 nn.init.ones_(m.weight)
                 nn.init.zeros_(m.bias)
 
-        # 非对称偏置初始化：抑制背景类(0)，提升晶界类(2)初始生存空间
-        # 打破三分类全盲预测死锁（全图类别0 → mIoU=1/3=0.3333）
-        with torch.no_grad():
-            self.output_head.bias[0] = -2.0  # 珠光体（背景）：负偏置抑制
-            self.output_head.bias[1] = 0.0   # 铁素体核：默认
-            self.output_head.bias[2] = 2.0   # 晶界：正偏置提升
-
     def forward(self, features, output_size=None):
         """
-        前向传播：FPN 横向投影 + 残差块 + 自上而下融合 + 语义平滑头 + 输出。
+        前向传播：FPN 横向投影 + 残差块 + 自上而下融合 + 语义平滑头 + 双任务输出。
 
         Args:
             features: [feat_s1, feat_s2, feat_s3, feat_s4]
@@ -157,7 +160,9 @@ class FPNDecoder(nn.Module):
             output_size: 可选，最终输出的 (H, W) 尺寸。
 
         Returns:
-            logits: [B, num_classes, H, W] 三分类 logits
+            output: [B, 2, H, W]
+                - output[:, 0] 为分类 logits
+                - output[:, 1] 为经 Sigmoid 的距离场预测 [0,1]
         """
         assert len(features) == self.num_stages, (
             f"期望 {self.num_stages} 个尺度特征，实际得到 {len(features)}"
@@ -183,19 +188,24 @@ class FPNDecoder(nn.Module):
         # Step 3: 语义平滑头
         semantic = self.semantic_head(top_down)
 
-        # Step 4: 输出头
-        logits = self.output_head(semantic)
+        # Step 4: 输出头（2 通道）
+        raw_output = self.output_head(semantic)
 
-        # Step 5: 动态上采样到指定尺寸（推理时对齐原图）
+        # Step 5: 距离场通道施加 Sigmoid
+        seg_logits = raw_output[:, 0:1]  # [B, 1, H, W] 分类 logits
+        dist_pred = self.dist_sigmoid(raw_output[:, 1:2])  # [B, 1, H, W] 距离场 [0,1]
+        output = torch.cat([seg_logits, dist_pred], dim=1)  # [B, 2, H, W]
+
+        # Step 6: 动态上采样到指定尺寸（推理时对齐原图）
         if output_size is not None:
-            logits = F.interpolate(
-                logits,
+            output = F.interpolate(
+                output,
                 size=output_size,
                 mode="bilinear",
                 align_corners=True,
             )
 
-        return logits
+        return output
 
     def param_count(self):
         """返回解码头的参数总量。"""
@@ -204,7 +214,7 @@ class FPNDecoder(nn.Module):
 
 class SegmentationModel(nn.Module):
     """
-    完整分割模型：冻结 SAM 2 Encoder + 随机初始化 FPN Decoder。
+    完整分割模型：冻结 SAM 2 Encoder + 随机初始化 FPN Decoder（双任务距离场版本）。
 
     用于训练和推理的统一入口。
     """
@@ -228,11 +238,13 @@ class SegmentationModel(nn.Module):
             output_size: 可选，推理时对齐原图尺寸 (H, W)。
 
         Returns:
-            logits: [B, num_classes, H, W]
+            output: [B, 2, H, W]
+                - output[:, 0] 为分类 logits
+                - output[:, 1] 为经 Sigmoid 的距离场预测 [0,1]
         """
         features = self.encoder(x)
-        logits = self.decoder(features, output_size=output_size)
-        return logits
+        output = self.decoder(features, output_size=output_size)
+        return output
 
     def total_param_count(self):
         """返回各部分参数量统计。"""

@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-测试集交卷预测主入口
-====================
+测试集交卷预测主入口（双任务距离场版本）
+=========================================
 加载训练好的 FPN 解码头权重，对测试集图像进行推理，
-执行完整的后处理流程（动态上采样 + 拓扑剥离 + 实例 ID 分配）。
+执行完整的后处理流程（动态上采样 + 二分类阈值化 + 拓扑剥离 + 实例 ID 分配）。
 
 使用方法：
     conda activate sam2_env
@@ -12,7 +12,8 @@
 输出：
     - {basename}_inst.png   : 单通道 uint8 实例图 (1~255)
     - {basename}_class.json : {"实例ID": 类别标签} 映射
-    - {basename}_mask.png   : 三分类可视化掩码（可选）
+    - {basename}_mask.png   : 二分类可视化掩码（可选）
+    - {basename}_dist.png   : 距离场可视化（可选）
 """
 
 import argparse
@@ -34,7 +35,11 @@ import yaml
 from data.dataset import letterbox
 from models.fpn_decoder import FPNDecoder, SegmentationModel
 from models.sam2_encoder import SAM2Encoder
-from utils.post_process import post_process_prediction, argmax_to_mask, topo_instance_separation
+from utils.post_process import (
+    post_process_prediction,
+    output_to_binary_mask,
+    topo_instance_separation,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -97,9 +102,10 @@ def predict_single_image(
     model, image_path, device, image_size=1024,
     min_instance_area=50, max_instance_id=255, connectivity=8,
     interpolate_mode="bilinear", align_corners=True,
+    threshold=0.5,
     output_dir=None, save_visualization=True,
 ):
-    """对单张图像进行推理 + 后处理。"""
+    """对单张图像进行推理 + 后处理（双任务距离场版本）。"""
     image = cv2.imread(image_path, cv2.IMREAD_COLOR)
     if image is None:
         raise FileNotFoundError(f"无法读取图像: {image_path}")
@@ -113,11 +119,11 @@ def predict_single_image(
 
     basename = os.path.splitext(os.path.basename(image_path))[0]
     with torch.no_grad():
-        logits = model(image_tensor, output_size=(h_orig, w_orig))
+        output = model(image_tensor, output_size=(h_orig, w_orig))
 
     if output_dir is not None:
         output_paths = post_process_prediction(
-            logits=logits,
+            output=output,
             original_size=(h_orig, w_orig),
             output_dir=output_dir,
             image_basename=basename,
@@ -126,14 +132,20 @@ def predict_single_image(
             connectivity=connectivity,
             interpolate_mode=interpolate_mode,
             align_corners=align_corners,
+            threshold=threshold,
             save_visualization=save_visualization,
         )
     else:
         output_paths = {}
 
-    mask = argmax_to_mask(logits, original_size=(h_orig, w_orig), mode=interpolate_mode, align_corners=align_corners)
+    # 提取二值掩码和实例分割结果
+    mask = output_to_binary_mask(
+        output, threshold=threshold, original_size=(h_orig, w_orig),
+        mode=interpolate_mode, align_corners=align_corners,
+    )
     inst_map, class_map = topo_instance_separation(
-        mask, min_instance_area=min_instance_area, max_instance_id=max_instance_id, connectivity=connectivity
+        mask, min_instance_area=min_instance_area,
+        max_instance_id=max_instance_id, connectivity=connectivity,
     )
 
     n_ferrite = sum(1 for v in class_map.values() if v == 1)
@@ -150,7 +162,7 @@ def predict_single_image(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="低碳钢金相分割推理")
+    parser = argparse.ArgumentParser(description="低碳钢金相分割推理 (双任务距离场版本)")
     parser.add_argument("--config", type=str, default="config/default_config.yaml")
     parser.add_argument("--checkpoint", type=str, default="outputs/best_model.pth")
     parser.add_argument("--test_dir", type=str, default=None)
@@ -204,6 +216,7 @@ def main():
             connectivity=post_cfg["connectivity"],
             interpolate_mode=post_cfg["interpolate_mode"],
             align_corners=post_cfg["align_corners"],
+            threshold=infer_cfg.get("threshold", 0.5),
             output_dir=output_dir,
             save_visualization=True,
         )
