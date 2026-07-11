@@ -1,39 +1,48 @@
 # -*- coding: utf-8 -*-
 """
-距离场双任务损失
-================
-二分类掩码 BCE 损失 + 连续距离场 MSE 损失的静态加权组合。
+自适应距离场双任务损失
+======================
+批次自适应反比加权 BCE + 二分类 Dice + 连续距离场 MSE 回归。
 
 任务设计：
-- 通道 0（分类分支）：原始 logits，送入 BCEWithLogitsLoss
+- 通道 0（分类分支）：原始 logits，送入动态加权 BCE + Dice
 - 通道 1（回归分支）：经 Sigmoid 的预测距离场，送入 MSELoss
 
-静态权重 1:5（回归损失通常数值偏小，给予更大权重）。
+分类总损失 = loss_bce + 2.0 * loss_dice
+双任务刚性绑定 = loss_seg + 5.0 * loss_dist
 """
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
-class DistanceFieldLoss(nn.Module):
+class AdaptiveDistanceFieldLoss(nn.Module):
     """
-    双任务静态混合损失：BCE 分类 + MSE 距离场回归。
+    批次自适应反比加权 + Dice 混合的双任务损失。
 
     pred[:, 0] 为分类 logits，target[:, 0] 为二值掩码 (0/1)。
     pred[:, 1] 为经 Sigmoid 的预测距离场 [0,1]，target[:, 1] 为真实距离场 [0,1]。
 
-    总损失 = loss_seg + dist_weight * loss_dist
+    分类分支：
+    - 动态计算当前 Batch 内正负样本比例，生成 pos_weight 因子
+    - pos_weight = clamp(num_neg / num_pos, 1.0, 15.0)
+    - loss_seg = loss_bce(pos_weight) + 2.0 * loss_dice
+
+    回归分支：
+    - loss_dist = MSE(pred[:, 1], target[:, 1])
+
+    总损失 = loss_seg + 5.0 * loss_dist
     """
 
-    def __init__(self, dist_weight: float = 5.0):
+    def __init__(self, eps=1e-6):
         """
         Args:
-            dist_weight: 距离场回归损失的权重（默认 5.0）。
+            eps: 数值稳定常数，防止分母为零。
         """
-        super().__init__()
-        self.bce = nn.BCEWithLogitsLoss()
+        super(AdaptiveDistanceFieldLoss, self).__init__()
         self.mse = nn.MSELoss()
-        self.dist_weight = dist_weight
+        self.eps = eps
 
     def forward(self, pred, target):
         """
@@ -46,19 +55,41 @@ class DistanceFieldLoss(nn.Module):
                     - target[:, 1] 为归一化距离场 [0,1]
 
         Returns:
-            dict: {
-                "total": 总损失,
-                "seg": 分类损失,
-                "dist": 距离场回归损失,
-            }
+            tuple: (total_loss, loss_seg_value, loss_dist_value)
         """
-        loss_seg = self.bce(pred[:, 0], target[:, 0])
+        # pred[:, 0]: 分类 Logits, target[:, 0]: 二值掩码 (0/1)
+        # pred[:, 1]: 经过 Sigmoid 的预测距离场, target[:, 1]: 真实距离场 (0~1)
+
+        # 1. 动态计算当前 Batch 的自适应正样本权重
+        num_neg = (target[:, 0] == 0).sum().float()
+        num_pos = (target[:, 0] == 1).sum().float()
+
+        # 计算背景与正样本的像素比率，以对抗样本间的面积比例波动
+        pos_weight_factor = (num_neg + self.eps) / (num_pos + self.eps)
+
+        # 实施数值截断限制，防止极端稀疏样本下权重过大引发数值不稳定
+        pos_weight_factor = torch.clamp(pos_weight_factor, min=1.0, max=15.0)
+
+        # 2. 计算动态加权二元交叉熵损失
+        loss_bce = F.binary_cross_entropy_with_logits(
+            pred[:, 0],
+            target[:, 0],
+            pos_weight=pos_weight_factor.to(pred.device)
+        )
+
+        # 3. 计算区域尺度不变的二分类 Dice 损失
+        pred_seg_prob = torch.sigmoid(pred[:, 0])
+        intersection = (pred_seg_prob * target[:, 0]).sum()
+        union = pred_seg_prob.sum() + target[:, 0].sum()
+        loss_dice = 1.0 - (2.0 * intersection + self.eps) / (union + self.eps)
+
+        # 聚合分类分支总损失
+        loss_seg = loss_bce + 2.0 * loss_dice
+
+        # 4. 计算回归分支损失
         loss_dist = self.mse(pred[:, 1], target[:, 1])
 
-        total = loss_seg + self.dist_weight * loss_dist
+        # 双任务刚性绑定
+        total_loss = loss_seg + 5.0 * loss_dist
 
-        return {
-            "total": total,
-            "seg": loss_seg.item(),
-            "dist": loss_dist.item(),
-        }
+        return total_loss, loss_seg.item(), loss_dist.item()

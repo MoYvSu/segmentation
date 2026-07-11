@@ -42,7 +42,7 @@ import yaml
 from data.dataset import MetallographicDataset, collate_fn
 from models.fpn_decoder import FPNDecoder, SegmentationModel
 from models.sam2_encoder import SAM2Encoder
-from utils.loss import DistanceFieldLoss
+from utils.loss import AdaptiveDistanceFieldLoss
 from utils.metrics import SegMetrics
 from utils.post_process import output_to_binary_mask
 
@@ -194,11 +194,11 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, grad_cl
         if use_amp:
             with autocast():
                 output = model(images, output_size=targets.shape[-2:])
-                loss_dict = criterion(output, targets)
-            scaler.scale(loss_dict["total"]).backward()
+                total_loss_t, seg_val, dist_val = criterion(output, targets)
+            scaler.scale(total_loss_t).backward()
 
             # 动态梯度裁剪：检测 loss 异常
-            current_loss = loss_dict["total"].item()
+            current_loss = total_loss_t.item()
             effective_clip = grad_clip
             if len(loss_history) > 0:
                 avg_loss = sum(loss_history) / len(loss_history)
@@ -213,11 +213,11 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, grad_cl
             scaler.update()
         else:
             output = model(images, output_size=targets.shape[-2:])
-            loss_dict = criterion(output, targets)
-            loss_dict["total"].backward()
+            total_loss_t, seg_val, dist_val = criterion(output, targets)
+            total_loss_t.backward()
 
             # 动态梯度裁剪
-            current_loss = loss_dict["total"].item()
+            current_loss = total_loss_t.item()
             effective_clip = grad_clip
             if len(loss_history) > 0:
                 avg_loss = sum(loss_history) / len(loss_history)
@@ -229,14 +229,14 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, grad_cl
                 torch.nn.utils.clip_grad_norm_(clip_params, effective_clip)
             optimizer.step()
 
-        loss_history.append(loss_dict["total"].item())
-        total_loss += loss_dict["total"].item()
-        total_seg += loss_dict["seg"]
-        total_dist += loss_dict["dist"]
+        loss_history.append(total_loss_t.item())
+        total_loss += total_loss_t.item()
+        total_seg += seg_val
+        total_dist += dist_val
         n_batches += 1
 
         if (batch_idx + 1) % 10 == 0:
-            logger.info(f"  Batch {batch_idx + 1}/{len(loader)}: loss={loss_dict['total'].item():.4f} seg={loss_dict['seg']:.4f} dist={loss_dict['dist']:.4f}")
+            logger.info(f"  Batch {batch_idx + 1}/{len(loader)}: loss={total_loss_t.item():.4f} seg={seg_val:.4f} dist={dist_val:.4f}")
 
     return {
         "loss": total_loss / n_batches,
@@ -256,8 +256,8 @@ def validate(model, loader, criterion, device):
         images = batch["image"].to(device)
         targets = batch["target"].to(device)
         output = model(images, output_size=targets.shape[-2:])
-        loss_dict = criterion(output, targets)
-        total_loss += loss_dict["total"].item()
+        total_loss_t, _, _ = criterion(output, targets)
+        total_loss += total_loss_t.item()
         n_batches += 1
 
         # 从分类 logits 通道提取二值预测
@@ -297,12 +297,11 @@ def main():
 
     train_loader, val_loader = build_dataloaders(config)
 
-    # 双任务静态损失：BCE + 5*MSE
-    dist_weight = train_cfg.get("dist_weight", 5.0)
-    criterion = DistanceFieldLoss(dist_weight=dist_weight).to(device)
-    logger.info(f"损失函数: DistanceFieldLoss (BCE + {dist_weight}*MSE)")
+    # 批次自适应反比加权 + Dice 混合双任务损失
+    criterion = AdaptiveDistanceFieldLoss().to(device)
+    logger.info("损失函数: AdaptiveDistanceFieldLoss (动态加权BCE + 2*Dice + 5*MSE)")
 
-    # 仅解码器参数（DistanceFieldLoss 无可学习参数）
+    # 仅解码器参数（AdaptiveDistanceFieldLoss 无可学习参数）
     optimizer = torch.optim.AdamW(
         model.decoder.parameters(),
         lr=train_cfg["learning_rate"],
@@ -346,7 +345,6 @@ def main():
     logger.info(f"  Epochs: {train_cfg['epochs']}")
     logger.info(f"  Batch size: {config['data']['batch_size']}")
     logger.info(f"  Learning rate: {train_cfg['learning_rate']}")
-    logger.info(f"  Dist weight: {dist_weight}")
     logger.info("=" * 60)
 
     for epoch in range(start_epoch, train_cfg["epochs"]):
