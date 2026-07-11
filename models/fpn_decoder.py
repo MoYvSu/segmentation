@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-自研轻量级 FPN 解码头
-====================
+增强型 FPN 解码头（残差连接 + 语义平滑头）
+=========================================
 完全随机初始化的特征金字塔解码头，禁止加载任何 SAM 2 原生 Mask Decoder 权重。
 
 设计：
-1. 通过 1*1 卷积将 SAM 2 trunk 提取的四个尺度特征统一对齐到相同通道数（如 128 或 256）。
-2. 自上而下通过双线性插值融合（从最低分辨率 Stage 4 逐步上采样与高层分辨率融合）。
-3. 在最高分辨率特征图上通过 3*3 卷积输出通道数固定为 3 的 logits
+1. 通过 1*1 卷积将 SAM 2 trunk 提取的四个尺度特征统一对齐到 256 维。
+2. 每个尺度挂载标准残差卷积块（Residual Block），增强非线性拟合能力。
+3. 自上而下通过双线性插值融合（从最低分辨率 Stage 4 逐步上采样与高层分辨率融合）。
+4. 融合后在最高分辨率特征图上追加两层语义平滑头，再输出 3 通道 logits
    （0=珠光体, 1=铁素体核, 2=晶界）。
 
 输入约定：features = [feat_s1, feat_s2, feat_s3, feat_s4]
@@ -23,17 +24,53 @@ import torch.nn.functional as F
 from typing import List, Optional
 
 
+class ResidualBlock(nn.Module):
+    """
+    标准残差卷积块：两层 3*3 Conv + BatchNorm + ReLU + Identity Shortcut。
+
+    结构：
+        input
+          ├── Conv3x3 → BN → ReLU → Conv3x3 → BN ──┐
+          └──────────── Identity ─────────────────────┘──→ ReLU → output
+    """
+
+    def __init__(self, channels: int, norm_layer=None):
+        """
+        Args:
+            channels: 输入/输出通道数（恒等映射要求输入输出同维）。
+            norm_layer: 归一化层，默认 BatchNorm2d。
+        """
+        super().__init__()
+        if norm_layer is None:
+            norm_layer = nn.BatchNorm2d
+
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
+        self.bn1 = norm_layer(channels)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
+        self.bn2 = norm_layer(channels)
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        identity = x
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out = out + identity
+        out = self.relu(out)
+        return out
+
+
 class FPNDecoder(nn.Module):
     """
-    轻量级全卷积 FPN 解码头（随机初始化）。
+    增强型 FPN 解码头（残差连接 + 语义平滑头）。
 
-    参数量极小（远小于 SAM 2 原生 Mask Decoder），确保总参数量 < 500M。
+    通过残差块增强非线性拟合容量，解决小样本梯度瘫痪问题。
+    参数量约 6.3M（fpn_channels=256）。
     """
 
     def __init__(
         self,
         in_channels: Optional[List[int]] = None,
-        fpn_channels: int = 128,
+        fpn_channels: int = 256,
         num_classes: int = 3,
         dropout: float = 0.1,
         use_bn: bool = True,
@@ -42,7 +79,7 @@ class FPNDecoder(nn.Module):
         Args:
             in_channels: 各 Stage 输入通道数列表，从高分辨率到低分辨率。
                          默认 [112, 224, 448, 896]（Hiera base+）。
-            fpn_channels: FPN 统一通道数。
+            fpn_channels: FPN 统一通道数（默认 256）。
             num_classes: 输出类别数（三分类：0=珠光体, 1=铁素体核, 2=晶界）。
             dropout: dropout 概率。
             use_bn: 是否使用 BatchNorm。
@@ -64,32 +101,30 @@ class FPNDecoder(nn.Module):
         self.lateral_convs = nn.ModuleList()
         for ch in in_channels:
             self.lateral_convs.append(
-                nn.Sequential(
-                    nn.Conv2d(ch, fpn_channels, kernel_size=1, bias=False),
-                    norm_layer(fpn_channels),
-                    nn.ReLU(inplace=True),
-                )
+                nn.Conv2d(ch, fpn_channels, kernel_size=1, bias=False)
             )
 
-        # 3*3 平滑卷积（融合后平滑）
-        self.smooth_convs = nn.ModuleList()
-        for _ in range(self.num_stages - 1):
-            self.smooth_convs.append(
-                nn.Sequential(
-                    nn.Conv2d(fpn_channels, fpn_channels, kernel_size=3, padding=1, bias=False),
-                    norm_layer(fpn_channels),
-                    nn.ReLU(inplace=True),
-                )
+        # 残差块：每个尺度投影后挂载一个 ResidualBlock
+        self.residual_blocks = nn.ModuleList()
+        for _ in range(self.num_stages):
+            self.residual_blocks.append(
+                ResidualBlock(fpn_channels, norm_layer=norm_layer) if use_bn
+                else ResidualBlock(fpn_channels, norm_layer=nn.Identity)
             )
 
-        # 输出头：在最高分辨率特征图上输出 num_classes 通道 logits
-        self.output_head = nn.Sequential(
+        # 语义平滑头：融合到最高分辨率后，两层 3*3 Conv + BN + ReLU
+        self.semantic_head = nn.Sequential(
             nn.Conv2d(fpn_channels, fpn_channels, kernel_size=3, padding=1, bias=False),
-            norm_layer(fpn_channels),
+            norm_layer(fpn_channels) if use_bn else nn.Identity(),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(fpn_channels, fpn_channels, kernel_size=3, padding=1, bias=False),
+            norm_layer(fpn_channels) if use_bn else nn.Identity(),
             nn.ReLU(inplace=True),
             nn.Dropout2d(dropout) if dropout > 0 else nn.Identity(),
-            nn.Conv2d(fpn_channels, num_classes, kernel_size=1, bias=True),
         )
+
+        # 输出层：1*1 卷积输出 num_classes 通道 logits
+        self.output_head = nn.Conv2d(fpn_channels, num_classes, kernel_size=1, bias=True)
 
         self._init_weights()
 
@@ -106,7 +141,7 @@ class FPNDecoder(nn.Module):
 
     def forward(self, features, output_size=None):
         """
-        前向传播：FPN 自上而下融合 + 输出三分类 logits。
+        前向传播：FPN 横向投影 + 残差块 + 自上而下融合 + 语义平滑头 + 输出。
 
         Args:
             features: [feat_s1, feat_s2, feat_s3, feat_s4]
@@ -121,10 +156,13 @@ class FPNDecoder(nn.Module):
             f"期望 {self.num_stages} 个尺度特征，实际得到 {len(features)}"
         )
 
-        # Step 1: 横向 1*1 卷积对齐通道
-        laterals = [self.lateral_convs[i](features[i]) for i in range(self.num_stages)]
+        # Step 1: 横向 1*1 卷积对齐通道 + 残差块
+        laterals = []
+        for i in range(self.num_stages):
+            proj = self.lateral_convs[i](features[i])
+            laterals.append(self.residual_blocks[i](proj))
 
-        # Step 2: 自上而下融合
+        # Step 2: 自上而下融合（双线性插值 + 逐元素相加）
         top_down = laterals[-1]
         for i in range(self.num_stages - 2, -1, -1):
             top_down = F.interpolate(
@@ -133,14 +171,15 @@ class FPNDecoder(nn.Module):
                 mode="bilinear",
                 align_corners=True,
             )
-            fused = top_down + laterals[i]
-            smooth_idx = self.num_stages - 2 - i
-            top_down = self.smooth_convs[smooth_idx](fused)
+            top_down = top_down + laterals[i]
 
-        # Step 3: 输出头
-        logits = self.output_head(top_down)
+        # Step 3: 语义平滑头
+        semantic = self.semantic_head(top_down)
 
-        # Step 4: 动态上采样到指定尺寸（推理时对齐原图）
+        # Step 4: 输出头
+        logits = self.output_head(semantic)
+
+        # Step 5: 动态上采样到指定尺寸（推理时对齐原图）
         if output_size is not None:
             logits = F.interpolate(
                 logits,

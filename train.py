@@ -60,13 +60,12 @@ def load_config(config_path):
 class CombinedLoss(nn.Module):
     """组合损失：交叉熵 + Dice + 边界感知损失。"""
 
-    def __init__(self, ce_weight=1.0, dice_weight=0.5, boundary_weight=0.3, num_classes=3):
+    def __init__(self, ce_weight=1.0, dice_weight=0.5, boundary_weight=0.3, num_classes=3, class_weights=None):
         super().__init__()
         self.ce_weight = ce_weight
         self.dice_weight = dice_weight
         self.boundary_weight = boundary_weight
         self.num_classes = num_classes
-        class_weights = torch.tensor([1.0, 1.0, 3.0])
         self.ce_loss = nn.CrossEntropyLoss(weight=class_weights, ignore_index=255)
 
     def dice_loss(self, logits, target):
@@ -306,11 +305,17 @@ def main():
     train_loader, val_loader = build_dataloaders(config)
 
     loss_weights = train_cfg["loss_weights"]
+
+    # 显式提取配置中的类别平衡权重，若配置中不存在，默认采用 [1.0, 1.0, 10.0]
+    raw_class_weights = train_cfg.get("class_weights", [1.0, 1.0, 10.0])
+    class_weights_tensor = torch.tensor(raw_class_weights, dtype=torch.float32).to(device)
+
     criterion = CombinedLoss(
         ce_weight=loss_weights["ce"],
         dice_weight=loss_weights["dice"],
         boundary_weight=loss_weights["boundary"],
         num_classes=config["decoder"]["num_classes"],
+        class_weights=class_weights_tensor,  # 显式注入类别权重
     ).to(device)
 
     decoder_params = list(model.decoder.parameters())

@@ -1,0 +1,144 @@
+# =============================================================================
+# 低碳钢金相图像无监督相区分割 - 全局配置
+# =============================================================================
+# python 环境: conda activate sam2_env
+
+# -----------------------------------------------------------------------------
+# 路径配置
+# -----------------------------------------------------------------------------
+paths:
+  # 项目根目录（自动推断为本文件上级目录）
+  project_root: &project_root "d:/MY_PROGRAMME/segmentationv2"
+  # 原始数据目录：存放图像与同名 labelme .json
+  raw_data_dir: "data/raw"
+  # 本地权重目录：所有第三方权重必须放在此目录下（禁止依赖 ~/.cache）
+  weights_dir: "weights"
+  # SAM 2 底座权重文件名
+  sam2_ckpt: "sam2_hiera_base_plus.pt"
+  # 训练输出目录
+  output_dir: "outputs"
+  # 伪标签输出目录
+  pseudo_label_dir: "outputs/pseudo_labels"
+  # 主动学习筛选记录
+  active_learning_log: "outputs/active_learning_log.csv"
+
+# -----------------------------------------------------------------------------
+# SAM 2 Encoder 配置
+# -----------------------------------------------------------------------------
+sam2:
+  # 模型版本：sam2_hiera_base_plus / sam2_hiera_large
+  model_version: "sam2_hiera_base_plus"
+  # Hydra 配置文件名（相对 sam2 包 configs 目录）
+  config_file: "configs/sam2/sam2_hiera_b+.yaml"
+  # 设备
+  device: "cuda"
+  # 显式冻结 encoder
+  freeze: true
+  # 本地 segment-anything-2 仓库路径（用于 import sam2）
+  sam2_repo_path: "segment-anything-2"
+
+# -----------------------------------------------------------------------------
+# FPN 解码头配置（随机初始化，禁止加载 SAM 原生 Mask Decoder）
+# -----------------------------------------------------------------------------
+decoder:
+  # FPN 统一通道数（增强型：残差块 + 语义平滑头，参数量 ~6.3M）
+  fpn_channels: 256
+  # 输出类别数：0=珠光体, 1=铁素体核, 2=晶界
+  num_classes: 3
+  # 是否使用 dropout
+  dropout: 0.1
+  # 是否使用批量归一化
+  use_bn: true
+
+# -----------------------------------------------------------------------------
+# 数据管道配置
+# -----------------------------------------------------------------------------
+data:
+  # 输入图像长边目标尺寸（Letterbox）
+  image_size: 1024
+  # 铁素体晶界收缩像素数（erode kernel size）
+  erode_pixels: 2
+  # 类别定义
+  classes:
+    0: "pearlite"      # 珠光体
+    1: "ferrite_core"  # 铁素体核
+    2: "grain_boundary" # 晶界
+  # 训练集占比
+  train_ratio: 0.8
+  # 随机种子
+  seed: 42
+  # DataLoader 参数
+  batch_size: 4
+  num_workers: 4
+  # 数据增强
+  augmentation:
+    horizontal_flip: true
+    vertical_flip: true
+    rotation: true
+
+# -----------------------------------------------------------------------------
+# 训练配置
+# -----------------------------------------------------------------------------
+train:
+  # 初始学习率
+  learning_rate: 3.0e-4
+  # 权重衰减
+  weight_decay: 1.0e-5
+  # 训练轮数
+  epochs: 500
+  # 学习率调度器
+  scheduler: "cosine"
+  # warmup 轮数
+  warmup_epochs: 5
+  # 梯度裁剪
+  grad_clip: 0.5
+  # 混合精度训练
+  amp: true
+  # 损失函数权重
+  loss_weights:
+    ce: 1.0       # 交叉熵
+    dice: 0.5     # Dice
+    boundary: 0.3 # 边界感知损失
+  # 显式类别权重分配（0=珠光体, 1=铁素体核, 2=铁素体晶界）
+  # 适度加权晶界，配合增强型解码头的非线性容量
+  class_weights: [1.0, 1.0, 3.5]
+  # 保留checkpoints
+  save_checkpoints: true
+
+# -----------------------------------------------------------------------------
+# 推理配置
+# -----------------------------------------------------------------------------
+inference:
+  # 测试图像目录
+  test_dir: "data/test"
+  # 输出目录
+  output_dir: "outputs/inference"
+  # 拓扑后处理最小实例面积过滤（像素）
+  min_instance_area: 50
+  # 实例 ID 上限（uint8）
+  max_instance_id: 255
+
+# -----------------------------------------------------------------------------
+# 主动学习配置
+# -----------------------------------------------------------------------------
+active_learning:
+  # 采样策略：entropy / boundary_variance
+  strategy: "entropy"
+  # 每轮采样数量
+  sample_size: 10
+  # 信息熵阈值
+  entropy_threshold: 0.5
+  # 边界方差阈值
+  boundary_variance_threshold: 0.1
+
+# -----------------------------------------------------------------------------
+# 后处理配置
+# -----------------------------------------------------------------------------
+post_process:
+  # 动态上采样插值模式
+  interpolate_mode: "bilinear"
+  align_corners: true
+  # 连通域分析参数
+  connectivity: 8
+  # 噪点面积过滤
+  min_noise_area: 50
