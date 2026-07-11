@@ -1,15 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Test inference entry (dual-task distance field - multi-resolution adaptive)
+Test inference entry (dual-task distance field - unified letterbox)
 =============================================================================
 Load trained FPN decoder weights, run inference on test images,
 perform full post-processing (upsample + threshold + distance compensation +
 watershed topo separation + instance ID assignment).
 
-Multi-resolution adaptive inference:
-- Case A (max dim <= tile_threshold): Letterbox to 1024x1024, single forward.
-- Case B (max dim > tile_threshold): Tiled inference (1024 window, 512 stride),
-  Gaussian weight blending for seamless stitching.
+All images are processed via Letterbox to 1024x1024 (same as training),
+ensuring consistent preprocessing between train and inference.
 """
 
 import argparse
@@ -39,7 +37,6 @@ from utils.post_process import (
     output_to_distance_field,
     topo_instance_separation,
     compensate_distance_field,
-    gaussian_weight_map,
 )
 
 logging.basicConfig(
@@ -99,83 +96,23 @@ def build_model(config, device, checkpoint_path=None):
     return model
 
 
-# ---------------------------------------------------------------------------
-# Multi-resolution adaptive inference
-# ---------------------------------------------------------------------------
-
-def predict_single_patch(model, image_patch, device):
-    """Forward pass on a single 1024x1024 patch."""
-    image_tensor = torch.from_numpy(image_patch).float().permute(2, 0, 1).unsqueeze(0) / 255.0
-    image_tensor = image_tensor.to(device)
-    with torch.no_grad():
-        output = model(image_tensor)
-    return output
-
-
-def tiled_inference(model, image, device, tile_size=1024, stride=512):
-    """Sliding window tiled inference with Gaussian weight blending."""
-    h, w = image.shape[:2]
-    n_channels = 2
-
-    output_sum = torch.zeros((1, n_channels, h, w), dtype=torch.float32)
-    weight_sum = torch.zeros((1, 1, h, w), dtype=torch.float32)
-
-    weight_map = gaussian_weight_map(tile_size)
-    weight_tensor = torch.from_numpy(weight_map).float().unsqueeze(0).unsqueeze(0)
-
-    positions_h = list(range(0, max(1, h - tile_size + 1), stride))
-    if positions_h[-1] + tile_size < h:
-        positions_h.append(h - tile_size)
-    positions_w = list(range(0, max(1, w - tile_size + 1), stride))
-    if positions_w[-1] + tile_size < w:
-        positions_w.append(w - tile_size)
-
-    total_patches = len(positions_h) * len(positions_w)
-    patch_idx = 0
-
-    for top in positions_h:
-        for left in positions_w:
-            patch_idx += 1
-            bottom = min(top + tile_size, h)
-            right = min(left + tile_size, w)
-
-            patch = image[top:bottom, left:right]
-            patch_h, patch_w = patch.shape[:2]
-
-            if patch_h < tile_size or patch_w < tile_size:
-                padded = np.zeros((tile_size, tile_size, 3), dtype=patch.dtype)
-                padded[:patch_h, :patch_w] = patch
-                patch = padded
-
-            output_patch = predict_single_patch(model, patch, device)
-            output_patch = output_patch.cpu()
-            output_patch = output_patch[:, :, :patch_h, :patch_w]
-            weight_patch = weight_tensor[:, :, :patch_h, :patch_w]
-
-            output_sum[:, :, top:bottom, left:right] += output_patch * weight_patch
-            weight_sum[:, :, top:bottom, left:right] += weight_patch
-
-            if patch_idx % 3 == 0 or patch_idx == total_patches:
-                logger.info(f"  Tile {patch_idx}/{total_patches} "
-                            f"(top={top}, left={left}, size={patch_h}x{patch_w})")
-
-    eps = 1e-8
-    output_full = output_sum / (weight_sum + eps)
-    return output_full
-
-
 def predict_single_image(
     model, image_path, device,
     image_size=1024,
     min_instance_area=50, max_instance_id=255, connectivity=8,
     interpolate_mode="bilinear", align_corners=True,
     threshold=0.5,
-    tile_size=1024, tile_stride=512, tile_threshold=1224,
     train_max_dim=2584,
     dist_scale_factor=10.0,
     output_dir=None, save_visualization=True,
 ):
-    """Multi-resolution adaptive inference + post-processing for a single image."""
+    """
+    Unified Letterbox inference + post-processing for a single image.
+
+    All images are Letterboxed to image_size x image_size (same as training),
+    regardless of original dimensions. This ensures the model sees the same
+    preprocessing it was trained on.
+    """
     image = cv2.imread(image_path, cv2.IMREAD_COLOR)
     if image is None:
         raise FileNotFoundError(f"Cannot read image: {image_path}")
@@ -187,25 +124,25 @@ def predict_single_image(
     train_scale = image_size / train_max_dim
     spatial_scale = 1.0 / train_scale
 
-    max_dim = max(h_orig, w_orig)
+    # Letterbox to image_size x image_size (same as training)
+    image_lb, scale, pad_h, pad_w = letterbox(image_rgb, image_size)
+    image_tensor = torch.from_numpy(image_lb).float().permute(2, 0, 1).unsqueeze(0) / 255.0
+    image_tensor = image_tensor.to(device)
 
-    if max_dim <= tile_threshold:
-        logger.info(f"  Case A (letterbox): {h_orig}x{w_orig} <= {tile_threshold}")
-        image_lb, scale, pad_h, pad_w = letterbox(image_rgb, image_size)
-        image_tensor = torch.from_numpy(image_lb).float().permute(2, 0, 1).unsqueeze(0) / 255.0
-        image_tensor = image_tensor.to(device)
-        with torch.no_grad():
-            output = model(image_tensor, output_size=(h_orig, w_orig))
-    else:
-        logger.info(f"  Case B (tiled): {h_orig}x{w_orig} > {tile_threshold}, "
-                    f"tile={tile_size}, stride={tile_stride}")
-        output = tiled_inference(
-            model, image_rgb, device,
-            tile_size=tile_size, stride=tile_stride,
-        )
+    with torch.no_grad():
+        # Forward pass without output_size: get native FPN resolution (image_size//4)
+        output = model(image_tensor)
+
+    # Inverse Letterbox: crop padding from model output, then upsample to original size
+    # FPN native output is image_size//4 (e.g. 256 for 1024 input)
+    out_native = image_size // 4
+    content_h = int(round(h_orig * scale / 4))  # content rows in native resolution
+    content_w = int(round(w_orig * scale / 4))  # content cols in native resolution
+    output = output[:, :, :content_h, :content_w]
+    output = F.interpolate(output, size=(h_orig, w_orig), mode="bilinear", align_corners=True)
 
     if output_dir is not None:
-        output_paths = post_process_prediction(
+        output_paths, inst_map, class_map = post_process_prediction(
             output=output,
             original_size=(h_orig, w_orig),
             output_dir=output_dir,
@@ -222,30 +159,28 @@ def predict_single_image(
             use_watershed=True,
         )
     else:
+        mask = output_to_binary_mask(
+            output, threshold=threshold, original_size=(h_orig, w_orig),
+            mode=interpolate_mode, align_corners=align_corners,
+        )
+        dist_field = output_to_distance_field(
+            output, original_size=(h_orig, w_orig),
+            mode=interpolate_mode, align_corners=align_corners,
+        )
+        dist_field = compensate_distance_field(
+            dist_field,
+            spatial_scale=spatial_scale,
+            scale_factor=dist_scale_factor,
+        )
+        inst_map, class_map = topo_instance_separation(
+            mask,
+            dist_field=dist_field,
+            min_instance_area=min_instance_area,
+            max_instance_id=max_instance_id,
+            connectivity=connectivity,
+            use_watershed=True,
+        )
         output_paths = {}
-
-    mask = output_to_binary_mask(
-        output, threshold=threshold, original_size=(h_orig, w_orig),
-        mode=interpolate_mode, align_corners=align_corners,
-    )
-    dist_field = output_to_distance_field(
-        output, original_size=(h_orig, w_orig),
-        mode=interpolate_mode, align_corners=align_corners,
-    )
-    dist_field = compensate_distance_field(
-        dist_field,
-        spatial_scale=spatial_scale,
-        scale_factor=dist_scale_factor,
-    )
-
-    inst_map, class_map = topo_instance_separation(
-        mask,
-        dist_field=dist_field,
-        min_instance_area=min_instance_area,
-        max_instance_id=max_instance_id,
-        connectivity=connectivity,
-        use_watershed=True,
-    )
 
     n_ferrite = sum(1 for v in class_map.values() if v == 1)
     n_pearlite = sum(1 for v in class_map.values() if v == 0)
@@ -258,16 +193,52 @@ def predict_single_image(
         "num_pearlite": n_pearlite,
         "output_paths": output_paths,
         "spatial_scale": spatial_scale,
-        "case": "A" if max_dim <= tile_threshold else "B",
     }
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Metallographic segmentation inference (multi-resolution)")
-    parser.add_argument("--config", type=str, default="config/default_config.yaml")
-    parser.add_argument("--checkpoint", type=str, default="outputs/best_model.pth")
-    parser.add_argument("--test_dir", type=str, default=None)
-    parser.add_argument("--output_dir", type=str, default=None)
+    parser = argparse.ArgumentParser(
+        description="Metallographic segmentation inference (unified letterbox)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+Examples:
+  # Default: use config paths, run on data/smoketest/
+  python inference.py
+
+  # Specify config and checkpoint
+  python inference.py --config config/default_config.yaml --checkpoint outputs/best_model.pth
+
+  # Custom test images and output directory
+  python inference.py --test_dir data/my_test_images --output_dir outputs/my_results
+
+Output files (per image <basename>):
+  <basename>_inst.png   - Instance map (uint8, 1-255 by descending area)
+  <basename>_class.json - Instance ID -> class mapping (1=ferrite, 0=pearlite)
+  <basename>_mask.png   - Binary mask visualization (green=ferrite, red=pearlite)
+  <basename>_dist.png   - Distance field visualization (grayscale)
+
+Processing:
+  All images are Letterboxed to 1024x1024 (same as training), then a single
+  forward pass is performed. Output is upsampled to original resolution for
+  post-processing (threshold + distance compensation + watershed separation).
+""",
+    )
+    parser.add_argument(
+        "--config", type=str, default="config/default_config.yaml",
+        help="Path to YAML config file (default: config/default_config.yaml)",
+    )
+    parser.add_argument(
+        "--checkpoint", type=str, default="outputs/best_model.pth",
+        help="Path to trained decoder checkpoint .pth file (default: outputs/best_model.pth)",
+    )
+    parser.add_argument(
+        "--test_dir", type=str, default=None,
+        help="Directory containing test images (default: from config inference.test_dir)",
+    )
+    parser.add_argument(
+        "--output_dir", type=str, default=None,
+        help="Directory for output files (default: from config inference.output_dir)",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -319,9 +290,6 @@ def main():
             interpolate_mode=post_cfg["interpolate_mode"],
             align_corners=post_cfg["align_corners"],
             threshold=infer_cfg.get("threshold", 0.5),
-            tile_size=infer_cfg.get("tile_size", 1024),
-            tile_stride=infer_cfg.get("tile_stride", 512),
-            tile_threshold=infer_cfg.get("tile_threshold", 1224),
             train_max_dim=infer_cfg.get("train_max_dim", 2584),
             dist_scale_factor=data_cfg.get("dist_scale_factor", 10.0),
             output_dir=output_dir,
@@ -334,7 +302,6 @@ def main():
 
         logger.info(
             f"  Done ({elapsed:.2f}s): "
-            f"Case={result['case']} "
             f"instances={result['num_instances']} "
             f"(ferrite={result['num_ferrite']}, pearlite={result['num_pearlite']}) "
             f"spatial_scale={result['spatial_scale']:.4f}"

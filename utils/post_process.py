@@ -305,7 +305,7 @@ def post_process_prediction(
     dist_scale_factor: float = 10.0,
     spatial_scale: float = 1.0,
     use_watershed: bool = True,
-) -> Dict[str, str]:
+) -> Tuple[Dict[str, str], np.ndarray, Dict[int, int]]:
     """
     Full post-processing pipeline:
     1. Upsample to original size
@@ -360,4 +360,5 @@ def post_process_prediction(
         cv2.imwrite(dist_path, dist_vis)
         output_paths["dist_path"] = dist_path
 
-    return output_paths
+    # Return inst_map and class_map so callers can reuse without re-computing
+    return output_paths, inst_map, class_map
