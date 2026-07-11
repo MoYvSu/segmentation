@@ -57,7 +57,7 @@ data:
   # 输入图像长边目标尺寸（Letterbox）
   image_size: 1024
   # 铁素体晶界收缩像素数（erode kernel size）
-  erode_pixels: 2
+  erode_pixels: 5
   # 类别定义
   classes:
     0: "pearlite"      # 珠光体

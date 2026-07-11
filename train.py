@@ -22,6 +22,7 @@
 """
 
 import argparse
+import itertools
 import logging
 import os
 import sys
@@ -57,16 +58,25 @@ def load_config(config_path):
         return yaml.safe_load(f)
 
 
-class CombinedLoss(nn.Module):
-    """组合损失：交叉熵 + Dice + 边界感知损失。"""
+class DynamicCombinedLoss(nn.Module):
+    """动态组合损失：基于 Uncertainty Weights 的交叉熵 + Dice + 边界感知损失。
 
-    def __init__(self, ce_weight=1.0, dice_weight=0.5, boundary_weight=0.3, num_classes=3, class_weights=None):
+    引入三个可学习的对数方差参数 (log σ²)，通过 Uncertainty Weights 公式
+    自动平衡多任务损失权重，打破静态权重的局限。
+
+    公式: Loss = Σ [exp(-log_var_i) * raw_loss_i + 0.5 * log_var_i]
+
+    当某项损失完全不下降时，网络会自动调整 log_var 以改变梯度权重，
+    从而放大未收敛通道的梯度惩罚，将模型拉出死锁区。
+    """
+
+    def __init__(self, num_classes=3, class_weights=None):
         super().__init__()
-        self.ce_weight = ce_weight
-        self.dice_weight = dice_weight
-        self.boundary_weight = boundary_weight
         self.num_classes = num_classes
         self.ce_loss = nn.CrossEntropyLoss(weight=class_weights, ignore_index=255)
+
+        # 三个可学习的对数方差参数，初始值 0.0（对应权重 exp(0)=1.0）
+        self.log_vars = nn.Parameter(torch.zeros(3, dtype=torch.float32))
 
     def dice_loss(self, logits, target):
         """
@@ -80,7 +90,7 @@ class CombinedLoss(nn.Module):
         eps = 1e-7
 
         # 仅计算类别 1 和类别 2 的 Dice 损失
-        total_loss = 0.0
+        total_loss = torch.tensor(0.0, device=logits.device)
         for cls in [1, 2]:
             intersection = (probs[:, cls] * target_onehot[:, cls]).sum()
             denom = probs[:, cls].sum() + target_onehot[:, cls].sum()
@@ -105,8 +115,27 @@ class CombinedLoss(nn.Module):
         ce = self.ce_loss(logits, target)
         dice = self.dice_loss(logits, target)
         boundary = self.boundary_loss(logits, target)
-        total = self.ce_weight * ce + self.dice_weight * dice + self.boundary_weight * boundary
-        return {"total": total, "ce": ce.item(), "dice": dice.item(), "boundary": boundary.item()}
+
+        # Uncertainty Weights 动态加权
+        # 当某项损失不下降时，log_var 增大 → exp(-log_var) 减小 → 该任务梯度被压制
+        # 同时 0.5*log_var 作为正则项，防止 log_var 无限增大
+        w_ce = torch.exp(-self.log_vars[0])
+        w_dice = torch.exp(-self.log_vars[1])
+        w_boundary = torch.exp(-self.log_vars[2])
+
+        total = (w_ce * ce + 0.5 * self.log_vars[0]) + \
+                (w_dice * dice + 0.5 * self.log_vars[1]) + \
+                (w_boundary * boundary + 0.5 * self.log_vars[2])
+
+        return {
+            "total": total,
+            "ce": ce.item(),
+            "dice": dice.item(),
+            "boundary": boundary.item(),
+            "w_ce": w_ce.item(),
+            "w_dice": w_dice.item(),
+            "w_boundary": w_boundary.item(),
+        }
 
 
 def build_model(config, device):
@@ -226,10 +255,16 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, grad_cl
     total_ce = 0.0
     total_dice = 0.0
     total_boundary = 0.0
+    total_w_ce = 0.0
+    total_w_dice = 0.0
+    total_w_boundary = 0.0
     n_batches = 0
 
     # 动态梯度裁剪：追踪历史 loss，检测异常突变
     loss_history = []
+
+    # 梯度裁剪参数：解码器 + 损失函数可学习参数
+    clip_params = list(itertools.chain(model.decoder.parameters(), criterion.parameters()))
 
     for batch_idx, batch in enumerate(loader):
         images = batch["image"].to(device)
@@ -254,7 +289,7 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, grad_cl
 
             if effective_clip > 0:
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.decoder.parameters(), effective_clip)
+                torch.nn.utils.clip_grad_norm_(clip_params, effective_clip)
             scaler.step(optimizer)
             scaler.update()
         else:
@@ -272,7 +307,7 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, grad_cl
                     logger.warning(f"  ⚠ 梯度突变检测: loss={current_loss:.4f} avg={avg_loss:.4f} → grad_clip {grad_clip}→{effective_clip}")
 
             if effective_clip > 0:
-                torch.nn.utils.clip_grad_norm_(model.decoder.parameters(), effective_clip)
+                torch.nn.utils.clip_grad_norm_(clip_params, effective_clip)
             optimizer.step()
 
         loss_history.append(loss_dict["total"].item())
@@ -280,16 +315,22 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, grad_cl
         total_ce += loss_dict["ce"]
         total_dice += loss_dict["dice"]
         total_boundary += loss_dict["boundary"]
+        total_w_ce += loss_dict["w_ce"]
+        total_w_dice += loss_dict["w_dice"]
+        total_w_boundary += loss_dict["w_boundary"]
         n_batches += 1
 
         if (batch_idx + 1) % 10 == 0:
-            logger.info(f"  Batch {batch_idx + 1}/{len(loader)}: loss={loss_dict['total'].item():.4f} ce={loss_dict['ce']:.4f} dice={loss_dict['dice']:.4f} boundary={loss_dict['boundary']:.4f}")
+            logger.info(f"  Batch {batch_idx + 1}/{len(loader)}: loss={loss_dict['total'].item():.4f} ce={loss_dict['ce']:.4f} dice={loss_dict['dice']:.4f} boundary={loss_dict['boundary']:.4f} | w_ce={loss_dict['w_ce']:.4f} w_dice={loss_dict['w_dice']:.4f} w_boundary={loss_dict['w_boundary']:.4f}")
 
     return {
         "loss": total_loss / n_batches,
         "ce": total_ce / n_batches,
         "dice": total_dice / n_batches,
         "boundary": total_boundary / n_batches,
+        "w_ce": total_w_ce / n_batches,
+        "w_dice": total_w_dice / n_batches,
+        "w_boundary": total_w_boundary / n_batches,
     }
 
 
@@ -340,24 +381,25 @@ def main():
 
     train_loader, val_loader = build_dataloaders(config)
 
-    loss_weights = train_cfg["loss_weights"]
-
     # 显式提取配置中的类别平衡权重，若配置中不存在，默认采用 [1.0, 1.0, 10.0]
     raw_class_weights = train_cfg.get("class_weights", [1.0, 1.0, 10.0])
     class_weights_tensor = torch.tensor(raw_class_weights, dtype=torch.float32).to(device)
 
-    criterion = CombinedLoss(
-        ce_weight=loss_weights["ce"],
-        dice_weight=loss_weights["dice"],
-        boundary_weight=loss_weights["boundary"],
+    # 使用 Uncertainty Weights 动态多任务损失
+    criterion = DynamicCombinedLoss(
         num_classes=config["decoder"]["num_classes"],
-        class_weights=class_weights_tensor,  # 显式注入类别权重
+        class_weights=class_weights_tensor,  # CE 内部仍使用类别权重
     ).to(device)
 
-    decoder_params = list(model.decoder.parameters())
+    # 将解码器参数和损失函数的可学习参数联合送入优化器
+    # 动态权重使用稍大的学习率（1e-3）以快速纠偏
+    trainable_params = [
+        {"params": model.decoder.parameters()},
+        {"params": criterion.parameters(), "lr": 1.0e-3},
+    ]
     # AdamW eps 放大至 1e-4，防止混合精度下分母过小导致数值爆炸
     optimizer = torch.optim.AdamW(
-        decoder_params,
+        trainable_params,
         lr=train_cfg["learning_rate"],
         weight_decay=train_cfg["weight_decay"],
         eps=1e-4,
@@ -412,6 +454,7 @@ def main():
         epoch_time = time.time() - epoch_start
         logger.info(f"Epoch {epoch + 1} 完成 ({epoch_time:.1f}s)")
         logger.info(f"  Train Loss: {train_metrics['loss']:.4f} (ce={train_metrics['ce']:.4f}, dice={train_metrics['dice']:.4f}, boundary={train_metrics['boundary']:.4f})")
+        logger.info(f"  动态权重: w_ce={train_metrics['w_ce']:.4f} w_dice={train_metrics['w_dice']:.4f} w_boundary={train_metrics['w_boundary']:.4f}")
         logger.info(f"  Val Loss: {val_metrics['loss']:.4f} | Val mIoU: {val_metrics['mean_iou']:.4f} | Val mDice: {val_metrics['mean_dice']:.4f}")
 
         if val_metrics["mean_iou"] > best_val_iou:
