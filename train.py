@@ -216,6 +216,9 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, grad_cl
     total_boundary = 0.0
     n_batches = 0
 
+    # 动态梯度裁剪：追踪历史 loss，检测异常突变
+    loss_history = []
+
     for batch_idx, batch in enumerate(loader):
         images = batch["image"].to(device)
         masks = batch["mask"].to(device)
@@ -227,19 +230,40 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, grad_cl
                 logits = model(images, output_size=masks.shape[-2:])
                 loss_dict = criterion(logits, masks)
             scaler.scale(loss_dict["total"]).backward()
-            if grad_clip > 0:
+
+            # 动态梯度裁剪：检测 loss 异常
+            current_loss = loss_dict["total"].item()
+            effective_clip = grad_clip
+            if len(loss_history) > 0:
+                avg_loss = sum(loss_history) / len(loss_history)
+                if current_loss > 5.0 or current_loss > 3.0 * avg_loss:
+                    effective_clip = 0.1  # 强力压低梯度
+                    logger.warning(f"  ⚠ 梯度突变检测: loss={current_loss:.4f} avg={avg_loss:.4f} → grad_clip {grad_clip}→{effective_clip}")
+
+            if effective_clip > 0:
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.decoder.parameters(), grad_clip)
+                torch.nn.utils.clip_grad_norm_(model.decoder.parameters(), effective_clip)
             scaler.step(optimizer)
             scaler.update()
         else:
             logits = model(images, output_size=masks.shape[-2:])
             loss_dict = criterion(logits, masks)
             loss_dict["total"].backward()
-            if grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(model.decoder.parameters(), grad_clip)
+
+            # 动态梯度裁剪
+            current_loss = loss_dict["total"].item()
+            effective_clip = grad_clip
+            if len(loss_history) > 0:
+                avg_loss = sum(loss_history) / len(loss_history)
+                if current_loss > 5.0 or current_loss > 3.0 * avg_loss:
+                    effective_clip = 0.1
+                    logger.warning(f"  ⚠ 梯度突变检测: loss={current_loss:.4f} avg={avg_loss:.4f} → grad_clip {grad_clip}→{effective_clip}")
+
+            if effective_clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.decoder.parameters(), effective_clip)
             optimizer.step()
 
+        loss_history.append(loss_dict["total"].item())
         total_loss += loss_dict["total"].item()
         total_ce += loss_dict["ce"]
         total_dice += loss_dict["dice"]
@@ -319,9 +343,32 @@ def main():
     ).to(device)
 
     decoder_params = list(model.decoder.parameters())
-    optimizer = torch.optim.AdamW(decoder_params, lr=train_cfg["learning_rate"], weight_decay=train_cfg["weight_decay"])
+    # AdamW eps 放大至 1e-4，防止混合精度下分母过小导致数值爆炸
+    optimizer = torch.optim.AdamW(
+        decoder_params,
+        lr=train_cfg["learning_rate"],
+        weight_decay=train_cfg["weight_decay"],
+        eps=1e-4,
+    )
 
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=train_cfg["epochs"])
+    # Warmup + CosineAnnealing 调度器
+    warmup_epochs = train_cfg.get("warmup_epochs", 5)
+    cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=train_cfg["epochs"] - warmup_epochs
+    )
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+        optimizer,
+        schedulers=[
+            torch.optim.lr_scheduler.LinearLR(
+                optimizer,
+                start_factor=0.01,
+                end_factor=1.0,
+                total_iters=warmup_epochs,
+            ),
+            cosine_scheduler,
+        ],
+        milestones=[warmup_epochs],
+    )
     scaler = GradScaler(enabled=train_cfg["amp"])
 
     start_epoch = 0
