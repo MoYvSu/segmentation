@@ -432,6 +432,25 @@ class MetallographicDataset(Dataset):
         dist_tensor = torch.from_numpy(dist_lb).float().unsqueeze(0)  # [1, H, W]
         target_tensor = torch.cat([mask_tensor, dist_tensor], dim=0)  # [2, H, W]
 
+        # --- 刚性断言：确保 target 通道对齐 ---
+        assert target_tensor.shape[0] == 2, \
+            f"Target 通道数错误，预期为 2，实际为 {target_tensor.shape[0]}"
+
+        mask_target = target_tensor[0]
+        dist_target = target_tensor[1]
+
+        # 检查分类标签的二值性
+        unique_vals = torch.unique(mask_target)
+        for val in unique_vals:
+            assert val.item() in (0.0, 1.0), \
+                f"分类标签包含非法值: {val.item()}。" \
+                f"Channel 0 必须严格为二值掩码（0=背景/珠光体, 1=铁素体）"
+
+        # 检查回归标签的归一化范围
+        assert dist_target.max().item() <= 1.0 and dist_target.min().item() >= 0.0, \
+            f"距离场未严格归一化: max={dist_target.max().item()}, " \
+            f"min={dist_target.min().item()}"
+
         return {
             "image": image_tensor,
             "target": target_tensor,
