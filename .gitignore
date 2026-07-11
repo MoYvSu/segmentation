@@ -5,4 +5,4 @@ outputs
 data/raw/
 data/test/
 **/__pycache__/
-data\smoketest
+data/smoketest/
