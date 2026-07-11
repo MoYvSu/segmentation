@@ -69,13 +69,25 @@ class CombinedLoss(nn.Module):
         self.ce_loss = nn.CrossEntropyLoss(weight=class_weights, ignore_index=255)
 
     def dice_loss(self, logits, target):
+        """
+        通道级非对称 Dice 损失：仅计算类别 1（铁素体核）和类别 2（晶界）。
+
+        显式剔除类别 0（珠光体/背景）对 Dice 损失的贡献，
+        防止全盲预测时背景类仍能获得分值奖励。
+        """
         probs = F.softmax(logits, dim=1)
         target_onehot = F.one_hot(target, self.num_classes).permute(0, 3, 1, 2).float()
-        dims = (0, 2, 3)
-        intersection = (probs * target_onehot).sum(dim=dims)
-        cardinality = probs.sum(dim=dims) + target_onehot.sum(dim=dims)
-        dice = (2.0 * intersection + 1e-6) / (cardinality + 1e-6)
-        return 1.0 - dice.mean()
+        eps = 1e-7
+
+        # 仅计算类别 1 和类别 2 的 Dice 损失
+        total_loss = 0.0
+        for cls in [1, 2]:
+            intersection = (probs[:, cls] * target_onehot[:, cls]).sum()
+            denom = probs[:, cls].sum() + target_onehot[:, cls].sum()
+            dice = (2.0 * intersection + eps) / (denom + eps)
+            total_loss = total_loss + (1.0 - dice)
+
+        return total_loss / 2.0
 
     def boundary_loss(self, logits, target):
         pred = torch.argmax(logits, dim=1).float()
@@ -238,7 +250,7 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, grad_cl
                 avg_loss = sum(loss_history) / len(loss_history)
                 if current_loss > 5.0 or current_loss > 3.0 * avg_loss:
                     effective_clip = 0.1  # 强力压低梯度
-                    logger.warning(f"  ⚠ 梯度突变检测: loss={current_loss:.4f} avg={avg_loss:.4f} → grad_clip {grad_clip}→{effective_clip}")
+                    logger.warning(f" 梯度突变检测: loss={current_loss:.4f} avg={avg_loss:.4f} → grad_clip {grad_clip}→{effective_clip}")
 
             if effective_clip > 0:
                 scaler.unscale_(optimizer)

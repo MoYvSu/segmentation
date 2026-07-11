@@ -92,16 +92,16 @@ train:
   warmup_epochs: 25
   # 梯度裁剪
   grad_clip: 0.3
-  # 混合精度训练
-  amp: true
+  # 混合精度训练（暂时关闭，回退至FP32以确保稀疏晶界梯度不被截断）
+  amp: false
   # 损失函数权重
   loss_weights:
     ce: 1.0       # 交叉熵
     dice: 0.5     # Dice
     boundary: 0.3 # 边界感知损失
   # 显式类别权重分配（0=珠光体, 1=铁素体核, 2=铁素体晶界）
-  # 适度加权晶界，配合增强型解码头的非线性容量
-  class_weights: [1.0, 1.0, 3.5]
+  # 极度压低背景惩罚，放大晶界权重，扭转梯度分布
+  class_weights: [0.2, 1.0, 8.0]
   # 保留checkpoints
   save_checkpoints: true
 

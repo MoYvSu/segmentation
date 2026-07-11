@@ -139,6 +139,13 @@ class FPNDecoder(nn.Module):
                 nn.init.ones_(m.weight)
                 nn.init.zeros_(m.bias)
 
+        # 非对称偏置初始化：抑制背景类(0)，提升晶界类(2)初始生存空间
+        # 打破三分类全盲预测死锁（全图类别0 → mIoU=1/3=0.3333）
+        with torch.no_grad():
+            self.output_head.bias[0] = -2.0  # 珠光体（背景）：负偏置抑制
+            self.output_head.bias[1] = 0.0   # 铁素体核：默认
+            self.output_head.bias[2] = 2.0   # 晶界：正偏置提升
+
     def forward(self, features, output_size=None):
         """
         前向传播：FPN 横向投影 + 残差块 + 自上而下融合 + 语义平滑头 + 输出。
