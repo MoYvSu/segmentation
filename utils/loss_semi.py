@@ -8,7 +8,12 @@
 1. 分类一致性：img_weak 的分类概率 -> 伪标签（置信度 > threshold）-> 与 img_strong_appearance 的预测计算 BCE
 2. 回归几何一致性：img_weak 的距离场预测 -> 施加几何变换 T -> 与 img_strong_geometric 的预测计算 MSE
 
-非侵入式设计：不修改第一阶段 utils/loss.py。
+优化：冻结层前向 no_grad 化（方案 A）
+- encoder + decoder 冻结部分（lateral_convs / residual_blocks / semantic_head）在 torch.no_grad() 下运行
+- 仅 cls_branch + reg_branch 在梯度图内运行
+- 减少 3 次无监督前向中冻结层的中间激活值内存存储和反向传播开销
+
+非侵入式设计：不修改第一阶段 utils/loss.py 和 models/fpn_decoder.py。
 """
 
 from typing import Dict, List, Tuple
@@ -18,6 +23,64 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from data.dataset_semi import apply_transform_batch
+
+
+def _forward_frozen_to_semantic(model: nn.Module, x: torch.Tensor) -> torch.Tensor:
+    """
+    冻结层前向：encoder -> lateral_convs -> residual_blocks -> semantic_head
+    在 torch.no_grad() 下运行，不保留中间激活值。
+
+    Args:
+        model: SegmentationModel
+        x: [B, 3, H, W] 输入图像
+
+    Returns:
+        semantic: [B, fpn_channels, H/4, W/4] 语义特征图
+    """
+    decoder = model.decoder
+    with torch.no_grad():
+        # Encoder 前向（冻结）
+        features = model.encoder(x)
+
+        # Decoder 冻结部分前向：lateral_convs + residual_blocks + top-down + semantic_head
+        laterals = []
+        for i in range(decoder.num_stages):
+            proj = decoder.lateral_convs[i](features[i])
+            laterals.append(decoder.residual_blocks[i](proj))
+
+        top_down = laterals[-1]
+        for i in range(decoder.num_stages - 2, -1, -1):
+            top_down = F.interpolate(
+                top_down,
+                size=laterals[i].shape[-2:],
+                mode="bilinear",
+                align_corners=True,
+            )
+            top_down = top_down + laterals[i]
+
+        semantic = decoder.semantic_head(top_down)
+
+    return semantic
+
+
+def _forward_heads(model: nn.Module, semantic: torch.Tensor) -> torch.Tensor:
+    """
+    可训练头前向：cls_branch + reg_branch（在梯度图内运行）。
+
+    Args:
+        model: SegmentationModel
+        semantic: [B, fpn_channels, H/4, W/4] 语义特征图
+
+    Returns:
+        output: [B, 2, H/4, W/4]
+            - output[:, 0] 为分类 logits
+            - output[:, 1] 为经 Sigmoid 的距离场预测 [0,1]
+    """
+    decoder = model.decoder
+    seg_logits = decoder.cls_branch(semantic)
+    dist_pred = decoder.reg_branch(semantic)
+    output = torch.cat([seg_logits, dist_pred], dim=1)
+    return output
 
 
 def compute_stage2_unsupervised_loss(
@@ -32,10 +95,10 @@ def compute_stage2_unsupervised_loss(
     """
     计算第二阶段无监督一致性损失。
 
-    前向传播计划（3 次编码器前向）：
-    - 第 1 次：img_weak -> 获取分类概率 + 距离场预测（教师预测源）
-    - 第 2 次：img_strong_appearance -> 获取分类 logits（学生外观增强预测）
-    - 第 3 次：img_strong_geometric -> 获取距离场预测（学生几何增强预测）
+    优化后的前向传播计划（3 次编码器前向，但冻结层在 no_grad 下）：
+    - 第 1 次：img_weak -> 冻结层 no_grad -> 可训练头 -> 分类概率 + 距离场（教师预测源）
+    - 第 2 次：img_strong_appearance -> 冻结层 no_grad -> 可训练头 -> 分类 logits（学生外观增强）
+    - 第 3 次：img_strong_geometric -> 冻结层 no_grad -> 可训练头 -> 距离场预测（学生几何增强）
 
     Args:
         model: SegmentationModel（冻结 encoder + decoder 主体，仅 cls_branch/reg_branch 可训练）
@@ -58,7 +121,10 @@ def compute_stage2_unsupervised_loss(
     img_strong_geometric = img_strong_geometric.to(device)
 
     # ---- 第 1 次前向：img_weak ----
-    out_weak = model(img_weak)  # [B, 2, H, W]
+    # 冻结层 no_grad + 可训练头梯度
+    semantic_weak = _forward_frozen_to_semantic(model, img_weak)
+    # detach semantic 以切断冻结部分的梯度图（虽然 no_grad 已经不记录，但确保安全）
+    out_weak = _forward_heads(model, semantic_weak.detach())
     cls_logits_weak = out_weak[:, 0]  # [B, H, W] 分类 logits
     dist_pred_weak = out_weak[:, 1]   # [B, H, W] 距离场预测 [0,1]
 
@@ -70,12 +136,11 @@ def compute_stage2_unsupervised_loss(
     # ================================================================
 
     # 第 2 次前向：img_strong_appearance
-    out_strong_app = model(img_strong_appearance)  # [B, 2, H, W]
+    semantic_strong_app = _forward_frozen_to_semantic(model, img_strong_appearance)
+    out_strong_app = _forward_heads(model, semantic_strong_app.detach())
     cls_logits_strong_app = out_strong_app[:, 0]   # [B, H, W]
 
     # 筛选高置信度区域作为伪标签
-    # p > confidence_threshold -> 伪标签 1（高置信度铁素体）
-    # p < (1 - confidence_threshold) -> 伪标签 0（高置信度珠光体）
     high_conf_mask = (
         (cls_prob_weak > confidence_threshold)
         | (cls_prob_weak < (1.0 - confidence_threshold))
@@ -101,11 +166,11 @@ def compute_stage2_unsupervised_loss(
     # ================================================================
 
     # 第 3 次前向：img_strong_geometric
-    out_strong_geo = model(img_strong_geometric)  # [B, 2, H, W]
+    semantic_strong_geo = _forward_frozen_to_semantic(model, img_strong_geometric)
+    out_strong_geo = _forward_heads(model, semantic_strong_geo.detach())
     dist_pred_strong_geo = out_strong_geo[:, 1]   # [B, H, W]
 
     # 对 img_weak 的距离场预测施加相同的几何变换 T
-    # 使其对齐到 img_strong_geometric 的坐标系
     dist_pred_weak_expanded = dist_pred_weak.unsqueeze(1)  # [B, 1, H, W]
     dist_pred_weak_transformed = apply_transform_batch(
         dist_pred_weak_expanded, T_list

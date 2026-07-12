@@ -269,6 +269,7 @@ def train_one_epoch(
     labeled_loader,
     unlabeled_iter,
     num_steps,
+    num_unlabeled_steps,
     criterion,
     unsup_weight,
     confidence_threshold,
@@ -279,7 +280,12 @@ def train_one_epoch(
     grad_clip=1.0,
     use_amp=False,
 ):
-    """训练一个 epoch（双流混合 Batch）。"""
+    """训练一个 epoch（双流混合 Batch）。
+
+    Args:
+        num_unlabeled_steps: 无标签数据迭代步数限制（方案 D）。
+            超过此步数后仅进行有标签训练，不再抽取无标签数据。
+    """
     model.train()
     # 保持 encoder 和 decoder 非头模块在 eval 模式
     model.encoder.eval()
@@ -324,12 +330,12 @@ def train_one_epoch(
             out_labeled = model(images_labeled, output_size=targets_labeled.shape[-2:])
             sup_loss, seg_val, dist_val = criterion(out_labeled, targets_labeled)
 
-        # ---- 无标签流 ----
+        # ---- 无标签流（方案 D：超过 num_unlabeled_steps 后不再抽取无标签数据）----
         unsup_loss = torch.tensor(0.0, device=device)
         cls_consist_val = 0.0
         reg_consist_val = 0.0
 
-        if unlabeled_iter is not None:
+        if unlabeled_iter is not None and step_idx < num_unlabeled_steps:
             try:
                 unlabeled_batch = next(unlabeled_iter)
                 img_weak = unlabeled_batch["img_weak"]
@@ -543,6 +549,10 @@ def main():
     logger.info(f"  Confidence threshold: {stage2_cfg['PSEUDO_LABEL_CONFIDENCE']}")
     logger.info("=" * 60)
 
+    # 方案 D：限制每 epoch 无标签采样步数
+    unlabeled_samples_per_epoch = stage2_cfg.get("UNLABELED_SAMPLES_PER_EPOCH", 0)
+    bs_unlabeled = stage2_cfg["BATCH_SIZE_UNLABELED"]
+
     for epoch in range(start_epoch, total_epochs):
         epoch_start = time.time()
         logger.info(f"\nEpoch {epoch + 1}/{total_epochs}")
@@ -550,7 +560,19 @@ def main():
         # 每个 epoch 开始前重置 unlabeled_loader 的迭代器
         if unlabeled_loader is not None:
             unlabeled_iter = iter(unlabeled_loader)
-            num_steps = len(unlabeled_loader)
+            # 方案 D：限制无标签步数
+            full_unlabeled_steps = len(unlabeled_loader)
+            if unlabeled_samples_per_epoch > 0:
+                max_unlabeled_steps = max(1, unlabeled_samples_per_epoch // bs_unlabeled)
+                num_unlabeled_steps = min(full_unlabeled_steps, max_unlabeled_steps)
+            else:
+                num_unlabeled_steps = full_unlabeled_steps
+            # 总步数取 max(无标签步数, 有标签步数) 保证有标签训练充分
+            num_steps = max(num_unlabeled_steps, len(labeled_loader))
+            logger.info(
+                f"  Unlabeled steps: {num_unlabeled_steps}/{full_unlabeled_steps} "
+                f"(samples limit: {unlabeled_samples_per_epoch if unlabeled_samples_per_epoch > 0 else 'unlimited'})"
+            )
         else:
             unlabeled_iter = None
             num_steps = len(labeled_loader)
@@ -560,6 +582,7 @@ def main():
             labeled_loader,
             unlabeled_iter,
             num_steps,
+            num_unlabeled_steps if unlabeled_loader is not None else 0,
             criterion,
             unsup_weight=stage2_cfg["UNSUPERVISED_WEIGHT"],
             confidence_threshold=stage2_cfg["PSEUDO_LABEL_CONFIDENCE"],
