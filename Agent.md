@@ -83,3 +83,53 @@ Test data: 2448x2048 and 1224x1024 (both 1.2:1).
 5. Run debug_iou.py for zero-epoch IoU audit.
 6. Train: python train.py --config config/default_config.yaml
 7. Infer: python inference.py --config config/default_config.yaml --checkpoint outputs/best_model.pth
+
+## 7. Stage 2: Semi-Supervised Fine-tuning
+
+### 7.1 Technical Specification
+
+- **Freeze**: SAM 2 Encoder + FPN Decoder main body (lateral_convs, residual_blocks, semantic_head).
+- **Trainable**: Only `decoder.cls_branch` + `decoder.reg_branch` (two decoupled heads).
+- **Dual-stream**: Labeled data (Focal+MSE) + Unlabeled data (consistency loss).
+- **Labeled stream**: `LabeledDataset` -> FocalDistanceFieldLoss (same as Stage 1).
+- **Unlabeled stream**: `UnlabeledDataset` -> 3-way fork augmentation:
+  - `img_weak`: letterbox only (teacher prediction source).
+  - `img_strong_appearance`: Gaussian blur + brightness/contrast jitter (for cls consistency).
+  - `img_strong_geometric`: random 90-degree rotation or flip + metadata T (for reg consistency).
+- **Unsupervised loss** (`compute_stage2_unsupervised_loss`):
+  - Classification consistency: pseudo-labels from `img_weak` (confidence > 0.90) vs `img_strong_appearance` prediction (regional BCE).
+  - Regression geometric consistency: `img_weak` distance field transformed by T vs `img_strong_geometric` prediction (pixel-level MSE).
+  - Total: `UNSUPERVISED_WEIGHT * (loss_cls + DIST_WEIGHT * loss_reg)`.
+- **Mixed batch**: `itertools.cycle(labeled_loader)` wraps labeled stream; unlabeled stream drives iteration count.
+- **Optimizer**: AdamW(lr=5.0e-5, weight_decay=1e-4, eps=1e-4), only cls_branch + reg_branch params.
+- **Scheduler**: Warmup(5) -> CosineAnnealing(95).
+- **Grad clip**: 1.0, FP32.
+
+### 7.2 File Listing
+
+| File | Description |
+|------|-------------|
+| `config/stage2_config.yaml` | Stage-2 config (checkpoint path, batch sizes, unsup weight) |
+| `data/dataset_semi.py` | `LabeledDataset`, `UnlabeledDataset`, collate fns, transform utils |
+| `utils/loss_semi.py` | `compute_stage2_unsupervised_loss` function |
+| `train_stage2.py` | Main entry: load Stage-1, freeze, dual-stream training loop |
+| `data/unlabeled/` | Unlabeled images directory (semi-supervised training only) |
+
+### 7.3 Commands
+
+```bash
+conda activate sam2_env
+
+# Stage-2 semi-supervised fine-tuning
+python train_stage2.py --config config/stage2_config.yaml
+
+# Resume from checkpoint
+python train_stage2.py --config config/stage2_config.yaml --resume outputs/stage2/best_model_stage2.pth
+```
+
+### 7.4 Checkpoint Format
+
+Stage-2 checkpoints save only `cls_branch_state_dict` + `reg_branch_state_dict` (not full decoder):
+- `best_model_stage2.pth`: best validation mIoU.
+- `stage2_epoch{N}.pth`: periodic checkpoints (every 10 epochs).
+- `final_model_stage2.pth`: final model.
