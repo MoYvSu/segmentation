@@ -483,7 +483,7 @@ def main():
 
     # ---- 损失函数 ----
     criterion = FocalDistanceFieldLoss(gamma=2.0, alpha=0.95).to(device)
-    logger.info("Supervised loss: FocalDistanceFieldLoss (Focal gamma=2.0 alpha=0.95 + 10*MSE)")
+    logger.info("Supervised loss: FocalDistanceFieldLoss (加权Focal + 0.05*TV + 10*MSE, EDT空间权重)")
     logger.info(
         f"Unsupervised loss: consistency loss (weight={stage2_cfg['UNSUPERVISED_WEIGHT']})"
     )

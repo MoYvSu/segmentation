@@ -279,7 +279,7 @@ def main():
 
     # Focal Loss + 距离场 MSE 双任务损失
     criterion = FocalDistanceFieldLoss(gamma=2.0, alpha=0.95).to(device)
-    logger.info("损失函数: FocalDistanceFieldLoss (Focal gamma=2.0 alpha=0.95 + 10*MSE)")
+    logger.info("损失函数: FocalDistanceFieldLoss (加权Focal + 0.05*TV + 10*MSE, EDT空间权重)")
 
     # 仅解码器参数（FocalDistanceFieldLoss 无可学习参数）
     optimizer = torch.optim.AdamW(
