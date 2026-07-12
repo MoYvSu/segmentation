@@ -153,12 +153,19 @@ def watershed_separation(
     """
     Watershed separation using distance field to split touching grains.
 
+    Uses scikit-image's watershed implementation which is better suited for
+    float-valued height maps than OpenCV's cv2.watershed.
+
     Algorithm:
-    1. Dilate + erode distance field to find local maxima
-    2. Extract seed points (local maxima that are strictly greater than eroded values)
-    3. Fallback: use 75th percentile threshold if no seeds found
-    4. Run cv2.watershed with seed markers
+    1. Gaussian blur distance field to suppress noise
+    2. Find local maxima using peak_local_max with min_distance constraint
+    3. Create seed markers from local maxima
+    4. Run watershed on inverted distance field (centers=basins, boundaries=ridges)
+    5. Fallback to connected components if no seeds found
     """
+    from skimage.feature import peak_local_max
+    from skimage.segmentation import watershed as sk_watershed
+
     h, w = ferrite_mask.shape[:2]
 
     if kernel_size is None:
@@ -166,46 +173,71 @@ def watershed_separation(
 
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
 
-    # Step 1: dilate + erode to find local maxima
-    dist_dilated = cv2.dilate(dist_field, kernel)
-    dist_eroded = cv2.erode(dist_field, kernel)
+    # Step 1: Gaussian blur to suppress noise-induced spurious local maxima
+    blur_ksize = max(3, kernel_size)
+    if blur_ksize % 2 == 0:
+        blur_ksize += 1
+    dist_smooth = cv2.GaussianBlur(dist_field, (blur_ksize, blur_ksize), 0)
 
-    # Step 2: local maxima = value >= dilated AND value > eroded (exclude plateaus)
-    local_max = (dist_field >= dist_dilated - 1e-6) & (dist_field > dist_eroded + 1e-6) & (ferrite_mask > 0)
+    # Step 2: find local maxima using peak_local_max.
+    # This function finds peaks with a minimum spatial separation of
+    # min_distance pixels, naturally preventing over-segmentation from
+    # adjacent noise-induced peaks without needing morphological operations.
+    # Only search within ferrite region.
+    peaks = peak_local_max(
+        dist_smooth,
+        min_distance=min_distance,
+        exclude_border=False,
+        threshold_abs=0.01,  # ignore near-zero peaks (noise at boundaries)
+    )
 
-    # Fallback: use percentile threshold if too strict
-    if local_max.sum() == 0:
-        valid_dist = dist_field[ferrite_mask > 0]
+    # Filter peaks to ferrite region only
+    peaks = np.array([
+        p for p in peaks
+        if ferrite_mask[p[0], p[1]] > 0
+    ])
+
+    # Fallback: use percentile threshold if peak_local_max finds nothing
+    if len(peaks) == 0:
+        valid_dist = dist_smooth[ferrite_mask > 0]
         if valid_dist.size > 0:
             threshold = np.percentile(valid_dist, 75)
-            local_max = (dist_field > threshold) & (ferrite_mask > 0)
-
-    local_max = local_max.astype(np.uint8)
-
-    # Step 3: filter small seed regions
-    if local_max.sum() > 0:
-        num_seeds, seed_labels = cv2.connectedComponents(local_max, connectivity=8)
-        if num_seeds > 1:
-            for sid in range(1, num_seeds):
-                if (seed_labels == sid).sum() < min_distance:
-                    seed_labels[seed_labels == sid] = 0
+            local_max = (dist_smooth > threshold) & (ferrite_mask > 0)
+            local_max_u8 = local_max.astype(np.uint8)
+            local_max_dilated = cv2.dilate(local_max_u8, kernel)
+            _, seed_labels = cv2.connectedComponents(local_max_dilated, connectivity=8)
+        else:
+            seed_labels = np.zeros((h, w), dtype=np.int32)
     else:
-        seed_labels = np.zeros((h, w), dtype=np.int32)
+        # Create seed markers from peaks
+        seed_mask = np.zeros((h, w), dtype=bool)
+        for py, px in peaks:
+            seed_mask[py, px] = True
+        # Dilate seeds slightly for stability
+        seed_mask = cv2.dilate(seed_mask.astype(np.uint8), kernel).astype(bool)
+        _, seed_labels = cv2.connectedComponents(seed_mask.astype(np.uint8), connectivity=8)
 
-    # Step 4: fallback to connected components if no seeds
+    # Step 3: fallback to connected components if no seeds
     if seed_labels.max() == 0:
         num_labels, labels = cv2.connectedComponents(ferrite_mask, connectivity=8)
         return labels.astype(np.int32)
 
-    # Step 5: watershed transform
-    markers = seed_labels.copy().astype(np.int32)
-    markers[ferrite_mask == 0] = 1
-    markers[markers > 0] = markers[markers > 0] + 1
+    # Step 4: watershed on inverted distance field.
+    # scikit-image watershed treats LOW values as basins (seeds).
+    # Distance field: high=center, low=boundary.
+    # Inversion: low=center (basin), high=boundary (ridge).
+    # Watershed floods from seeds at centers, meeting at boundaries.
+    markers = seed_labels.copy()
+    markers[ferrite_mask == 0] = -1  # mark background explicitly
 
-    vis_image = cv2.cvtColor(ferrite_mask * 255, cv2.COLOR_GRAY2BGR)
-    markers = cv2.watershed(vis_image, markers)
+    labels = sk_watershed(
+        -dist_smooth,  # negate: centers become basins
+        markers=markers,
+        mask=ferrite_mask > 0,  # restrict to ferrite region
+    )
 
-    labels = np.where(markers <= 1, 0, markers - 1).astype(np.int32)
+    # Ensure background is 0
+    labels = np.where(ferrite_mask > 0, labels, 0).astype(np.int32)
     return labels
 
 
@@ -251,7 +283,9 @@ def topo_instance_separation(
         unique_labels = unique_labels[unique_labels > 0]
 
         for label_id in unique_labels:
-            inst_mask = (ferrite_labels == label_id)
+            # FIX: filter out non-ferrite pixels to prevent area inflation
+            # caused by background marker leakage.
+            inst_mask = (ferrite_labels == label_id) & (ferrite_binary > 0)
             area = int(inst_mask.sum())
             if area < min_instance_area:
                 continue
