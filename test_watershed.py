@@ -61,7 +61,7 @@ def test_three_touching_grains():
     labels = watershed_separation(ferrite_mask, dist_norm)
     ul = np.unique(labels)
     ul = ul[ul > 0]
-    assert len(ul) >= 2, f"Expected at least 2 grains, got {len(ul)}"
+    assert len(ul) >= 2, f"Expected at least 2 grains, got {len(ul)}"  # relaxed: 3 grains may merge if saddle is too high
     print(f"test_three_touching_grains: PASS (found {len(ul)} grains)")
 
 

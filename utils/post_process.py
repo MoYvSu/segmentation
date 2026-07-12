@@ -149,21 +149,41 @@ def watershed_separation(
     dist_field: np.ndarray,
     min_distance: int = 5,
     kernel_size: Optional[int] = None,
+    sigmoid_x0: float = 0.8,
+    sigmoid_k: float = 0.3,
+    highland_threshold: float = 0.8,
 ) -> np.ndarray:
     """
-    Watershed separation using distance field to split touching grains.
+    Watershed separation using Sigmoid-stretched distance field.
 
-    Uses scikit-image's watershed implementation which is better suited for
-    float-valued height maps than OpenCV's cv2.watershed.
+    Since adjacent ferrite grains have no semantic gap (they are connected
+    in the binary mask), seed isolation relies entirely on the topological
+    properties of the continuous distance field.
 
     Algorithm:
     1. Gaussian blur distance field to suppress noise
-    2. Find local maxima using peak_local_max with min_distance constraint
-    3. Create seed markers from local maxima
-    4. Run watershed on inverted distance field (centers=basins, boundaries=ridges)
-    5. Fallback to connected components if no seeds found
+    2. Purify: zero out non-ferrite regions
+    3. Inverse-normalize to raw pixel distance
+    4. Adaptive Sigmoid stretch: center = dist_max * sigmoid_x0
+       (deepens valleys, flattens plateaus, scales to any grain size)
+    5. Extract highland islands via hard threshold
+    6. Connected components on highlands -> centroid per island = unique seed
+    7. Dilate seeds with fixed (3,3) ellipse kernel
+    8. Watershed on inverted smoothed distance field
+
+    Args:
+        ferrite_mask: [H, W] binary mask (1=ferrite, 0=background)
+        dist_field: [H, W] normalized distance field [0,1] from model
+        min_distance: minimum island area to keep as seed
+        kernel_size: Gaussian blur kernel size
+        sigmoid_x0: Sigmoid center as a FRACTION of global max raw distance.
+                    0.8 means transition at 80% of peak distance.
+                    Lower = more aggressive (smaller highlands). Default 0.8.
+        sigmoid_k: Sigmoid gain in raw pixel distance space.
+                   Higher = sharper transition. Default 0.3.
+        highland_threshold: Hard threshold on Sigmoid output [0,1] to
+                            extract plateau islands. Default 0.7.
     """
-    from skimage.feature import peak_local_max
     from skimage.segmentation import watershed as sk_watershed
 
     h, w = ferrite_mask.shape[:2]
@@ -171,63 +191,84 @@ def watershed_separation(
     if kernel_size is None:
         kernel_size = _get_dynamic_kernel_size(h * w)
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-
-    # Step 1: Gaussian blur to suppress noise-induced spurious local maxima
+    # Step 1: Gaussian blur to suppress noise
     blur_ksize = max(3, kernel_size)
     if blur_ksize % 2 == 0:
         blur_ksize += 1
     dist_smooth = cv2.GaussianBlur(dist_field, (blur_ksize, blur_ksize), 0)
 
-    # Step 2: find local maxima using peak_local_max.
-    # This function finds peaks with a minimum spatial separation of
-    # min_distance pixels, naturally preventing over-segmentation from
-    # adjacent noise-induced peaks without needing morphological operations.
-    # Only search within ferrite region.
-    peaks = peak_local_max(
-        dist_smooth,
-        min_distance=min_distance,
-        exclude_border=False,
-        threshold_abs=0.01,  # ignore near-zero peaks (noise at boundaries)
+    # Step 2: Purify - zero out non-ferrite regions to prevent energy leakage
+    dist_purified = dist_smooth * (ferrite_mask > 0).astype(np.float32)
+
+    # Step 3: Inverse-normalize to raw pixel distance
+    eps = 1e-7
+    dist_clipped = np.clip(dist_purified, 0.0, 1.0 - eps)
+    dist_raw = dist_clipped * 10.0 / (1.0 - dist_clipped + eps)
+
+    # Step 4: Adaptive Sigmoid stretch
+    # Center = fraction of global max distance. This ensures the transition
+    # zone automatically scales to any grain size.
+    # For two touching circles radius=50: max~50px, saddle~40px
+    #   x0 = 0.8 * 50 = 40 -> saddle at 40 -> sigma(0)=0.5 -> threshold 0.7
+    #   filters out saddle region, separating the two plateaus.
+    valid_dist = dist_raw[ferrite_mask > 0]
+    if valid_dist.size > 0:
+        dist_max = float(np.max(valid_dist))
+    else:
+        dist_max = 0.0
+    x0_effective = dist_max * sigmoid_x0
+
+    dist_stretched = 1.0 / (1.0 + np.exp(-sigmoid_k * (dist_raw - x0_effective)))
+    # Re-zero background after Sigmoid
+    dist_stretched[ferrite_mask == 0] = 0.0
+
+    # Step 5: Extract highland islands via hard threshold
+    highland_mask = (dist_stretched > highland_threshold) & (ferrite_mask > 0)
+    highland_mask = highland_mask.astype(np.uint8)
+
+    # Step 6: Connected components on highlands -> centroid per island
+    num_islands, island_labels, stats, centroids = cv2.connectedComponentsWithStats(
+        highland_mask, connectivity=8
     )
 
-    # Filter peaks to ferrite region only
-    peaks = np.array([
-        p for p in peaks
-        if ferrite_mask[p[0], p[1]] > 0
-    ])
+    if num_islands <= 1:
+        # No highlands found - fallback to connected components on ferrite mask
+        num_labels, labels = cv2.connectedComponents(ferrite_mask, connectivity=8)
+        return labels.astype(np.int32)
 
-    # Fallback: use percentile threshold if peak_local_max finds nothing
-    if len(peaks) == 0:
-        valid_dist = dist_smooth[ferrite_mask > 0]
-        if valid_dist.size > 0:
-            threshold = np.percentile(valid_dist, 75)
-            local_max = (dist_smooth > threshold) & (ferrite_mask > 0)
-            local_max_u8 = local_max.astype(np.uint8)
-            local_max_dilated = cv2.dilate(local_max_u8, kernel)
-            _, seed_labels = cv2.connectedComponents(local_max_dilated, connectivity=8)
-        else:
-            seed_labels = np.zeros((h, w), dtype=np.int32)
-    else:
-        # Create seed markers from peaks
-        seed_mask = np.zeros((h, w), dtype=bool)
-        for py, px in peaks:
-            seed_mask[py, px] = True
-        # Dilate seeds slightly for stability
-        seed_mask = cv2.dilate(seed_mask.astype(np.uint8), kernel).astype(bool)
-        _, seed_labels = cv2.connectedComponents(seed_mask.astype(np.uint8), connectivity=8)
+    # Build seed markers from island centroids
+    seed_labels = np.zeros((h, w), dtype=np.int32)
+    seed_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    for island_id in range(1, num_islands):
+        area = int(stats[island_id, cv2.CC_STAT_AREA])
+        if area < min_distance:
+            continue
+        cx = int(round(centroids[island_id, 0]))
+        cy = int(round(centroids[island_id, 1]))
+        # Clamp to image bounds
+        cx = max(0, min(w - 1, cx))
+        cy = max(0, min(h - 1, cy))
+        # Mark centroid pixel with island ID
+        seed_labels[cy, cx] = island_id
 
-    # Step 3: fallback to connected components if no seeds
+    # Check if any seeds survived area filter
     if seed_labels.max() == 0:
         num_labels, labels = cv2.connectedComponents(ferrite_mask, connectivity=8)
         return labels.astype(np.int32)
 
-    # Step 4: watershed on inverted distance field.
-    # scikit-image watershed treats LOW values as basins (seeds).
-    # Distance field: high=center, low=boundary.
-    # Inversion: low=center (basin), high=boundary (ridge).
-    # Watershed floods from seeds at centers, meeting at boundaries.
-    markers = seed_labels.copy()
+    # Step 7: Dilate seeds with fixed (3,3) ellipse kernel for stability
+    seed_mask = (seed_labels > 0).astype(np.uint8)
+    seed_mask_dilated = cv2.dilate(seed_mask, seed_kernel)
+
+    # Re-assign IDs to dilated seeds via connected components
+    _, seed_labels_final = cv2.connectedComponents(seed_mask_dilated, connectivity=8)
+
+    if seed_labels_final.max() == 0:
+        num_labels, labels = cv2.connectedComponents(ferrite_mask, connectivity=8)
+        return labels.astype(np.int32)
+
+    # Step 8: Watershed on inverted smoothed distance field
+    markers = seed_labels_final.copy()
     markers[ferrite_mask == 0] = -1  # mark background explicitly
 
     labels = sk_watershed(
