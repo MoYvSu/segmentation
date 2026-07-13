@@ -259,7 +259,7 @@ def test_watershed():
     max_filter_size = _get_adaptive_max_filter_size(h * w)
     print("  adaptive max filter size: %d" % max_filter_size)
 
-    labels_ws = watershed_separation(mask, dist_field, max_filter_size=max_filter_size)
+    labels_ws, _ = watershed_separation(mask, dist_field, max_filter_size=max_filter_size)
     num_ws = len(np.unique(labels_ws)) - 1
     print("  watershed instances: %d (expected 2)" % num_ws)
 

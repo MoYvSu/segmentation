@@ -107,6 +107,8 @@ def predict_single_image(
     output_dir=None, save_visualization=True,
     alpha=0.75, beta=0.05, max_filter_size=None,
     area_ratio_threshold=0.2, min_island_area=5,
+    enable_snake_smoothing=False, snake_alpha=0.02, snake_beta=0.2,
+    snake_max_iter=80, snake_area_shrink_threshold=0.15,
 ):
     """
     Unified Letterbox inference + post-processing for a single image.
@@ -161,6 +163,10 @@ def predict_single_image(
             use_watershed=True,
             alpha=alpha, beta=beta, max_filter_size=max_filter_size,
             area_ratio_threshold=area_ratio_threshold, min_island_area=min_island_area,
+            enable_snake_smoothing=enable_snake_smoothing,
+            snake_alpha=snake_alpha, snake_beta=snake_beta,
+            snake_max_iter=snake_max_iter,
+            snake_area_shrink_threshold=snake_area_shrink_threshold,
         )
     else:
         mask = output_to_binary_mask(
@@ -185,6 +191,10 @@ def predict_single_image(
             use_watershed=True,
             alpha=alpha, beta=beta, max_filter_size=max_filter_size,
             area_ratio_threshold=area_ratio_threshold, min_island_area=min_island_area,
+            enable_snake_smoothing=enable_snake_smoothing,
+            snake_alpha=snake_alpha, snake_beta=snake_beta,
+            snake_max_iter=snake_max_iter,
+            snake_area_shrink_threshold=snake_area_shrink_threshold,
         )
         output_paths = {}
 
@@ -305,6 +315,11 @@ Processing:
             max_filter_size=post_cfg.get("max_filter_size", 0) or None,
             area_ratio_threshold=post_cfg.get("area_ratio_threshold", 0.2),
             min_island_area=post_cfg.get("min_noise_area", 50),
+            enable_snake_smoothing=post_cfg.get("enable_snake_smoothing", False),
+            snake_alpha=post_cfg.get("snake_alpha", 0.02),
+            snake_beta=post_cfg.get("snake_beta", 0.2),
+            snake_max_iter=post_cfg.get("snake_max_iter", 80),
+            snake_area_shrink_threshold=post_cfg.get("snake_area_shrink_threshold", 0.15),
         )
 
         elapsed = time.time() - start_time

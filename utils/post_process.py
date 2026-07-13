@@ -171,7 +171,7 @@ def watershed_separation(
     max_filter_size: Optional[int] = None,
     area_ratio_threshold: float = 0.2,
     min_island_area: int = 5,
-) -> np.ndarray:
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     Watershed separation using local maximum filter + adaptive threshold.
 
@@ -235,7 +235,7 @@ def watershed_separation(
     if num_islands <= 1:
         # No highlands found - fallback to connected components on ferrite mask
         num_labels, labels = cv2.connectedComponents(ferrite_mask, connectivity=8)
-        return labels.astype(np.int32)
+        return labels.astype(np.int32), dist_purified
 
     # Find max island area (excluding background label 0)
     areas = stats[1:, cv2.CC_STAT_AREA]
@@ -253,7 +253,7 @@ def watershed_separation(
 
     if len(valid_islands) == 0:
         num_labels, labels = cv2.connectedComponents(ferrite_mask, connectivity=8)
-        return labels.astype(np.int32)
+        return labels.astype(np.int32), dist_purified
 
     # Step 6: cv2.moments centroid extraction -> single-pixel markers
     seed_labels = np.zeros((h, w), dtype=np.int32)
@@ -272,7 +272,7 @@ def watershed_separation(
     # Check if any seeds survived
     if seed_labels.max() == 0:
         num_labels, labels = cv2.connectedComponents(ferrite_mask, connectivity=8)
-        return labels.astype(np.int32)
+        return labels.astype(np.int32), dist_purified
 
     # Step 7: 3x3 ellipse dilation of markers
     seed_mask = (seed_labels > 0).astype(np.uint8)
@@ -284,7 +284,7 @@ def watershed_separation(
 
     if seed_labels_final.max() == 0:
         num_labels, labels = cv2.connectedComponents(ferrite_mask, connectivity=8)
-        return labels.astype(np.int32)
+        return labels.astype(np.int32), dist_purified
 
     # Step 8: Watershed on inverted purified distance field
     markers = seed_labels_final.copy()
@@ -298,7 +298,125 @@ def watershed_separation(
 
     # Ensure background is 0
     labels = np.where(ferrite_mask > 0, labels, 0).astype(np.int32)
-    return labels
+    return labels, dist_purified
+
+
+# ---------------------------------------------------------------------------
+# Active Contour edge smoothing
+# ---------------------------------------------------------------------------
+
+def smooth_instance_edges(
+    label_map: np.ndarray,
+    dist_purified: np.ndarray,
+    snake_alpha: float = 0.02,
+    snake_beta: float = 0.2,
+    snake_max_iter: int = 80,
+    area_shrink_threshold: float = 0.15,
+    max_contour_points: int = 500,
+) -> np.ndarray:
+    """
+    Smooth instance edges using Active Contour Model (Snake).
+
+    Processes each instance independently:
+    A. Extract binary ROI for current instance
+    B. cv2.findContours -> initial contour (downsampled)
+    C. skimage.segmentation.active_contour evolution
+    D. cv2.fillPoly to rebuild smoothed mask
+    + Area shrink defense: if smoothed area < (1 - threshold) * original,
+      fall back to original mask.
+
+    Args:
+        label_map: [H, W] int32 label map from watershed (0=background)
+        dist_purified: [H, W] float32 distance field (guides Snake)
+        snake_alpha: Elasticity coefficient (default 0.02)
+        snake_beta: Rigidity coefficient (default 0.2)
+        snake_max_iter: Max Snake iterations (default 80)
+        area_shrink_threshold: Max allowed area shrink ratio (default 0.15)
+        max_contour_points: Max contour points for Snake (default 500)
+
+    Returns:
+        Smoothed label_map (same dtype as input)
+    """
+    from skimage.segmentation import active_contour
+
+    h, w = label_map.shape[:2]
+    smooth_labels = np.zeros_like(label_map)
+
+    unique_ids = np.unique(label_map)
+    unique_ids = unique_ids[unique_ids > 0]
+
+    # Sort by area descending (largest first)
+    id_areas = []
+    for uid in unique_ids:
+        id_areas.append((int((label_map == uid).sum()), uid))
+    id_areas.sort(reverse=True)
+
+    for _, inst_id in id_areas:
+        # Step A: Binary ROI
+        binary_roi = (label_map == inst_id).astype(np.uint8)
+        original_area = int(binary_roi.sum())
+
+        if original_area < 10:
+            smooth_labels[binary_roi > 0] = inst_id
+            continue
+
+        # Step B: Extract contour
+        contours, _ = cv2.findContours(
+            binary_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
+        )
+        if len(contours) == 0:
+            smooth_labels[binary_roi > 0] = inst_id
+            continue
+
+        # Take largest contour
+        contour = max(contours, key=cv2.contourArea)
+        contour = contour.squeeze(1)  # (N, 2) in (x, y) = (col, row)
+
+        if len(contour) < 5:
+            smooth_labels[binary_roi > 0] = inst_id
+            continue
+
+        # Downsample to max_contour_points (equidistant)
+        if len(contour) > max_contour_points:
+            indices = np.linspace(0, len(contour) - 1, max_contour_points, dtype=int)
+            contour = contour[indices]
+
+        # Convert to (row, col) for skimage
+        init_contour = contour[:, [1, 0]].astype(np.float64)
+
+        # Step C: Active Contour evolution
+        try:
+            snake = active_contour(
+                dist_purified,
+                init_contour,
+                alpha=snake_alpha,
+                beta=snake_beta,
+                max_num_iter=snake_max_iter,
+            )
+        except Exception:
+            # Fallback on any Snake error
+            smooth_labels[binary_roi > 0] = inst_id
+            continue
+
+        # Convert back to (col, row) -> int32 for cv2
+        snake_pts = np.round(snake[:, [1, 0]]).astype(np.int32)
+        # Clamp to image bounds
+        snake_pts[:, 0] = np.clip(snake_pts[:, 0], 0, w - 1)
+        snake_pts[:, 1] = np.clip(snake_pts[:, 1], 0, h - 1)
+
+        # Step D: Area shrink defense
+        snake_area = int(cv2.contourArea(snake_pts))
+        if snake_area <= 0:
+            smooth_labels[binary_roi > 0] = inst_id
+            continue
+        if snake_area < original_area * (1.0 - area_shrink_threshold):
+            smooth_labels[binary_roi > 0] = inst_id
+            continue
+
+        # Fill smoothed contour
+        cv2.fillPoly(smooth_labels, [snake_pts], int(inst_id))
+
+    return smooth_labels
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +435,11 @@ def topo_instance_separation(
     max_filter_size: Optional[int] = None,
     area_ratio_threshold: float = 0.2,
     min_island_area: int = 5,
+    enable_snake_smoothing: bool = False,
+    snake_alpha: float = 0.02,
+    snake_beta: float = 0.2,
+    snake_max_iter: int = 80,
+    snake_area_shrink_threshold: float = 0.15,
 ) -> Tuple[np.ndarray, Dict[int, int]]:
     """
     Topological instance separation and global ID assignment.
@@ -332,6 +455,12 @@ def topo_instance_separation(
         max_filter_size: Local max filter window size. None=adaptive.
         area_ratio_threshold: Relative area filter ratio (default 0.2).
         min_island_area: Absolute min island area for seed extraction (default 5).
+        enable_snake_smoothing: If True, apply Active Contour smoothing to
+                                ferrite watershed labels (default False).
+        snake_alpha: Snake elasticity coefficient (default 0.02).
+        snake_beta: Snake rigidity coefficient (default 0.2).
+        snake_max_iter: Snake max iterations (default 80).
+        snake_area_shrink_threshold: Max area shrink ratio before fallback (default 0.15).
     """
     h, w = mask.shape[:2]
     inst_map = np.zeros((h, w), dtype=np.uint8)
@@ -343,7 +472,7 @@ def topo_instance_separation(
     ferrite_binary = (mask == CLASS_FERRITE).astype(np.uint8)
     if ferrite_binary.sum() > 0:
         if use_watershed and dist_field is not None:
-            ferrite_labels = watershed_separation(
+            ferrite_labels, dist_purified = watershed_separation(
                 ferrite_binary,
                 dist_field,
                 alpha=alpha,
@@ -352,6 +481,16 @@ def topo_instance_separation(
                 area_ratio_threshold=area_ratio_threshold,
                 min_island_area=min_island_area,
             )
+            # Optional: Active Contour edge smoothing (ferrite only)
+            if enable_snake_smoothing:
+                ferrite_labels = smooth_instance_edges(
+                    ferrite_labels,
+                    dist_purified,
+                    snake_alpha=snake_alpha,
+                    snake_beta=snake_beta,
+                    snake_max_iter=snake_max_iter,
+                    area_shrink_threshold=snake_area_shrink_threshold,
+                )
         else:
             _, ferrite_labels = cv2.connectedComponents(ferrite_binary, connectivity=connectivity)
 
@@ -420,6 +559,11 @@ def post_process_prediction(
     max_filter_size: Optional[int] = None,
     area_ratio_threshold: float = 0.2,
     min_island_area: int = 5,
+    enable_snake_smoothing: bool = False,
+    snake_alpha: float = 0.02,
+    snake_beta: float = 0.2,
+    snake_max_iter: int = 80,
+    snake_area_shrink_threshold: float = 0.15,
 ) -> Tuple[Dict[str, str], np.ndarray, Dict[int, int]]:
     """
     Full post-processing pipeline:
@@ -435,6 +579,11 @@ def post_process_prediction(
         max_filter_size: Local max filter window size. None=adaptive.
         area_ratio_threshold: Relative area filter ratio (default 0.2).
         min_island_area: Absolute min island area for seed extraction (default 5).
+        enable_snake_smoothing: Active Contour edge smoothing toggle (default False).
+        snake_alpha: Snake elasticity coefficient (default 0.02).
+        snake_beta: Snake rigidity coefficient (default 0.2).
+        snake_max_iter: Snake max iterations (default 80).
+        snake_area_shrink_threshold: Max area shrink ratio before fallback (default 0.15).
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -459,6 +608,10 @@ def post_process_prediction(
         connectivity=connectivity, use_watershed=use_watershed,
         alpha=alpha, beta=beta, max_filter_size=max_filter_size,
         area_ratio_threshold=area_ratio_threshold, min_island_area=min_island_area,
+        enable_snake_smoothing=enable_snake_smoothing,
+        snake_alpha=snake_alpha, snake_beta=snake_beta,
+        snake_max_iter=snake_max_iter,
+        snake_area_shrink_threshold=snake_area_shrink_threshold,
     )
 
     inst_path = os.path.join(output_dir, f"{image_basename}_inst.png")

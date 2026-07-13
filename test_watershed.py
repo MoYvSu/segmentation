@@ -29,7 +29,7 @@ def test_two_touching_grains():
     dist = distance_transform_edt(ferrite_mask > 0).astype(np.float32)
     dist_norm = dist / (dist + 10.0)
 
-    labels = watershed_separation(ferrite_mask, dist_norm)
+    labels, _ = watershed_separation(ferrite_mask, dist_norm)
     ul = np.unique(labels)
     ul = ul[ul > 0]
     assert len(ul) == 2, f"Expected 2 grains, got {len(ul)}"
@@ -48,7 +48,7 @@ def test_single_grain():
     dist = distance_transform_edt(ferrite_mask > 0).astype(np.float32)
     dist_norm = dist / (dist + 10.0)
 
-    labels = watershed_separation(ferrite_mask, dist_norm)
+    labels, _ = watershed_separation(ferrite_mask, dist_norm)
     ul = np.unique(labels)
     ul = ul[ul > 0]
     assert len(ul) == 1, f"Expected 1 grain, got {len(ul)}"
@@ -66,7 +66,7 @@ def test_three_touching_grains():
     dist = distance_transform_edt(ferrite_mask > 0).astype(np.float32)
     dist_norm = dist / (dist + 10.0)
 
-    labels = watershed_separation(ferrite_mask, dist_norm)
+    labels, _ = watershed_separation(ferrite_mask, dist_norm)
     ul = np.unique(labels)
     ul = ul[ul > 0]
     assert len(ul) >= 2, f"Expected at least 2 grains, got {len(ul)}"

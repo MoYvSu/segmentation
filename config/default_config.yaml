@@ -160,3 +160,14 @@ post_process:
   area_ratio_threshold: 0.2
   # 是否保存可视化图（_mask.png 和 _dist.png），默认关闭只生成实例ID图
   save_visualization: false
+  # Active Contour (Snake) 边缘平滑参数
+  # enable_snake_smoothing: 是否启用 Snake 边缘平滑（默认关闭，性能考虑）
+  enable_snake_smoothing: false
+  # snake_alpha: 弹性系数（消除外凸毛刺，推荐 0.01~0.05）
+  snake_alpha: 0.02
+  # snake_beta: 刚性系数（惩罚高曲率，推荐 0.1~0.5）
+  snake_beta: 0.2
+  # snake_max_iter: 最大迭代次数
+  snake_max_iter: 80
+  # snake_area_shrink_threshold: 面积缩水回退阈值（超过此比例则放弃平滑结果）
+  snake_area_shrink_threshold: 0.15
