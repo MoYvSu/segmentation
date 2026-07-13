@@ -293,6 +293,9 @@ def topo_instance_separation(
     max_instance_id: int = 255,
     connectivity: int = 8,
     use_watershed: bool = True,
+    sigmoid_x0: float = 0.8,
+    sigmoid_k: float = 0.3,
+    highland_threshold: float = 0.8,
 ) -> Tuple[np.ndarray, Dict[int, int]]:
     """
     Topological instance separation and global ID assignment.
@@ -301,6 +304,11 @@ def topo_instance_separation(
     For pearlite (class 0): connected components analysis.
     Filter instances smaller than min_instance_area.
     Assign IDs 1~255 by descending area.
+
+    Args:
+        sigmoid_x0: Sigmoid center as fraction of max raw distance (default 0.8).
+        sigmoid_k: Sigmoid gain in raw pixel distance space (default 0.3).
+        highland_threshold: Hard threshold on Sigmoid output for seed extraction (default 0.8).
     """
     h, w = mask.shape[:2]
     inst_map = np.zeros((h, w), dtype=np.uint8)
@@ -316,6 +324,9 @@ def topo_instance_separation(
                 ferrite_binary,
                 dist_field,
                 kernel_size=_get_dynamic_kernel_size(h * w),
+                sigmoid_x0=sigmoid_x0,
+                sigmoid_k=sigmoid_k,
+                highland_threshold=highland_threshold,
             )
         else:
             _, ferrite_labels = cv2.connectedComponents(ferrite_binary, connectivity=connectivity)
@@ -380,6 +391,9 @@ def post_process_prediction(
     dist_scale_factor: float = 10.0,
     spatial_scale: float = 1.0,
     use_watershed: bool = True,
+    sigmoid_x0: float = 0.8,
+    sigmoid_k: float = 0.3,
+    highland_threshold: float = 0.8,
 ) -> Tuple[Dict[str, str], np.ndarray, Dict[int, int]]:
     """
     Full post-processing pipeline:
@@ -388,6 +402,11 @@ def post_process_prediction(
     3. Distance field spatial compensation
     4. Topological separation (watershed + connected components)
     5. Save _inst.png and _class.json
+
+    Args:
+        sigmoid_x0: Sigmoid center as fraction of max raw distance (default 0.8).
+        sigmoid_k: Sigmoid gain in raw pixel distance space (default 0.3).
+        highland_threshold: Hard threshold on Sigmoid output for seed extraction (default 0.8).
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -410,6 +429,8 @@ def post_process_prediction(
         mask, dist_field=dist_field,
         min_instance_area=min_instance_area, max_instance_id=max_instance_id,
         connectivity=connectivity, use_watershed=use_watershed,
+        sigmoid_x0=sigmoid_x0, sigmoid_k=sigmoid_k,
+        highland_threshold=highland_threshold,
     )
 
     inst_path = os.path.join(output_dir, f"{image_basename}_inst.png")

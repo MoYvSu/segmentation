@@ -105,6 +105,7 @@ def predict_single_image(
     train_max_dim=2584,
     dist_scale_factor=10.0,
     output_dir=None, save_visualization=True,
+    sigmoid_x0=0.8, sigmoid_k=0.3, highland_threshold=0.8,
 ):
     """
     Unified Letterbox inference + post-processing for a single image.
@@ -157,6 +158,9 @@ def predict_single_image(
             dist_scale_factor=dist_scale_factor,
             spatial_scale=spatial_scale,
             use_watershed=True,
+            sigmoid_x0=sigmoid_x0,
+            sigmoid_k=sigmoid_k,
+            highland_threshold=highland_threshold,
         )
     else:
         mask = output_to_binary_mask(
@@ -179,6 +183,9 @@ def predict_single_image(
             max_instance_id=max_instance_id,
             connectivity=connectivity,
             use_watershed=True,
+            sigmoid_x0=sigmoid_x0,
+            sigmoid_k=sigmoid_k,
+            highland_threshold=highland_threshold,
         )
         output_paths = {}
 
@@ -294,6 +301,9 @@ Processing:
             dist_scale_factor=data_cfg.get("dist_scale_factor", 10.0),
             output_dir=output_dir,
             save_visualization=True,
+            sigmoid_x0=post_cfg.get("sigmoid_x0", 0.8),
+            sigmoid_k=post_cfg.get("sigmoid_k", 0.3),
+            highland_threshold=post_cfg.get("highland_threshold", 0.8),
         )
 
         elapsed = time.time() - start_time
