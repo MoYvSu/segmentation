@@ -299,7 +299,7 @@ Processing:
             train_max_dim=infer_cfg.get("train_max_dim", 2584),
             dist_scale_factor=data_cfg.get("dist_scale_factor", 10.0),
             output_dir=output_dir,
-            save_visualization=True,
+            save_visualization=post_cfg.get("save_visualization", False),
             alpha=post_cfg.get("alpha", 0.75),
             beta=post_cfg.get("beta", 0.05),
             max_filter_size=post_cfg.get("max_filter_size", 0) or None,

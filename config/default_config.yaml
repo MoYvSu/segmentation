@@ -158,3 +158,5 @@ post_process:
   max_filter_size: 0
   # area_ratio_threshold: 相对面积过滤阈值（小于最大斑块面积此比例的噪声斑块被剔除）
   area_ratio_threshold: 0.2
+  # 是否保存可视化图（_mask.png 和 _dist.png），默认关闭只生成实例ID图
+  save_visualization: false
