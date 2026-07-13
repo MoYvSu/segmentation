@@ -149,3 +149,12 @@ post_process:
   connectivity: 8
   # 噪点面积过滤
   min_noise_area: 50
+  # 局部极大值自适应阈值参数（用于 watershed 种子提取）
+  # alpha: 自适应阈值系数，Threshold = alpha * local_max + beta
+  alpha: 0.75
+  # beta: 全局偏置常数
+  beta: 0.05
+  # max_filter_size: 局部极大值滤波窗口尺寸（0=自适应15~31，>0=固定值）
+  max_filter_size: 0
+  # area_ratio_threshold: 相对面积过滤阈值（小于最大斑块面积此比例的噪声斑块被剔除）
+  area_ratio_threshold: 0.2

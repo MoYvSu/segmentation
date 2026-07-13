@@ -144,90 +144,91 @@ def _get_dynamic_kernel_size(
     return kernel
 
 
+def _get_adaptive_max_filter_size(
+    image_area: int,
+    min_size: int = 15,
+    max_size: int = 31,
+    base_area: int = 1024 * 1024,
+) -> int:
+    """Compute adaptive maximum filter size based on image area.
+
+    Returns an odd integer in [min_size, max_size], scaling with sqrt(area).
+    For 1024x1024 -> 15, for 2448x2048 -> ~31.
+    """
+    scale = image_area / base_area
+    size = int(min_size * (scale ** 0.5))
+    size = max(min_size, min(size, max_size))
+    if size % 2 == 0:
+        size += 1
+    return size
+
+
 def watershed_separation(
     ferrite_mask: np.ndarray,
     dist_field: np.ndarray,
-    min_distance: int = 5,
-    kernel_size: Optional[int] = None,
-    sigmoid_x0: float = 0.8,
-    sigmoid_k: float = 0.3,
-    highland_threshold: float = 0.8,
+    alpha: float = 0.75,
+    beta: float = 0.05,
+    max_filter_size: Optional[int] = None,
+    area_ratio_threshold: float = 0.2,
+    min_island_area: int = 5,
 ) -> np.ndarray:
     """
-    Watershed separation using Sigmoid-stretched distance field.
+    Watershed separation using local maximum filter + adaptive threshold.
 
-    Since adjacent ferrite grains have no semantic gap (they are connected
-    in the binary mask), seed isolation relies entirely on the topological
-    properties of the continuous distance field.
+    Replaces the previous Sigmoid-stretch approach. Instead of a global
+    non-linear transform, this method computes a per-pixel adaptive
+    threshold from the local maximum of the distance field, making it
+    robust to varying grain sizes without manual tuning.
 
     Algorithm:
-    1. Gaussian blur distance field to suppress noise
-    2. Purify: zero out non-ferrite regions
-    3. Inverse-normalize to raw pixel distance
-    4. Adaptive Sigmoid stretch: center = dist_max * sigmoid_x0
-       (deepens valleys, flattens plateaus, scales to any grain size)
-    5. Extract highland islands via hard threshold
-    6. Connected components on highlands -> centroid per island = unique seed
-    7. Dilate seeds with fixed (3,3) ellipse kernel
-    8. Watershed on inverted smoothed distance field
+    1. Purify: zero out non-ferrite regions
+    2. Local maximum filter via cv2.dilate (rectangular kernel)
+    3. Adaptive threshold: Threshold = alpha * local_max + beta
+    4. Highland binary extraction: dist_purified > Threshold & ferrite_mask
+    5. Connected components + relative area topology filter
+       (remove islands < area_ratio_threshold * max_island_area)
+    6. cv2.moments centroid extraction -> single-pixel markers
+    7. 3x3 ellipse dilation of markers
+    8. skimage watershed on -dist_purified with mask=ferrite_mask
 
     Args:
         ferrite_mask: [H, W] binary mask (1=ferrite, 0=background)
         dist_field: [H, W] normalized distance field [0,1] from model
-        min_distance: minimum island area to keep as seed
-        kernel_size: Gaussian blur kernel size
-        sigmoid_x0: Sigmoid center as a FRACTION of global max raw distance.
-                    0.8 means transition at 80% of peak distance.
-                    Lower = more aggressive (smaller highlands). Default 0.8.
-        sigmoid_k: Sigmoid gain in raw pixel distance space.
-                   Higher = sharper transition. Default 0.3.
-        highland_threshold: Hard threshold on Sigmoid output [0,1] to
-                            extract plateau islands. Default 0.7.
+        alpha: Adaptive threshold coefficient (default 0.75).
+               Threshold = alpha * local_max + beta.
+        beta: Global bias constant (default 0.05).
+        max_filter_size: Local max filter window size (odd int).
+                         None = auto-adaptive based on image area (15~31).
+        area_ratio_threshold: Islands with area < max_island_area * this ratio
+                              are filtered out as noise (default 0.2 = 20%).
+        min_island_area: Absolute minimum island area to keep (default 5).
     """
     from skimage.segmentation import watershed as sk_watershed
 
     h, w = ferrite_mask.shape[:2]
 
-    if kernel_size is None:
-        kernel_size = _get_dynamic_kernel_size(h * w)
+    # Step 1: Purify - zero out non-ferrite regions to prevent energy leakage
+    dist_purified = dist_field * (ferrite_mask > 0).astype(np.float32)
 
-    # Step 1: Gaussian blur to suppress noise
-    blur_ksize = max(3, kernel_size)
-    if blur_ksize % 2 == 0:
-        blur_ksize += 1
-    dist_smooth = cv2.GaussianBlur(dist_field, (blur_ksize, blur_ksize), 0)
+    # Step 2: Local maximum filter via cv2.dilate (rectangular kernel)
+    if max_filter_size is None:
+        max_filter_size = _get_adaptive_max_filter_size(h * w)
+    if max_filter_size % 2 == 0:
+        max_filter_size += 1
+    rect_kernel = cv2.getStructuringElement(
+        cv2.MORPH_RECT, (max_filter_size, max_filter_size)
+    )
+    local_max_map = cv2.dilate(dist_purified, rect_kernel)
 
-    # Step 2: Purify - zero out non-ferrite regions to prevent energy leakage
-    dist_purified = dist_smooth * (ferrite_mask > 0).astype(np.float32)
+    # Step 3: Adaptive threshold matrix
+    threshold_map = alpha * local_max_map + beta
 
-    # Step 3: Inverse-normalize to raw pixel distance
-    eps = 1e-7
-    dist_clipped = np.clip(dist_purified, 0.0, 1.0 - eps)
-    dist_raw = dist_clipped * 10.0 / (1.0 - dist_clipped + eps)
+    # Step 4: Highland binary extraction
+    highland_binary = (dist_purified > threshold_map) & (ferrite_mask > 0)
+    highland_mask = highland_binary.astype(np.uint8)
 
-    # Step 4: Adaptive Sigmoid stretch
-    # Center = fraction of global max distance. This ensures the transition
-    # zone automatically scales to any grain size.
-    # For two touching circles radius=50: max~50px, saddle~40px
-    #   x0 = 0.8 * 50 = 40 -> saddle at 40 -> sigma(0)=0.5 -> threshold 0.7
-    #   filters out saddle region, separating the two plateaus.
-    valid_dist = dist_raw[ferrite_mask > 0]
-    if valid_dist.size > 0:
-        dist_max = float(np.max(valid_dist))
-    else:
-        dist_max = 0.0
-    x0_effective = dist_max * sigmoid_x0
-
-    dist_stretched = 1.0 / (1.0 + np.exp(-sigmoid_k * (dist_raw - x0_effective)))
-    # Re-zero background after Sigmoid
-    dist_stretched[ferrite_mask == 0] = 0.0
-
-    # Step 5: Extract highland islands via hard threshold
-    highland_mask = (dist_stretched > highland_threshold) & (ferrite_mask > 0)
-    highland_mask = highland_mask.astype(np.uint8)
-
-    # Step 6: Connected components on highlands -> centroid per island
-    num_islands, island_labels, stats, centroids = cv2.connectedComponentsWithStats(
+    # Step 5: Connected components + relative area topology filter
+    num_islands, island_labels, stats, _ = cv2.connectedComponentsWithStats(
         highland_mask, connectivity=8
     )
 
@@ -236,28 +237,46 @@ def watershed_separation(
         num_labels, labels = cv2.connectedComponents(ferrite_mask, connectivity=8)
         return labels.astype(np.int32)
 
-    # Build seed markers from island centroids
-    seed_labels = np.zeros((h, w), dtype=np.int32)
-    seed_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    # Find max island area (excluding background label 0)
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    max_island_area = int(np.max(areas)) if len(areas) > 0 else 0
+
+    # Filter: keep islands that pass BOTH relative and absolute area filters
+    valid_islands = []
     for island_id in range(1, num_islands):
         area = int(stats[island_id, cv2.CC_STAT_AREA])
-        if area < min_distance:
+        if area < min_island_area:
             continue
-        cx = int(round(centroids[island_id, 0]))
-        cy = int(round(centroids[island_id, 1]))
+        if max_island_area > 0 and area < max_island_area * area_ratio_threshold:
+            continue
+        valid_islands.append(island_id)
+
+    if len(valid_islands) == 0:
+        num_labels, labels = cv2.connectedComponents(ferrite_mask, connectivity=8)
+        return labels.astype(np.int32)
+
+    # Step 6: cv2.moments centroid extraction -> single-pixel markers
+    seed_labels = np.zeros((h, w), dtype=np.int32)
+    for new_id, island_id in enumerate(valid_islands, start=1):
+        island_pixel_mask = (island_labels == island_id).astype(np.uint8)
+        M = cv2.moments(island_pixel_mask)
+        if M["m00"] == 0:
+            continue
+        cx = int(round(M["m10"] / M["m00"]))
+        cy = int(round(M["m01"] / M["m00"]))
         # Clamp to image bounds
         cx = max(0, min(w - 1, cx))
         cy = max(0, min(h - 1, cy))
-        # Mark centroid pixel with island ID
-        seed_labels[cy, cx] = island_id
+        seed_labels[cy, cx] = new_id
 
-    # Check if any seeds survived area filter
+    # Check if any seeds survived
     if seed_labels.max() == 0:
         num_labels, labels = cv2.connectedComponents(ferrite_mask, connectivity=8)
         return labels.astype(np.int32)
 
-    # Step 7: Dilate seeds with fixed (3,3) ellipse kernel for stability
+    # Step 7: 3x3 ellipse dilation of markers
     seed_mask = (seed_labels > 0).astype(np.uint8)
+    seed_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     seed_mask_dilated = cv2.dilate(seed_mask, seed_kernel)
 
     # Re-assign IDs to dilated seeds via connected components
@@ -267,12 +286,12 @@ def watershed_separation(
         num_labels, labels = cv2.connectedComponents(ferrite_mask, connectivity=8)
         return labels.astype(np.int32)
 
-    # Step 8: Watershed on inverted smoothed distance field
+    # Step 8: Watershed on inverted purified distance field
     markers = seed_labels_final.copy()
     markers[ferrite_mask == 0] = -1  # mark background explicitly
 
     labels = sk_watershed(
-        -dist_smooth,  # negate: centers become basins
+        -dist_purified,  # negate: centers become basins
         markers=markers,
         mask=ferrite_mask > 0,  # restrict to ferrite region
     )
@@ -293,6 +312,11 @@ def topo_instance_separation(
     max_instance_id: int = 255,
     connectivity: int = 8,
     use_watershed: bool = True,
+    alpha: float = 0.75,
+    beta: float = 0.05,
+    max_filter_size: Optional[int] = None,
+    area_ratio_threshold: float = 0.2,
+    min_island_area: int = 5,
 ) -> Tuple[np.ndarray, Dict[int, int]]:
     """
     Topological instance separation and global ID assignment.
@@ -301,6 +325,13 @@ def topo_instance_separation(
     For pearlite (class 0): connected components analysis.
     Filter instances smaller than min_instance_area.
     Assign IDs 1~255 by descending area.
+
+    Args:
+        alpha: Adaptive threshold coefficient for watershed (default 0.75).
+        beta: Global bias for watershed adaptive threshold (default 0.05).
+        max_filter_size: Local max filter window size. None=adaptive.
+        area_ratio_threshold: Relative area filter ratio (default 0.2).
+        min_island_area: Absolute min island area for seed extraction (default 5).
     """
     h, w = mask.shape[:2]
     inst_map = np.zeros((h, w), dtype=np.uint8)
@@ -315,7 +346,11 @@ def topo_instance_separation(
             ferrite_labels = watershed_separation(
                 ferrite_binary,
                 dist_field,
-                kernel_size=_get_dynamic_kernel_size(h * w),
+                alpha=alpha,
+                beta=beta,
+                max_filter_size=max_filter_size,
+                area_ratio_threshold=area_ratio_threshold,
+                min_island_area=min_island_area,
             )
         else:
             _, ferrite_labels = cv2.connectedComponents(ferrite_binary, connectivity=connectivity)
@@ -380,6 +415,11 @@ def post_process_prediction(
     dist_scale_factor: float = 10.0,
     spatial_scale: float = 1.0,
     use_watershed: bool = True,
+    alpha: float = 0.75,
+    beta: float = 0.05,
+    max_filter_size: Optional[int] = None,
+    area_ratio_threshold: float = 0.2,
+    min_island_area: int = 5,
 ) -> Tuple[Dict[str, str], np.ndarray, Dict[int, int]]:
     """
     Full post-processing pipeline:
@@ -388,6 +428,13 @@ def post_process_prediction(
     3. Distance field spatial compensation
     4. Topological separation (watershed + connected components)
     5. Save _inst.png and _class.json
+
+    Args:
+        alpha: Adaptive threshold coefficient for watershed (default 0.75).
+        beta: Global bias for watershed adaptive threshold (default 0.05).
+        max_filter_size: Local max filter window size. None=adaptive.
+        area_ratio_threshold: Relative area filter ratio (default 0.2).
+        min_island_area: Absolute min island area for seed extraction (default 5).
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -410,6 +457,8 @@ def post_process_prediction(
         mask, dist_field=dist_field,
         min_instance_area=min_instance_area, max_instance_id=max_instance_id,
         connectivity=connectivity, use_watershed=use_watershed,
+        alpha=alpha, beta=beta, max_filter_size=max_filter_size,
+        area_ratio_threshold=area_ratio_threshold, min_island_area=min_island_area,
     )
 
     inst_path = os.path.join(output_dir, f"{image_basename}_inst.png")
