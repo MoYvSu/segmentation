@@ -36,6 +36,7 @@ from data.dataset import (
 from utils.post_process import (
     compensate_distance_field,
     _get_dynamic_kernel_size,
+    _get_adaptive_max_filter_size,
     watershed_separation,
     gaussian_weight_map,
 )
@@ -255,10 +256,10 @@ def test_watershed():
     num_cc, labels_cc = cv2.connectedComponents(mask, connectivity=8)
     print("  connected components: %d (expected 1, circles overlap)" % (num_cc - 1))
 
-    kernel_size = _get_dynamic_kernel_size(h * w)
-    print("  dynamic kernel size: %d" % kernel_size)
+    max_filter_size = _get_adaptive_max_filter_size(h * w)
+    print("  adaptive max filter size: %d" % max_filter_size)
 
-    labels_ws = watershed_separation(mask, dist_field, kernel_size=kernel_size)
+    labels_ws = watershed_separation(mask, dist_field, max_filter_size=max_filter_size)
     num_ws = len(np.unique(labels_ws)) - 1
     print("  watershed instances: %d (expected 2)" % num_ws)
 
@@ -277,15 +278,15 @@ def test_watershed():
     cv2.imwrite(os.path.join(OUTPUT_DIR, "watershed_cc_result.png"), vis_cc)
     cv2.imwrite(os.path.join(OUTPUT_DIR, "watershed_ws_result.png"), vis_ws)
 
-    print("\n  Dynamic kernel size vs image area:")
+    print("\n  Adaptive max filter size vs image area:")
     for area_name, area in [
         ("1024x1024", 1024 * 1024),
         ("1224x1024", 1224 * 1024),
         ("2448x2048", 2448 * 2048),
         ("1936x2584", 1936 * 2584),
     ]:
-        ks = _get_dynamic_kernel_size(area)
-        print("    %s (area=%d): kernel_size=%d" % (area_name, area, ks))
+        mfs = _get_adaptive_max_filter_size(area)
+        print("    %s (area=%d): max_filter_size=%d" % (area_name, area, mfs))
 
 
 def main():

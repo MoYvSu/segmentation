@@ -105,7 +105,8 @@ def predict_single_image(
     train_max_dim=2584,
     dist_scale_factor=10.0,
     output_dir=None, save_visualization=True,
-    sigmoid_x0=0.8, sigmoid_k=0.3, highland_threshold=0.8,
+    alpha=0.75, beta=0.05, max_filter_size=None,
+    area_ratio_threshold=0.2, min_island_area=5,
 ):
     """
     Unified Letterbox inference + post-processing for a single image.
@@ -158,9 +159,8 @@ def predict_single_image(
             dist_scale_factor=dist_scale_factor,
             spatial_scale=spatial_scale,
             use_watershed=True,
-            sigmoid_x0=sigmoid_x0,
-            sigmoid_k=sigmoid_k,
-            highland_threshold=highland_threshold,
+            alpha=alpha, beta=beta, max_filter_size=max_filter_size,
+            area_ratio_threshold=area_ratio_threshold, min_island_area=min_island_area,
         )
     else:
         mask = output_to_binary_mask(
@@ -183,9 +183,8 @@ def predict_single_image(
             max_instance_id=max_instance_id,
             connectivity=connectivity,
             use_watershed=True,
-            sigmoid_x0=sigmoid_x0,
-            sigmoid_k=sigmoid_k,
-            highland_threshold=highland_threshold,
+            alpha=alpha, beta=beta, max_filter_size=max_filter_size,
+            area_ratio_threshold=area_ratio_threshold, min_island_area=min_island_area,
         )
         output_paths = {}
 
@@ -300,10 +299,12 @@ Processing:
             train_max_dim=infer_cfg.get("train_max_dim", 2584),
             dist_scale_factor=data_cfg.get("dist_scale_factor", 10.0),
             output_dir=output_dir,
-            save_visualization=True,
-            sigmoid_x0=post_cfg.get("sigmoid_x0", 0.8),
-            sigmoid_k=post_cfg.get("sigmoid_k", 0.3),
-            highland_threshold=post_cfg.get("highland_threshold", 0.8),
+            save_visualization=post_cfg.get("save_visualization", False),
+            alpha=post_cfg.get("alpha", 0.75),
+            beta=post_cfg.get("beta", 0.05),
+            max_filter_size=post_cfg.get("max_filter_size", 0) or None,
+            area_ratio_threshold=post_cfg.get("area_ratio_threshold", 0.2),
+            min_island_area=post_cfg.get("min_noise_area", 50),
         )
 
         elapsed = time.time() - start_time

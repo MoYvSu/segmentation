@@ -149,11 +149,14 @@ post_process:
   connectivity: 8
   # 噪点面积过滤
   min_noise_area: 50
-  # Sigmoid 峡谷深挖参数（用于 watershed 种子提取）
-  # sigmoid_x0: Sigmoid 中心点，以全局最大原始距离的分数表示
-  #   0.8 = 在 80% 峰值距离处过渡，值越小高原越小（更激进）
-  sigmoid_x0: 0.8
-  # sigmoid_k: Sigmoid 增益（原始像素距离空间），值越大过渡越锐利
-  sigmoid_k: 0.3
-  # highland_threshold: Sigmoid 输出 [0,1] 的硬阈值，提取高原孤岛作为种子
-  highland_threshold: 0.8
+  # 局部极大值自适应阈值参数（用于 watershed 种子提取）
+  # alpha: 自适应阈值系数，Threshold = alpha * local_max + beta
+  alpha: 0.75
+  # beta: 全局偏置常数
+  beta: 0.05
+  # max_filter_size: 局部极大值滤波窗口尺寸（0=自适应15~31，>0=固定值）
+  max_filter_size: 0
+  # area_ratio_threshold: 相对面积过滤阈值（小于最大斑块面积此比例的噪声斑块被剔除）
+  area_ratio_threshold: 0.2
+  # 是否保存可视化图（_mask.png 和 _dist.png），默认关闭只生成实例ID图
+  save_visualization: false
