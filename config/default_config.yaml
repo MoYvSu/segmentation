@@ -125,6 +125,22 @@ inference:
   # 训练图像 1936x2584，letterbox 后缩放比为 1024/2584
   train_max_dim: 2584
 
+  # -----------------------------------------------------------------
+  # 模型权重阶段选择
+  # -----------------------------------------------------------------
+  # checkpoint_stage: 选择推理时加载的模型阶段
+  #   "stage1" - 使用第一阶段全量微调解码头权重
+  #   "stage2" - 使用第二阶段半监督微调权重（含分支头微调）
+  checkpoint_stage: "stage1"
+
+  # stage1_checkpoint: 第一阶段权重路径（相对 project_root）
+  # 由 train.py 产出，保存完整 decoder_state_dict
+  stage1_checkpoint: "outputs/best_model.pth"
+
+  # stage2_checkpoint: 第二阶段权重路径（相对 project_root）
+  # 由 train_stage2.py 产出，保存完整 decoder_state_dict（含微调后的分支头）
+  stage2_checkpoint: "outputs/stage2/final_model_stage2.pth"
+
 # -----------------------------------------------------------------------------
 # 主动学习配置
 # -----------------------------------------------------------------------------

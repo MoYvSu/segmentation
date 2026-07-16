@@ -218,14 +218,22 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Examples:
-  # Default: use config paths, run on data/smoketest/
+  # Default: use config checkpoint_stage, run on data/smoketest/
   python inference.py
 
-  # Specify config and checkpoint
-  python inference.py --config config/default_config.yaml --checkpoint outputs/best_model.pth
+  # Override checkpoint stage via config (stage1 or stage2)
+  # Edit config/default_config.yaml: inference.checkpoint_stage: "stage2"
+
+  # Override checkpoint path directly (highest priority)
+  python inference.py --checkpoint outputs/stage2/final_model_stage2.pth
 
   # Custom test images and output directory
   python inference.py --test_dir data/my_test_images --output_dir outputs/my_results
+
+Checkpoint selection (priority: --checkpoint > config checkpoint_stage):
+  config/default_config.yaml -> inference.checkpoint_stage: "stage1" or "stage2"
+  config/default_config.yaml -> inference.stage1_checkpoint: "outputs/best_model.pth"
+  config/default_config.yaml -> inference.stage2_checkpoint: "outputs/stage2/final_model_stage2.pth"
 
 Output files (per image <basename>):
   <basename>_inst.png   - Instance map (uint8, 1-255 by descending area)
@@ -244,8 +252,8 @@ Processing:
         help="Path to YAML config file (default: config/default_config.yaml)",
     )
     parser.add_argument(
-        "--checkpoint", type=str, default="outputs/best_model.pth",
-        help="Path to trained decoder checkpoint .pth file (default: outputs/best_model.pth)",
+        "--checkpoint", type=str, default=None,
+        help="Path to trained decoder checkpoint .pth file (overrides config checkpoint_stage)",
     )
     parser.add_argument(
         "--test_dir", type=str, default=None,
@@ -273,10 +281,36 @@ Processing:
     output_dir = args.output_dir or os.path.join(paths_cfg["project_root"], infer_cfg["output_dir"])
     os.makedirs(output_dir, exist_ok=True)
 
+    # ------------------------------------------------------------------
+    # 模型权重路径解析
+    # ------------------------------------------------------------------
+    # 优先级：--checkpoint CLI 参数 > config inference.checkpoint_stage
+    if args.checkpoint:
+        checkpoint_path = args.checkpoint
+        logger.info(f"Using checkpoint from CLI: {checkpoint_path}")
+    else:
+        checkpoint_stage = infer_cfg.get("checkpoint_stage", "stage1")
+        if checkpoint_stage == "stage2":
+            checkpoint_path = os.path.join(
+                paths_cfg["project_root"],
+                infer_cfg.get("stage2_checkpoint", "outputs/stage2/final_model_stage2.pth"),
+            )
+            logger.info(f"Using Stage-2 checkpoint from config: {checkpoint_path}")
+        else:
+            checkpoint_path = os.path.join(
+                paths_cfg["project_root"],
+                infer_cfg.get("stage1_checkpoint", "outputs/best_model.pth"),
+            )
+            logger.info(f"Using Stage-1 checkpoint from config: {checkpoint_path}")
+
+    if not os.path.exists(checkpoint_path):
+        logger.error(f"Checkpoint not found: {checkpoint_path}")
+        return
+
     logger.info(f"Test dir: {test_dir}")
     logger.info(f"Output dir: {output_dir}")
 
-    model = build_model(config, device, args.checkpoint)
+    model = build_model(config, device, checkpoint_path)
 
     valid_exts = ("*.jpg", "*.jpeg", "*.png", "*.bmp", "*.tif", "*.tiff")
     image_paths = []

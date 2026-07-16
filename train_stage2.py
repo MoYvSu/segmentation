@@ -525,13 +525,8 @@ def main():
     best_val_iou = 0.0
     if args.resume and os.path.exists(args.resume):
         checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
-        # 仅加载可训练参数
-        model.decoder.cls_branch.load_state_dict(
-            checkpoint["cls_branch_state_dict"]
-        )
-        model.decoder.reg_branch.load_state_dict(
-            checkpoint["reg_branch_state_dict"]
-        )
+        # 加载完整 decoder 权重（统一格式）
+        model.decoder.load_state_dict(checkpoint["decoder_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         start_epoch = checkpoint["epoch"] + 1
@@ -627,8 +622,7 @@ def main():
             torch.save(
                 {
                     "epoch": epoch,
-                    "cls_branch_state_dict": model.decoder.cls_branch.state_dict(),
-                    "reg_branch_state_dict": model.decoder.reg_branch.state_dict(),
+                    "decoder_state_dict": model.decoder.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "scheduler_state_dict": scheduler.state_dict(),
                     "best_val_iou": best_val_iou,
@@ -644,8 +638,7 @@ def main():
             torch.save(
                 {
                     "epoch": epoch,
-                    "cls_branch_state_dict": model.decoder.cls_branch.state_dict(),
-                    "reg_branch_state_dict": model.decoder.reg_branch.state_dict(),
+                    "decoder_state_dict": model.decoder.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "scheduler_state_dict": scheduler.state_dict(),
                     "best_val_iou": best_val_iou,
@@ -659,8 +652,7 @@ def main():
     torch.save(
         {
             "epoch": total_epochs - 1,
-            "cls_branch_state_dict": model.decoder.cls_branch.state_dict(),
-            "reg_branch_state_dict": model.decoder.reg_branch.state_dict(),
+            "decoder_state_dict": model.decoder.state_dict(),
             "best_val_iou": best_val_iou,
             "config": config,
         },
