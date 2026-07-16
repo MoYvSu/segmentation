@@ -639,3 +639,291 @@ def post_process_prediction(
 
     # Return inst_map and class_map so callers can reuse without re-computing
     return output_paths, inst_map, class_map
+
+
+# ---------------------------------------------------------------------------
+# Vector Field Centroid Collapse + DBSCAN Clustering (Phase 2)
+# ---------------------------------------------------------------------------
+
+def centroid_collapse_clustering(
+    ferrite_mask: np.ndarray,
+    vx_field: np.ndarray,
+    vy_field: np.ndarray,
+    image_size: int = 1024,
+    dbscan_eps: float = 5.0,
+    dbscan_min_samples: int = 3,
+    downsample_grid: int = 4,
+    min_instance_area: int = 50,
+    max_instance_id: int = 255,
+) -> Tuple[np.ndarray, Dict[int, int]]:
+    """
+    Vector field centroid collapse + DBSCAN clustering for instance separation.
+
+    Algorithm:
+    1. Extract foreground pixels (ferrite_mask > 0)
+    2. Denormalize: offset_x = vx * image_size, offset_y = vy * image_size
+    3. Centroid collapse: coords_collapsed = coords_orig + offsets
+    4. Grid downsampling: bucket aggregation to reduce point count
+    5. DBSCAN clustering in collapsed space
+    6. Map cluster labels back to original pixel positions
+    7. Area filter + ID assignment (1-255 by descending area)
+
+    Args:
+        ferrite_mask: [H, W] binary mask (1=ferrite, 0=background)
+        vx_field: [H, W] normalized X offset [-1, 1]
+        vy_field: [H, W] normalized Y offset [-1, 1]
+        image_size: normalization factor used during training (default 1024)
+        dbscan_eps: DBSCAN neighborhood radius in collapsed space (default 5.0)
+        dbscan_min_samples: DBSCAN minimum samples per cluster (default 3)
+        downsample_grid: grid size for downsampling (default 4 = 4x4 buckets)
+        min_instance_area: minimum instance area in pixels (default 50)
+        max_instance_id: maximum instance ID (default 255, uint8)
+
+    Returns:
+        inst_map: [H, W] uint8 instance map (0=background, 1-255 by descending area)
+        class_map: dict {instance_id: class_label} (all 1=ferrite for this function)
+    """
+    from sklearn.cluster import DBSCAN
+
+    h, w = ferrite_mask.shape[:2]
+
+    # Step 1: Extract foreground pixels
+    ys, xs = np.where(ferrite_mask > 0)
+    if len(ys) == 0:
+        return np.zeros((h, w), dtype=np.uint8), {}
+
+    # Step 2: Denormalize offsets
+    vx_vals = vx_field[ys, xs] * image_size
+    vy_vals = vy_field[ys, xs] * image_size
+
+    # Step 3: Centroid collapse
+    collapsed_x = xs.astype(np.float64) + vx_vals
+    collapsed_y = ys.astype(np.float64) + vy_vals
+    coords_collapsed = np.stack([collapsed_x, collapsed_y], axis=1)  # [N, 2]
+
+    # Step 4: Grid downsampling
+    if downsample_grid > 1:
+        # Assign each point to a grid bucket
+        grid_x = (collapsed_x / downsample_grid).astype(np.int32)
+        grid_y = (collapsed_y / downsample_grid).astype(np.int32)
+
+        # Aggregate: mean position per bucket, collect original indices
+        bucket_map = {}  # (gx, gy) -> list of original indices
+        for i in range(len(ys)):
+            key = (grid_x[i], grid_y[i])
+            if key not in bucket_map:
+                bucket_map[key] = []
+            bucket_map[key].append(i)
+
+        # Create downsampled coordinates and keep mapping to original indices
+        ds_coords = []
+        ds_to_orig = []
+        for key, indices in bucket_map.items():
+            mean_x = collapsed_x[indices].mean()
+            mean_y = collapsed_y[indices].mean()
+            ds_coords.append([mean_x, mean_y])
+            ds_to_orig.append(indices)
+        ds_coords = np.array(ds_coords, dtype=np.float64)
+    else:
+        ds_coords = coords_collapsed
+        ds_to_orig = [[i] for i in range(len(ys))]
+
+    # Step 5: DBSCAN clustering
+    clustering = DBSCAN(
+        eps=dbscan_eps,
+        min_samples=dbscan_min_samples,
+        algorithm="auto",
+        n_jobs=-1,
+    ).fit(ds_coords)
+
+    cluster_labels_ds = clustering.labels_  # -1 = noise
+
+    # Step 6: Map cluster labels back to original pixel positions
+    # Assign each original pixel the cluster label of its downsampled bucket
+    pixel_labels = np.full(len(ys), -1, dtype=np.int32)
+    for ds_idx, orig_indices in enumerate(ds_to_orig):
+        label = cluster_labels_ds[ds_idx]
+        for orig_idx in orig_indices:
+            pixel_labels[orig_idx] = label
+
+    # Handle noise points: assign to nearest non-noise cluster
+    noise_mask = pixel_labels == -1
+    if noise_mask.any() and not noise_mask.all():
+        noise_indices = np.where(noise_mask)[0]
+        non_noise_indices = np.where(~noise_mask)[0]
+        if len(non_noise_indices) > 0:
+            from scipy.spatial import cKDTree
+            tree = cKDTree(coords_collapsed[non_noise_indices])
+            _, nearest = tree.query(coords_collapsed[noise_indices])
+            pixel_labels[noise_indices] = pixel_labels[non_noise_indices[nearest]]
+
+    # If all noise (DBSCAN failed), fallback to connected components
+    if pixel_labels.max() < 0:
+        _, cc_labels = cv2.connectedComponents(ferrite_mask, connectivity=8)
+        pixel_labels = cc_labels[ys, xs]
+
+    # Step 7: Build instance map + area filter + ID assignment
+    # Relabel to consecutive IDs
+    unique_labels = np.unique(pixel_labels)
+    unique_labels = unique_labels[unique_labels >= 0]  # remove remaining -1
+
+    instances = []
+    for label_id in unique_labels:
+        inst_mask = pixel_labels == label_id
+        area = int(inst_mask.sum())
+        if area < min_instance_area:
+            continue
+        instances.append((area, inst_mask))
+
+    # Sort by area descending
+    instances.sort(key=lambda x: x[0], reverse=True)
+
+    # Build instance map
+    inst_map = np.zeros((h, w), dtype=np.uint8)
+    class_map = {}
+    current_id = 1
+    for area, inst_mask in instances:
+        if current_id > max_instance_id:
+            current_id = max_instance_id
+        for i, idx in enumerate(np.where(inst_mask)[0]):
+            inst_map[ys[idx], xs[idx]] = current_id
+        class_map[current_id] = CLASS_FERRITE
+        if current_id < max_instance_id:
+            current_id += 1
+
+    return inst_map, class_map
+
+
+def post_process_prediction_vector(
+    output: torch.Tensor,
+    original_size: Tuple[int, int],
+    output_dir: str,
+    image_basename: str,
+    image_size: int = 1024,
+    min_instance_area: int = 50,
+    max_instance_id: int = 255,
+    threshold: float = 0.5,
+    dbscan_eps: float = 5.0,
+    dbscan_min_samples: int = 3,
+    downsample_grid: int = 4,
+    save_visualization: bool = True,
+) -> Tuple[Dict[str, str], np.ndarray, Dict[int, int]]:
+    """
+    Full post-processing pipeline using vector field centroid collapse.
+
+    Steps:
+    1. Upsample to original size
+    2. Sigmoid + threshold -> binary mask
+    3. Extract Vx/Vy vector field channels
+    4. Centroid collapse + DBSCAN clustering (ferrite)
+    5. Connected components (pearlite)
+    6. Save _inst.png and _class.json
+
+    Args:
+        output: [B, 3, H, W] or [3, H, W] model output
+        original_size: (H, W) original image size
+        output_dir: directory for output files
+        image_basename: basename for output files
+        image_size: normalization factor used in training (default 1024)
+        min_instance_area: minimum instance area filter
+        max_instance_id: maximum instance ID (uint8)
+        threshold: binary classification threshold
+        dbscan_eps: DBSCAN neighborhood radius
+        dbscan_min_samples: DBSCAN minimum samples
+        downsample_grid: grid size for downsampling
+        save_visualization: save mask/vec visualization
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    if output.ndim == 3:
+        output = output.unsqueeze(0)
+    elif output.ndim != 4:
+        raise ValueError("output ndim should be 3 or 4")
+
+    # Upsample to original size
+    h, w = original_size
+    output = F.interpolate(output, size=(h, w), mode="bilinear", align_corners=True)
+
+    # Extract channels
+    seg_logits = output[0, 0].cpu()  # [H, W]
+    vx_field = output[0, 1].cpu().numpy().astype(np.float32)  # [H, W]
+    vy_field = output[0, 2].cpu().numpy().astype(np.float32)  # [H, W]
+
+    # Binary mask
+    seg_prob = torch.sigmoid(seg_logits)
+    mask = (seg_prob > threshold).numpy().astype(np.uint8)  # [H, W]
+
+    # Ferrite instances via centroid collapse
+    ferrite_binary = (mask == CLASS_FERRITE).astype(np.uint8)
+    if ferrite_binary.sum() > 0:
+        ferrite_inst_map, ferrite_class_map = centroid_collapse_clustering(
+            ferrite_binary,
+            vx_field,
+            vy_field,
+            image_size=image_size,
+            dbscan_eps=dbscan_eps,
+            dbscan_min_samples=dbscan_min_samples,
+            downsample_grid=downsample_grid,
+            min_instance_area=min_instance_area,
+            max_instance_id=max_instance_id,
+        )
+    else:
+        ferrite_inst_map = np.zeros((h, w), dtype=np.uint8)
+        ferrite_class_map = {}
+
+    # Pearlite instances via connected components
+    pearlite_binary = (mask == CLASS_PEARLITE).astype(np.uint8)
+    pearlite_instances = []
+    if pearlite_binary.sum() > 0:
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+            pearlite_binary, connectivity=8
+        )
+        for label_id in range(1, num_labels):
+            area = int(stats[label_id, cv2.CC_STAT_AREA])
+            if area < min_instance_area:
+                continue
+            pearlite_instances.append((area, labels == label_id))
+
+    # Merge: ferrite instances already have IDs 1..N
+    # Append pearlite instances with continuing IDs
+    inst_map = ferrite_inst_map.copy()
+    class_map = dict(ferrite_class_map)
+    current_id = max(class_map.keys()) + 1 if class_map else 1
+
+    for area, inst_mask in sorted(pearlite_instances, key=lambda x: x[0], reverse=True):
+        if current_id > max_instance_id:
+            current_id = max_instance_id
+        inst_map[inst_mask] = current_id
+        class_map[current_id] = CLASS_PEARLITE
+        if current_id < max_instance_id:
+            current_id += 1
+
+    # Save outputs
+    inst_path = os.path.join(output_dir, f"{image_basename}_inst.png")
+    cv2.imwrite(inst_path, inst_map)
+
+    class_json_path = os.path.join(output_dir, f"{image_basename}_class.json")
+    class_json = {str(k): v for k, v in class_map.items()}
+    with open(class_json_path, "w", encoding="utf-8") as f:
+        json.dump(class_json, f, ensure_ascii=False, indent=2)
+
+    output_paths = {"inst_path": inst_path, "class_json_path": class_json_path}
+
+    if save_visualization:
+        mask_path = os.path.join(output_dir, f"{image_basename}_mask.png")
+        color_map = np.zeros((h, w, 3), dtype=np.uint8)
+        color_map[mask == CLASS_PEARLITE] = [0, 0, 128]
+        color_map[mask == CLASS_FERRITE] = [0, 128, 0]
+        cv2.imwrite(mask_path, cv2.cvtColor(color_map, cv2.COLOR_RGB2BGR))
+        output_paths["mask_path"] = mask_path
+
+        # Vector field visualization: color-coded by direction
+        vec_vis = np.zeros((h, w, 3), dtype=np.uint8)
+        vec_vis[..., 0] = np.clip(((vx_field + 1) * 127.5), 0, 255).astype(np.uint8)
+        vec_vis[..., 1] = np.clip(((vy_field + 1) * 127.5), 0, 255).astype(np.uint8)
+        vec_vis[..., 2] = 128
+        vec_path = os.path.join(output_dir, f"{image_basename}_vec.png")
+        cv2.imwrite(vec_path, cv2.cvtColor(vec_vis, cv2.COLOR_RGB2BGR))
+        output_paths["vec_path"] = vec_path
+
+    return output_paths, inst_map, class_map

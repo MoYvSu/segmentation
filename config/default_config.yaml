@@ -187,3 +187,13 @@ post_process:
   snake_max_iter: 80
   # snake_area_shrink_threshold: 面积缩水回退阈值（超过此比例则放弃平滑结果）
   snake_area_shrink_threshold: 0.15
+
+  # -----------------------------------------------------------------
+  # 向量场后处理参数（Phase 2: Centroid Collapse + DBSCAN）
+  # -----------------------------------------------------------------
+  # dbscan_eps: DBSCAN 聚类邻域半径（降采样空间中的像素距离）
+  dbscan_eps: 5.0
+  # dbscan_min_samples: DBSCAN 最小聚类点数
+  dbscan_min_samples: 3
+  # downsample_grid: 网格降采样桶大小（4 = 4x4 像素桶聚合）
+  downsample_grid: 4

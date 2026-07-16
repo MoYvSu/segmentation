@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Test inference entry (dual-task distance field - unified letterbox)
-=============================================================================
+Test inference entry (vector field version - unified letterbox)
+================================================================
 Load trained FPN decoder weights, run inference on test images,
-perform full post-processing (upsample + threshold + distance compensation +
-watershed topo separation + instance ID assignment).
+perform vector field centroid collapse + DBSCAN clustering for instance separation.
 
 All images are processed via Letterbox to 1024x1024 (same as training),
 ensuring consistent preprocessing between train and inference.
@@ -32,11 +31,8 @@ from data.dataset import letterbox
 from models.fpn_decoder import FPNDecoder, SegmentationModel
 from models.sam2_encoder import SAM2Encoder
 from utils.post_process import (
-    post_process_prediction,
-    output_to_binary_mask,
-    output_to_distance_field,
-    topo_instance_separation,
-    compensate_distance_field,
+    post_process_prediction_vector,
+    centroid_collapse_clustering,
 )
 
 logging.basicConfig(
@@ -99,19 +95,13 @@ def build_model(config, device, checkpoint_path=None):
 def predict_single_image(
     model, image_path, device,
     image_size=1024,
-    min_instance_area=50, max_instance_id=255, connectivity=8,
-    interpolate_mode="bilinear", align_corners=True,
+    min_instance_area=50, max_instance_id=255,
     threshold=0.5,
-    train_max_dim=2584,
-    dist_scale_factor=10.0,
     output_dir=None, save_visualization=True,
-    alpha=0.75, beta=0.05, max_filter_size=None,
-    area_ratio_threshold=0.2, min_island_area=5,
-    enable_snake_smoothing=False, snake_alpha=0.02, snake_beta=0.2,
-    snake_max_iter=80, snake_area_shrink_threshold=0.15,
+    dbscan_eps=5.0, dbscan_min_samples=3, downsample_grid=4,
 ):
     """
-    Unified Letterbox inference + post-processing for a single image.
+    Unified Letterbox inference + vector field post-processing for a single image.
 
     All images are Letterboxed to image_size x image_size (same as training),
     regardless of original dimensions. This ensures the model sees the same
@@ -125,9 +115,6 @@ def predict_single_image(
 
     basename = os.path.splitext(os.path.basename(image_path))[0]
 
-    train_scale = image_size / train_max_dim
-    spatial_scale = 1.0 / train_scale
-
     # Letterbox to image_size x image_size (same as training)
     image_lb, scale, pad_h, pad_w = letterbox(image_rgb, image_size)
     image_tensor = torch.from_numpy(image_lb).float().permute(2, 0, 1).unsqueeze(0) / 255.0
@@ -139,63 +126,70 @@ def predict_single_image(
 
     # Inverse Letterbox: crop padding from model output, then upsample to original size
     # FPN native output is image_size//4 (e.g. 256 for 1024 input)
-    out_native = image_size // 4
     content_h = int(round(h_orig * scale / 4))  # content rows in native resolution
     content_w = int(round(w_orig * scale / 4))  # content cols in native resolution
     output = output[:, :, :content_h, :content_w]
     output = F.interpolate(output, size=(h_orig, w_orig), mode="bilinear", align_corners=True)
 
     if output_dir is not None:
-        output_paths, inst_map, class_map = post_process_prediction(
+        output_paths, inst_map, class_map = post_process_prediction_vector(
             output=output,
             original_size=(h_orig, w_orig),
             output_dir=output_dir,
             image_basename=basename,
+            image_size=image_size,
             min_instance_area=min_instance_area,
             max_instance_id=max_instance_id,
-            connectivity=connectivity,
-            interpolate_mode=interpolate_mode,
-            align_corners=align_corners,
             threshold=threshold,
+            dbscan_eps=dbscan_eps,
+            dbscan_min_samples=dbscan_min_samples,
+            downsample_grid=downsample_grid,
             save_visualization=save_visualization,
-            dist_scale_factor=dist_scale_factor,
-            spatial_scale=spatial_scale,
-            use_watershed=True,
-            alpha=alpha, beta=beta, max_filter_size=max_filter_size,
-            area_ratio_threshold=area_ratio_threshold, min_island_area=min_island_area,
-            enable_snake_smoothing=enable_snake_smoothing,
-            snake_alpha=snake_alpha, snake_beta=snake_beta,
-            snake_max_iter=snake_max_iter,
-            snake_area_shrink_threshold=snake_area_shrink_threshold,
         )
     else:
-        mask = output_to_binary_mask(
-            output, threshold=threshold, original_size=(h_orig, w_orig),
-            mode=interpolate_mode, align_corners=align_corners,
-        )
-        dist_field = output_to_distance_field(
-            output, original_size=(h_orig, w_orig),
-            mode=interpolate_mode, align_corners=align_corners,
-        )
-        dist_field = compensate_distance_field(
-            dist_field,
-            spatial_scale=spatial_scale,
-            scale_factor=dist_scale_factor,
-        )
-        inst_map, class_map = topo_instance_separation(
-            mask,
-            dist_field=dist_field,
-            min_instance_area=min_instance_area,
-            max_instance_id=max_instance_id,
-            connectivity=connectivity,
-            use_watershed=True,
-            alpha=alpha, beta=beta, max_filter_size=max_filter_size,
-            area_ratio_threshold=area_ratio_threshold, min_island_area=min_island_area,
-            enable_snake_smoothing=enable_snake_smoothing,
-            snake_alpha=snake_alpha, snake_beta=snake_beta,
-            snake_max_iter=snake_max_iter,
-            snake_area_shrink_threshold=snake_area_shrink_threshold,
-        )
+        # Fallback: no output dir, return inst_map directly
+        from utils.post_process import CLASS_FERRITE, CLASS_PEARLITE
+
+        if output.ndim == 3:
+            output = output.unsqueeze(0)
+
+        seg_logits = output[0, 0].cpu()
+        vx_field = output[0, 1].cpu().numpy().astype(np.float32)
+        vy_field = output[0, 2].cpu().numpy().astype(np.float32)
+        seg_prob = torch.sigmoid(seg_logits)
+        mask = (seg_prob > threshold).numpy().astype(np.uint8)
+
+        ferrite_binary = (mask == CLASS_FERRITE).astype(np.uint8)
+        if ferrite_binary.sum() > 0:
+            inst_map, class_map = centroid_collapse_clustering(
+                ferrite_binary, vx_field, vy_field,
+                image_size=image_size,
+                dbscan_eps=dbscan_eps,
+                dbscan_min_samples=dbscan_min_samples,
+                downsample_grid=downsample_grid,
+                min_instance_area=min_instance_area,
+                max_instance_id=max_instance_id,
+            )
+        else:
+            inst_map = np.zeros((h_orig, w_orig), dtype=np.uint8)
+            class_map = {}
+
+        # Pearlite via connected components
+        pearlite_binary = (mask == CLASS_PEARLITE).astype(np.uint8)
+        if pearlite_binary.sum() > 0:
+            num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(pearlite_binary, connectivity=8)
+            current_id = max(class_map.keys()) + 1 if class_map else 1
+            for label_id in range(1, num_labels):
+                area = int(stats[label_id, cv2.CC_STAT_AREA])
+                if area < min_instance_area:
+                    continue
+                if current_id > max_instance_id:
+                    current_id = max_instance_id
+                inst_map[labels == label_id] = current_id
+                class_map[current_id] = CLASS_PEARLITE
+                if current_id < max_instance_id:
+                    current_id += 1
+
         output_paths = {}
 
     n_ferrite = sum(1 for v in class_map.values() if v == 1)
@@ -208,43 +202,34 @@ def predict_single_image(
         "num_ferrite": n_ferrite,
         "num_pearlite": n_pearlite,
         "output_paths": output_paths,
-        "spatial_scale": spatial_scale,
     }
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Metallographic segmentation inference (unified letterbox)",
+        description="Metallographic segmentation inference (vector field version)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Examples:
-  # Default: use config checkpoint_stage, run on data/smoketest/
+  # Default: use config checkpoint_stage, run on data/test/
   python inference.py
 
-  # Override checkpoint stage via config (stage1 or stage2)
-  # Edit config/default_config.yaml: inference.checkpoint_stage: "stage2"
-
   # Override checkpoint path directly (highest priority)
-  python inference.py --checkpoint outputs/stage2/final_model_stage2.pth
+  python inference.py --checkpoint outputs/stage1/best_model.pth
 
   # Custom test images and output directory
   python inference.py --test_dir data/my_test_images --output_dir outputs/my_results
-
-Checkpoint selection (priority: --checkpoint > config checkpoint_stage):
-  config/default_config.yaml -> inference.checkpoint_stage: "stage1" or "stage2"
-  config/default_config.yaml -> inference.stage1_checkpoint: "outputs/stage1/best_model.pth"
-  config/default_config.yaml -> inference.stage2_checkpoint: "outputs/stage2/final_model_stage2.pth"
 
 Output files (per image <basename>):
   <basename>_inst.png   - Instance map (uint8, 1-255 by descending area)
   <basename>_class.json - Instance ID -> class mapping (1=ferrite, 0=pearlite)
   <basename>_mask.png   - Binary mask visualization (green=ferrite, red=pearlite)
-  <basename>_dist.png   - Distance field visualization (grayscale)
+  <basename>_vec.png    - Vector field visualization (color-coded by direction)
 
 Processing:
   All images are Letterboxed to 1024x1024 (same as training), then a single
   forward pass is performed. Output is upsampled to original resolution for
-  post-processing (threshold + distance compensation + watershed separation).
+  post-processing (vector field centroid collapse + DBSCAN clustering).
 """,
     )
     parser.add_argument(
@@ -284,7 +269,6 @@ Processing:
     # ------------------------------------------------------------------
     # 模型权重路径解析
     # ------------------------------------------------------------------
-    # 优先级：--checkpoint CLI 参数 > config inference.checkpoint_stage
     if args.checkpoint:
         checkpoint_path = args.checkpoint
         logger.info(f"Using checkpoint from CLI: {checkpoint_path}")
@@ -293,7 +277,7 @@ Processing:
         if checkpoint_stage == "stage2":
             checkpoint_path = os.path.join(
                 paths_cfg["project_root"],
-                infer_cfg.get("stage2_checkpoint", "outputs/stage2/final_model_stage2.pth"),
+                infer_cfg.get("stage2_checkpoint", "outputs/stage2/best_model_stage2.pth"),
             )
             logger.info(f"Using Stage-2 checkpoint from config: {checkpoint_path}")
         else:
@@ -336,24 +320,12 @@ Processing:
             image_size=data_cfg["image_size"],
             min_instance_area=infer_cfg["min_instance_area"],
             max_instance_id=infer_cfg["max_instance_id"],
-            connectivity=post_cfg["connectivity"],
-            interpolate_mode=post_cfg["interpolate_mode"],
-            align_corners=post_cfg["align_corners"],
             threshold=infer_cfg.get("threshold", 0.5),
-            train_max_dim=infer_cfg.get("train_max_dim", 2584),
-            dist_scale_factor=data_cfg.get("dist_scale_factor", 10.0),
             output_dir=output_dir,
             save_visualization=post_cfg.get("save_visualization", False),
-            alpha=post_cfg.get("alpha", 0.75),
-            beta=post_cfg.get("beta", 0.05),
-            max_filter_size=post_cfg.get("max_filter_size", 0) or None,
-            area_ratio_threshold=post_cfg.get("area_ratio_threshold", 0.2),
-            min_island_area=post_cfg.get("min_noise_area", 50),
-            enable_snake_smoothing=post_cfg.get("enable_snake_smoothing", False),
-            snake_alpha=post_cfg.get("snake_alpha", 0.02),
-            snake_beta=post_cfg.get("snake_beta", 0.2),
-            snake_max_iter=post_cfg.get("snake_max_iter", 80),
-            snake_area_shrink_threshold=post_cfg.get("snake_area_shrink_threshold", 0.15),
+            dbscan_eps=post_cfg.get("dbscan_eps", 5.0),
+            dbscan_min_samples=post_cfg.get("dbscan_min_samples", 3),
+            downsample_grid=post_cfg.get("downsample_grid", 4),
         )
 
         elapsed = time.time() - start_time
@@ -363,8 +335,7 @@ Processing:
         logger.info(
             f"  Done ({elapsed:.2f}s): "
             f"instances={result['num_instances']} "
-            f"(ferrite={result['num_ferrite']}, pearlite={result['num_pearlite']}) "
-            f"spatial_scale={result['spatial_scale']:.4f}"
+            f"(ferrite={result['num_ferrite']}, pearlite={result['num_pearlite']})"
         )
 
     logger.info("=" * 60)
