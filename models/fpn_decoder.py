@@ -1,16 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-增强型 FPN 解码头（残差连接 + 语义平滑头）- 双任务距离场版本
-=============================================================
+增强型 FPN 解码头（残差连接 + 语义平滑头）- 向量场版本
+=========================================================
 完全随机初始化的特征金字塔解码头，禁止加载任何 SAM 2 原生 Mask Decoder 权重。
 
 设计：
 1. 通过 1*1 卷积将 SAM 2 trunk 提取的四个尺度特征统一对齐到 256 维。
 2. 每个尺度挂载标准残差卷积块（Residual Block），增强非线性拟合能力。
 3. 自上而下通过双线性插值融合（从最低分辨率 Stage 4 逐步上采样与高层分辨率融合）。
-4. 融合后在最高分辨率特征图上追加两层语义平滑头，再输出 2 通道：
+4. 融合后在最高分辨率特征图上追加两层语义平滑头，再输出 3 通道：
     - 通道 0（分类分支）：原始 logits，后续送入 Focal Loss
-    - 通道 1（回归分支）：经 Sigmoid 的距离场预测 [0,1]，后续送入 MSELoss
+    - 通道 1（回归分支 Vx）：经 Tanh 的 X 方向偏移量预测 [-1,1]
+    - 通道 2（回归分支 Vy）：经 Tanh 的 Y 方向偏移量预测 [-1,1]
 
 输入约定：features = [feat_s1, feat_s2, feat_s3, feat_s4]
     - feat_s1: 最高分辨率, 112ch
@@ -62,11 +63,12 @@ class ResidualBlock(nn.Module):
 
 class FPNDecoder(nn.Module):
     """
-    增强型 FPN 解码头（残差连接 + 语义平滑头）- 双任务距离场版本。
+    增强型 FPN 解码头（残差连接 + 语义平滑头）- 向量场版本。
 
-    输出 2 通道：
+    输出 3 通道：
     - 通道 0：分类 logits（铁素体 vs 珠光体）
-    - 通道 1：经 Sigmoid 的距离场回归预测 [0,1]
+    - 通道 1：经 Tanh 的 Vx 向量场预测 [-1,1]
+    - 通道 2：经 Tanh 的 Vy 向量场预测 [-1,1]
 
     参数量约 6.3M（fpn_channels=256）。
     """
@@ -75,7 +77,7 @@ class FPNDecoder(nn.Module):
         self,
         in_channels: Optional[List[int]] = None,
         fpn_channels: int = 256,
-        num_classes: int = 2,
+        num_classes: int = 3,
         dropout: float = 0.1,
         use_bn: bool = True,
     ):
@@ -84,7 +86,7 @@ class FPNDecoder(nn.Module):
             in_channels: 各 Stage 输入通道数列表，从高分辨率到低分辨率。
                          默认 [112, 224, 448, 896]（Hiera base+）。
             fpn_channels: FPN 统一通道数（默认 256）。
-            num_classes: 输出通道数（固定为 2：分类 + 距离场）。
+            num_classes: 输出通道数（固定为 3：分类 + Vx + Vy）。
             dropout: dropout 概率。
             use_bn: 是否使用 BatchNorm。
         """
@@ -161,7 +163,7 @@ class FPNDecoder(nn.Module):
 
     def forward(self, features, output_size=None):
         """
-        前向传播：FPN 横向投影 + 残差块 + 自上而下融合 + 语义平滑头 + 双任务输出。
+        前向传播：FPN 横向投影 + 残差块 + 自上而下融合 + 语义平滑头 + 三通道输出。
 
         Args:
             features: [feat_s1, feat_s2, feat_s3, feat_s4]
@@ -222,7 +224,7 @@ class FPNDecoder(nn.Module):
 
 class SegmentationModel(nn.Module):
     """
-    完整分割模型：冻结 SAM 2 Encoder + 随机初始化 FPN Decoder（双任务距离场版本）。
+    完整分割模型：冻结 SAM 2 Encoder + 随机初始化 FPN Decoder（向量场版本）。
 
     用于训练和推理的统一入口。
     """
