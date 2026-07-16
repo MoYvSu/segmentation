@@ -1,19 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-多任务半监督损失模块
-====================
+多任务半监督损失模块（向量场版本）
+================================
 第二阶段半监督微调的无监督一致性损失。
 
 双路解耦一致性：
 1. 分类一致性：img_weak 的分类概率 -> 伪标签（置信度 > threshold）-> 与 img_strong_appearance 的预测计算 BCE
-2. 回归几何一致性：img_weak 的距离场预测 -> 施加几何变换 T -> 与 img_strong_geometric 的预测计算 MSE
+2. 回归几何一致性：img_weak 的向量场预测 -> 施加几何变换 T（含分量变换）-> 与 img_strong_geometric 的预测计算 MSE
 
 优化：冻结层前向 no_grad 化（方案 A）
 - encoder + decoder 冻结部分（lateral_convs / residual_blocks / semantic_head）在 torch.no_grad() 下运行
 - 仅 cls_branch + reg_branch 在梯度图内运行
 - 减少 3 次无监督前向中冻结层的中间激活值内存存储和反向传播开销
-
-非侵入式设计：不修改第一阶段 utils/loss.py 和 models/fpn_decoder.py。
 """
 
 from typing import Dict, List, Tuple
@@ -72,14 +70,14 @@ def _forward_heads(model: nn.Module, semantic: torch.Tensor) -> torch.Tensor:
         semantic: [B, fpn_channels, H/4, W/4] 语义特征图
 
     Returns:
-        output: [B, 2, H/4, W/4]
+        output: [B, 3, H/4, W/4]
             - output[:, 0] 为分类 logits
-            - output[:, 1] 为经 Sigmoid 的距离场预测 [0,1]
+            - output[:, 1:3] 为经 Tanh 的向量场预测 [-1,1] (Vx, Vy)
     """
     decoder = model.decoder
     seg_logits = decoder.cls_branch(semantic)
-    dist_pred = decoder.reg_branch(semantic)
-    output = torch.cat([seg_logits, dist_pred], dim=1)
+    vec_pred = decoder.reg_branch(semantic)
+    output = torch.cat([seg_logits, vec_pred], dim=1)
     return output
 
 
@@ -93,12 +91,12 @@ def compute_stage2_unsupervised_loss(
     dist_weight: float = 10.0,
 ) -> Tuple[torch.Tensor, float, float]:
     """
-    计算第二阶段无监督一致性损失。
+    计算第二阶段无监督一致性损失（向量场版本）。
 
     优化后的前向传播计划（3 次编码器前向，但冻结层在 no_grad 下）：
-    - 第 1 次：img_weak -> 冻结层 no_grad -> 可训练头 -> 分类概率 + 距离场（教师预测源）
+    - 第 1 次：img_weak -> 冻结层 no_grad -> 可训练头 -> 分类概率 + 向量场（教师预测源）
     - 第 2 次：img_strong_appearance -> 冻结层 no_grad -> 可训练头 -> 分类 logits（学生外观增强）
-    - 第 3 次：img_strong_geometric -> 冻结层 no_grad -> 可训练头 -> 距离场预测（学生几何增强）
+    - 第 3 次：img_strong_geometric -> 冻结层 no_grad -> 可训练头 -> 向量场预测（学生几何增强）
 
     Args:
         model: SegmentationModel（冻结 encoder + decoder 主体，仅 cls_branch/reg_branch 可训练）
@@ -107,7 +105,7 @@ def compute_stage2_unsupervised_loss(
         img_strong_geometric: [B, 3, H, W] 几何增强图像
         T_list: 长度为 B 的几何变换元数据列表
         confidence_threshold: 伪标签置信度阈值（默认 0.90）
-        dist_weight: 距离场回归损失权重（默认 10.0）
+        dist_weight: 向量场回归损失权重（默认 10.0）
 
     Returns:
         total_loss: 标量张量，总无监督损失
@@ -125,8 +123,8 @@ def compute_stage2_unsupervised_loss(
     semantic_weak = _forward_frozen_to_semantic(model, img_weak)
     # detach semantic 以切断冻结部分的梯度图（虽然 no_grad 已经不记录，但确保安全）
     out_weak = _forward_heads(model, semantic_weak.detach())
-    cls_logits_weak = out_weak[:, 0]  # [B, H, W] 分类 logits
-    dist_pred_weak = out_weak[:, 1]   # [B, H, W] 距离场预测 [0,1]
+    cls_logits_weak = out_weak[:, 0]       # [B, H, W] 分类 logits
+    vec_pred_weak = out_weak[:, 1:3]       # [B, 2, H, W] 向量场预测 [-1,1]
 
     # 分类概率
     cls_prob_weak = torch.sigmoid(cls_logits_weak)  # [B, H, W]
@@ -162,23 +160,21 @@ def compute_stage2_unsupervised_loss(
         loss_cls = cls_logits_strong_app.sum() * 0.0
 
     # ================================================================
-    # 回归几何一致性：img_weak 距离场 -> 施加 T -> vs img_strong_geometric 预测
+    # 回归几何一致性：img_weak 向量场 -> 施加 T -> vs img_strong_geometric 预测
     # ================================================================
 
     # 第 3 次前向：img_strong_geometric
     semantic_strong_geo = _forward_frozen_to_semantic(model, img_strong_geometric)
     out_strong_geo = _forward_heads(model, semantic_strong_geo.detach())
-    dist_pred_strong_geo = out_strong_geo[:, 1]   # [B, H, W]
+    vec_pred_strong_geo = out_strong_geo[:, 1:3]   # [B, 2, H, W]
 
-    # 对 img_weak 的距离场预测施加相同的几何变换 T
-    dist_pred_weak_expanded = dist_pred_weak.unsqueeze(1)  # [B, 1, H, W]
-    dist_pred_weak_transformed = apply_transform_batch(
-        dist_pred_weak_expanded, T_list
-    )  # [B, 1, H, W]
-    dist_pred_weak_transformed = dist_pred_weak_transformed.squeeze(1)  # [B, H, W]
+    # 对 img_weak 的向量场预测施加相同的几何变换 T（含分量变换）
+    vec_pred_weak_transformed = apply_transform_batch(
+        vec_pred_weak, T_list, is_vector=True
+    )  # [B, 2, H, W]
 
     # 计算像素级 MSE 损失
-    loss_reg = F.mse_loss(dist_pred_strong_geo, dist_pred_weak_transformed)
+    loss_reg = F.mse_loss(vec_pred_strong_geo, vec_pred_weak_transformed)
 
     # ---- 总无监督损失 ----
     total_loss = loss_cls + dist_weight * loss_reg

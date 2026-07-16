@@ -484,7 +484,7 @@ def main():
 
     # ---- 损失函数 ----
     criterion = FocalDistanceFieldLoss(gamma=2.0, alpha=0.95).to(device)
-    logger.info("Supervised loss: FocalDistanceFieldLoss (双轨空间权重 + 不确定性加权)")
+    logger.info("Supervised loss: FocalDistanceFieldLoss (双轨空间权重 + 向量场 + 不确定性加权)")
     logger.info(
         f"Unsupervised loss: consistency loss (weight={stage2_cfg['UNSUPERVISED_WEIGHT']})"
     )
@@ -533,8 +533,8 @@ def main():
         # 恢复不确定性参数
         if "uncertainty_state" in checkpoint:
             criterion.log_var_cls.data = checkpoint["uncertainty_state"]["log_var_cls"].to(device)
-            criterion.log_var_reg.data = checkpoint["uncertainty_state"]["log_var_reg"].to(device)
-            logger.info(f"  Uncertainty restored: log_var_cls={criterion.log_var_cls.item():.4f}, log_var_reg={criterion.log_var_reg.item():.4f}")
+            criterion.log_var_vec.data = checkpoint["uncertainty_state"]["log_var_vec"].to(device)
+            logger.info(f"  Uncertainty restored: log_var_cls={criterion.log_var_cls.item():.4f}, log_var_vec={criterion.log_var_vec.item():.4f}")
         start_epoch = checkpoint["epoch"] + 1
         best_val_iou = checkpoint.get("best_val_iou", 0.0)
         logger.info(f"Resumed from epoch {start_epoch}, best Val IoU: {best_val_iou:.4f}")
@@ -634,13 +634,13 @@ def main():
                     "best_val_iou": best_val_iou,
                     "uncertainty_state": {
                         "log_var_cls": criterion.log_var_cls.data.cpu(),
-                        "log_var_reg": criterion.log_var_reg.data.cpu(),
+                        "log_var_vec": criterion.log_var_vec.data.cpu(),
                     },
                     "config": config,
                 },
                 best_path,
             )
-            logger.info(f"  New best model saved: {best_path} (mIoU={best_val_iou:.4f}, log_var_cls={criterion.log_var_cls.item():.4f}, log_var_reg={criterion.log_var_reg.item():.4f})")
+            logger.info(f"  New best model saved: {best_path} (mIoU={best_val_iou:.4f}, log_var_cls={criterion.log_var_cls.item():.4f}, log_var_vec={criterion.log_var_vec.item():.4f})")
 
         # 定期 checkpoint
         if (epoch + 1) % 10 == 0 and stage2_cfg.get("SAVE_CHECKPOINTS", True):
@@ -654,7 +654,7 @@ def main():
                     "best_val_iou": best_val_iou,
                     "uncertainty_state": {
                         "log_var_cls": criterion.log_var_cls.data.cpu(),
-                        "log_var_reg": criterion.log_var_reg.data.cpu(),
+                        "log_var_vec": criterion.log_var_vec.data.cpu(),
                     },
                     "config": config,
                 },
@@ -670,7 +670,7 @@ def main():
             "best_val_iou": best_val_iou,
             "uncertainty_state": {
                 "log_var_cls": criterion.log_var_cls.data.cpu(),
-                "log_var_reg": criterion.log_var_reg.data.cpu(),
+                "log_var_vec": criterion.log_var_vec.data.cpu(),
             },
             "config": config,
         },

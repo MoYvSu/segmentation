@@ -24,10 +24,10 @@ from torch.utils.data import Dataset
 from data.dataset import (
     letterbox,
     letterbox_mask,
-    letterbox_distance_field,
+    letterbox_vector_field,
     parse_labelme_json,
     create_binary_mask,
-    create_distance_field,
+    create_offset_vector_field,
 )
 
 
@@ -82,27 +82,28 @@ class LabeledDataset(Dataset):
         masks = parse_labelme_json(json_path, h_orig, w_orig)
         ferrite_mask = masks["ferrite"]
         pearlite_mask = masks["pearlite"]
+        ferrite_polys = masks["ferrite_polys"]
 
         # 生成目标
         binary_mask = create_binary_mask(ferrite_mask, pearlite_mask)
-        dist_field = create_distance_field(
-            ferrite_mask, pearlite_mask, scale_factor=self.dist_scale_factor
+        vec_field = create_offset_vector_field(
+            ferrite_polys, h_orig, w_orig, normalize_to=float(self.image_size)
         )
 
         # Letterbox
         image_lb, scale, pad_h, pad_w = letterbox(image, self.image_size)
         mask_lb, _, _, _ = letterbox_mask(binary_mask, self.image_size)
-        dist_lb, _, _, _ = letterbox_distance_field(dist_field, self.image_size)
+        vec_lb, _, _, _ = letterbox_vector_field(vec_field, self.image_size)
 
         # 数据增强
         if self.augment:
-            image_lb, mask_lb, dist_lb = self._augment(image_lb, mask_lb, dist_lb)
+            image_lb, mask_lb, vec_lb = self._augment(image_lb, mask_lb, vec_lb)
 
         # 转张量
         image_tensor = torch.from_numpy(image_lb).float().permute(2, 0, 1) / 255.0
         mask_tensor = torch.from_numpy(mask_lb).float().unsqueeze(0)
-        dist_tensor = torch.from_numpy(dist_lb).float().unsqueeze(0)
-        target_tensor = torch.cat([mask_tensor, dist_tensor], dim=0)
+        vec_tensor = torch.from_numpy(vec_lb).float().permute(2, 0, 1)
+        target_tensor = torch.cat([mask_tensor, vec_tensor], dim=0)
 
         return {
             "image": image_tensor,
@@ -111,22 +112,36 @@ class LabeledDataset(Dataset):
             "image_path": img_path,
         }
 
-    def _augment(self, image, mask, dist_field):
+    def _augment(self, image, mask, vec_field):
         cfg = self.augment_config
+        vx = vec_field[..., 0].copy()
+        vy = vec_field[..., 1].copy()
+
         if cfg.get("horizontal_flip", False) and np.random.rand() < 0.5:
             image = np.ascontiguousarray(image[:, ::-1])
             mask = np.ascontiguousarray(mask[:, ::-1])
-            dist_field = np.ascontiguousarray(dist_field[:, ::-1])
+            vx = np.ascontiguousarray(vx[:, ::-1])
+            vy = np.ascontiguousarray(vy[:, ::-1])
+            vx = -vx
+
         if cfg.get("vertical_flip", False) and np.random.rand() < 0.5:
             image = np.ascontiguousarray(image[::-1, :])
             mask = np.ascontiguousarray(mask[::-1, :])
-            dist_field = np.ascontiguousarray(dist_field[::-1, :])
+            vx = np.ascontiguousarray(vx[::-1, :])
+            vy = np.ascontiguousarray(vy[::-1, :])
+            vy = -vy
+
         if cfg.get("rotation", False) and np.random.rand() < 0.5:
             k = np.random.choice([1, 2, 3])
             image = np.ascontiguousarray(np.rot90(image, k))
             mask = np.ascontiguousarray(np.rot90(mask, k))
-            dist_field = np.ascontiguousarray(np.rot90(dist_field, k))
-        return image, mask, dist_field
+            vx = np.ascontiguousarray(np.rot90(vx, k))
+            vy = np.ascontiguousarray(np.rot90(vy, k))
+            for _ in range(k):
+                vx, vy = vy.copy(), -vx.copy()
+
+        augmented_vec = np.stack([vx, vy], axis=-1)
+        return image, mask, augmented_vec
 
 
 # =============================================================================
@@ -306,15 +321,22 @@ def unlabeled_collate_fn(batch: List[Dict]) -> Dict:
 # =============================================================================
 # 几何变换工具（用于 loss 计算中对齐预测）
 # =============================================================================
-def apply_transform_to_tensor(tensor: torch.Tensor, T: Dict) -> torch.Tensor:
+def apply_transform_to_tensor(tensor: torch.Tensor, T: Dict, is_vector: bool = False) -> torch.Tensor:
     """
     对 [B, C, H, W] 或 [C, H, W] 张量施加几何变换 T。
 
     用于在 loss 计算中将 img_weak 的预测对齐到 img_strong_geometric 的坐标系。
 
+    当 is_vector=True 时，张量的通道维包含向量场分量 (Vx, Vy)，
+    需要随空间变换同步旋转/翻转分量：
+    - flip_h: Vx -> -Vx, Vy -> Vy
+    - flip_v: Vx -> Vx, Vy -> -Vy
+    - rot90 k: 逐次旋转 (Vx, Vy) -> (Vy, -Vx)
+
     Args:
         tensor: [B, C, H, W] 或 [C, H, W] 张量
         T: {"type": "rot90"/"flip_h"/"flip_v"/"identity", "k": int}
+        is_vector: 是否为向量场张量（需分量变换）
 
     Returns:
         变换后的张量（与输入形状相同，因为所有变换都是 90 度倍数）
@@ -323,41 +345,70 @@ def apply_transform_to_tensor(tensor: torch.Tensor, T: Dict) -> torch.Tensor:
     k = T.get("k", 0)
 
     if t_type == "rot90":
-        # torch.rot90 接受 dims 参数
         if tensor.dim() == 4:
-            return torch.rot90(tensor, k, dims=(2, 3))
+            result = torch.rot90(tensor, k, dims=(2, 3))
         elif tensor.dim() == 3:
-            return torch.rot90(tensor, k, dims=(1, 2))
+            result = torch.rot90(tensor, k, dims=(1, 2))
         else:
             raise ValueError(f"Unexpected tensor dim: {tensor.dim()}")
+
+        if is_vector:
+            # 向量分量旋转: k 次 (Vx, Vy) -> (Vy, -Vx)
+            vx = result[..., 0, :, :].clone()
+            vy = result[..., 1, :, :].clone()
+            for _ in range(k):
+                vx, vy = vy.clone(), -vx.clone()
+            result = torch.stack([vx, vy], dim=-2 if tensor.dim() == 4 else -2)
+            # 确保维度顺序正确
+            if tensor.dim() == 4:
+                result = torch.stack([vx, vy], dim=1)
+            else:
+                result = torch.stack([vx, vy], dim=0)
+        return result
+
     elif t_type == "flip_h":
         # 水平翻转（沿 W 轴翻转）
         if tensor.dim() == 4:
-            return torch.flip(tensor, dims=(3,))
+            result = torch.flip(tensor, dims=(3,))
         elif tensor.dim() == 3:
-            return torch.flip(tensor, dims=(2,))
+            result = torch.flip(tensor, dims=(2,))
         else:
             raise ValueError(f"Unexpected tensor dim: {tensor.dim()}")
+
+        if is_vector:
+            # Vx -> -Vx
+            result[..., 0, :, :] = -result[..., 0, :, :]
+        return result
+
     elif t_type == "flip_v":
         # 垂直翻转（沿 H 轴翻转）
         if tensor.dim() == 4:
-            return torch.flip(tensor, dims=(2,))
+            result = torch.flip(tensor, dims=(2,))
         elif tensor.dim() == 3:
-            return torch.flip(tensor, dims=(1,))
+            result = torch.flip(tensor, dims=(1,))
         else:
             raise ValueError(f"Unexpected tensor dim: {tensor.dim()}")
+
+        if is_vector:
+            # Vy -> -Vy
+            result[..., 1, :, :] = -result[..., 1, :, :]
+        return result
+
     else:
         # identity
         return tensor
 
 
-def apply_transform_batch(tensor: torch.Tensor, T_list: List[Dict]) -> torch.Tensor:
+def apply_transform_batch(
+    tensor: torch.Tensor, T_list: List[Dict], is_vector: bool = False
+) -> torch.Tensor:
     """
     对 [B, C, H, W] 张量的每个样本施加不同的几何变换。
 
     Args:
         tensor: [B, C, H, W] 张量
         T_list: 长度为 B 的变换元数据列表
+        is_vector: 是否为向量场张量（需分量变换）
 
     Returns:
         变换后的 [B, C, H, W] 张量
@@ -367,5 +418,5 @@ def apply_transform_batch(tensor: torch.Tensor, T_list: List[Dict]) -> torch.Ten
 
     transformed = []
     for i, T in enumerate(T_list):
-        transformed.append(apply_transform_to_tensor(tensor[i], T))
+        transformed.append(apply_transform_to_tensor(tensor[i], T, is_vector=is_vector))
     return torch.stack(transformed)

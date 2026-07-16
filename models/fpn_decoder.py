@@ -93,7 +93,7 @@ class FPNDecoder(nn.Module):
             in_channels = [112, 224, 448, 896]
 
         assert len(in_channels) == 4, "FPN 解码头需要 4 个尺度的输入特征"
-        assert num_classes == 2, "双任务距离场版本固定输出 2 通道（分类 + 距离场）"
+        assert num_classes == 3, "向量场版本固定输出 3 通道（分类 + Vx + Vy）"
 
         self.in_channels = in_channels
         self.fpn_channels = fpn_channels
@@ -130,7 +130,7 @@ class FPNDecoder(nn.Module):
 
         # 解耦双分支输出头
         # 分类分支：3x3 Conv(通道减半) + BN + ReLU + 1x1 Conv(->1)，输出原始 logits
-        # 回归分支：3x3 Conv(通道减半) + BN + ReLU + 1x1 Conv(->1) + Sigmoid，输出 [0,1]
+        # 回归分支：3x3 Conv(通道减半) + BN + ReLU + 1x1 Conv(->2) + Tanh，输出 [-1,1] 向量场 (Vx, Vy)
         half_channels = fpn_channels // 2
         self.cls_branch = nn.Sequential(
             nn.Conv2d(fpn_channels, half_channels, kernel_size=3, padding=1, bias=False),
@@ -142,8 +142,8 @@ class FPNDecoder(nn.Module):
             nn.Conv2d(fpn_channels, half_channels, kernel_size=3, padding=1, bias=False),
             norm_layer(half_channels) if use_bn else nn.Identity(),
             nn.ReLU(inplace=True),
-            nn.Conv2d(half_channels, 1, kernel_size=1, bias=True),
-            nn.Sigmoid(),
+            nn.Conv2d(half_channels, 2, kernel_size=1, bias=True),
+            nn.Tanh(),
         )
 
         self._init_weights()
@@ -170,9 +170,10 @@ class FPNDecoder(nn.Module):
             output_size: 可选，最终输出的 (H, W) 尺寸。
 
         Returns:
-            output: [B, 2, H, W]
+            output: [B, 3, H, W]
                 - output[:, 0] 为分类 logits
-                - output[:, 1] 为经 Sigmoid 的距离场预测 [0,1]
+                - output[:, 1] 为 Vx 预测 [-1,1]（经 Tanh）
+                - output[:, 2] 为 Vy 预测 [-1,1]（经 Tanh）
         """
         assert len(features) == self.num_stages, (
             f"期望 {self.num_stages} 个尺度特征，实际得到 {len(features)}"
@@ -200,8 +201,8 @@ class FPNDecoder(nn.Module):
 
         # Step 4: 解耦双分支输出
         seg_logits = self.cls_branch(semantic)   # [B, 1, H, W] 分类 logits（无激活）
-        dist_pred = self.reg_branch(semantic)    # [B, 1, H, W] 距离场 [0,1]（内置 Sigmoid）
-        output = torch.cat([seg_logits, dist_pred], dim=1)  # [B, 2, H, W]
+        vec_pred = self.reg_branch(semantic)     # [B, 2, H, W] 向量场 [-1,1]（内置 Tanh）
+        output = torch.cat([seg_logits, vec_pred], dim=1)  # [B, 3, H, W]
 
         # Step 5: 动态上采样到指定尺寸（推理时对齐原图）
         if output_size is not None:
@@ -245,9 +246,10 @@ class SegmentationModel(nn.Module):
             output_size: 可选，推理时对齐原图尺寸 (H, W)。
 
         Returns:
-            output: [B, 2, H, W]
+            output: [B, 3, H, W]
                 - output[:, 0] 为分类 logits
-                - output[:, 1] 为经 Sigmoid 的距离场预测 [0,1]
+                - output[:, 1] 为 Vx 预测 [-1,1]（经 Tanh）
+                - output[:, 2] 为 Vy 预测 [-1,1]（经 Tanh）
         """
         features = self.encoder(x)
         output = self.decoder(features, output_size=output_size)

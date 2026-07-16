@@ -44,8 +44,8 @@ sam2:
 decoder:
   # FPN 统一通道数（增强型：残差块 + 语义平滑头，参数量 ~6.3M）
   fpn_channels: 256
-  # 输出通道数：固定为 2（通道0=分类logits, 通道1=距离场回归）
-  num_classes: 2
+  # 输出通道数：固定为 3（通道0=分类logits, 通道1=Vx向量场, 通道2=Vy向量场）
+  num_classes: 3
   # 是否使用 dropout
   dropout: 0.1
   # 是否使用批量归一化
@@ -131,7 +131,7 @@ inference:
   # checkpoint_stage: 选择推理时加载的模型阶段
   #   "stage1" - 使用第一阶段全量微调解码头权重
   #   "stage2" - 使用第二阶段半监督微调权重（含分支头微调）
-  checkpoint_stage: "stage2"
+  checkpoint_stage: "stage1"
 
   # stage1_checkpoint: 第一阶段权重路径（相对 project_root）
   # 由 train.py 产出，保存完整 decoder_state_dict
@@ -167,7 +167,7 @@ post_process:
   min_noise_area: 50
   # 局部极大值自适应阈值参数（用于 watershed 种子提取）
   # alpha: 自适应阈值系数，Threshold = alpha * local_max + beta
-  alpha: 0.5
+  alpha: 0.80
   # beta: 全局偏置常数
   beta: 0.05
   # max_filter_size: 局部极大值滤波窗口尺寸（0=自适应15~31，>0=固定值）
