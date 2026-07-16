@@ -180,8 +180,8 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, grad_cl
     total_dist = 0.0
     n_batches = 0
 
-    # 梯度裁剪参数：仅解码器参数（FocalDistanceFieldLoss 无可学习参数）
-    clip_params = list(model.decoder.parameters())
+    # 梯度裁剪参数：解码器参数 + 损失函数不确定性参数
+    clip_params = list(model.decoder.parameters()) + list(criterion.parameters())
 
     for batch_idx, batch in enumerate(loader):
         images = batch["image"].to(device)
@@ -278,13 +278,13 @@ def main():
 
     train_loader, val_loader = build_dataloaders(config)
 
-    # Focal Loss + 距离场 MSE 双任务损失
+    # Focal Loss + 边界加权距离场 MSE 双任务损失 + 不确定性加权
     criterion = FocalDistanceFieldLoss(gamma=2.0, alpha=0.95).to(device)
-    logger.info("损失函数: FocalDistanceFieldLoss (加权Focal + 0.05*TV + 10*MSE, EDT空间权重)")
+    logger.info("损失函数: FocalDistanceFieldLoss (双轨空间权重 + 不确定性加权)")
 
-    # 仅解码器参数（FocalDistanceFieldLoss 无可学习参数）
+    # 优化器：解码器参数 + 损失函数不确定性参数 (log_var_cls, log_var_reg)
     optimizer = torch.optim.AdamW(
-        model.decoder.parameters(),
+        list(model.decoder.parameters()) + list(criterion.parameters()),
         lr=train_cfg["learning_rate"],
         weight_decay=train_cfg["weight_decay"],
         eps=1e-4,
@@ -317,6 +317,11 @@ def main():
         model.decoder.load_state_dict(checkpoint["decoder_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        # 恢复不确定性参数
+        if "uncertainty_state" in checkpoint:
+            criterion.log_var_cls.data = checkpoint["uncertainty_state"]["log_var_cls"].to(device)
+            criterion.log_var_reg.data = checkpoint["uncertainty_state"]["log_var_reg"].to(device)
+            logger.info(f"  不确定性参数已恢复: log_var_cls={criterion.log_var_cls.item():.4f}, log_var_reg={criterion.log_var_reg.item():.4f}")
         start_epoch = checkpoint["epoch"] + 1
         best_val_iou = checkpoint.get("best_val_iou", 0.0)
         logger.info(f"从 epoch {start_epoch} 恢复训练，最佳 Val IoU: {best_val_iou:.4f}")
@@ -345,16 +350,16 @@ def main():
         if val_metrics["mean_iou"] > best_val_iou:
             best_val_iou = val_metrics["mean_iou"]
             best_path = os.path.join(output_dir, "best_model.pth")
-            torch.save({"epoch": epoch, "decoder_state_dict": model.decoder.state_dict(), "optimizer_state_dict": optimizer.state_dict(), "scheduler_state_dict": scheduler.state_dict(), "best_val_iou": best_val_iou, "config": config}, best_path)
-            logger.info(f"  新最佳模型已保存: {best_path} (mIoU={best_val_iou:.4f})")
+            torch.save({"epoch": epoch, "decoder_state_dict": model.decoder.state_dict(), "optimizer_state_dict": optimizer.state_dict(), "scheduler_state_dict": scheduler.state_dict(), "best_val_iou": best_val_iou, "uncertainty_state": {"log_var_cls": criterion.log_var_cls.data.cpu(), "log_var_reg": criterion.log_var_reg.data.cpu()}, "config": config}, best_path)
+            logger.info(f"  新最佳模型已保存: {best_path} (mIoU={best_val_iou:.4f}, log_var_cls={criterion.log_var_cls.item():.4f}, log_var_reg={criterion.log_var_reg.item():.4f})")
 
         if (epoch + 1) % 10 == 0 and train_cfg["save_checkpoints"]:
             ckpt_path = os.path.join(output_dir, f"checkpoint_epoch{epoch + 1}.pth")
-            torch.save({"epoch": epoch, "decoder_state_dict": model.decoder.state_dict(), "optimizer_state_dict": optimizer.state_dict(), "scheduler_state_dict": scheduler.state_dict(), "best_val_iou": best_val_iou, "config": config}, ckpt_path)
+            torch.save({"epoch": epoch, "decoder_state_dict": model.decoder.state_dict(), "optimizer_state_dict": optimizer.state_dict(), "scheduler_state_dict": scheduler.state_dict(), "best_val_iou": best_val_iou, "uncertainty_state": {"log_var_cls": criterion.log_var_cls.data.cpu(), "log_var_reg": criterion.log_var_reg.data.cpu()}, "config": config}, ckpt_path)
             logger.info(f"  Checkpoint 已保存: {ckpt_path}")
 
     final_path = os.path.join(output_dir, "final_model.pth")
-    torch.save({"epoch": train_cfg["epochs"] - 1, "decoder_state_dict": model.decoder.state_dict(), "best_val_iou": best_val_iou, "config": config}, final_path)
+    torch.save({"epoch": train_cfg["epochs"] - 1, "decoder_state_dict": model.decoder.state_dict(), "best_val_iou": best_val_iou, "uncertainty_state": {"log_var_cls": criterion.log_var_cls.data.cpu(), "log_var_reg": criterion.log_var_reg.data.cpu()}, "config": config}, final_path)
     logger.info(f"训练完成！最终模型: {final_path}")
     logger.info(f"最佳 Val mIoU: {best_val_iou:.4f}")
 

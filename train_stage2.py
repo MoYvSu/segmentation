@@ -307,8 +307,8 @@ def train_one_epoch(
     total_reg_consist = 0.0
     n_steps = 0
 
-    # 梯度裁剪参数：仅可训练参数
-    clip_params = get_trainable_params(model)
+    # 梯度裁剪参数：可训练参数 + 损失函数不确定性参数
+    clip_params = get_trainable_params(model) + list(criterion.parameters())
 
     # 使用 itertools.cycle 包裹 labeled_loader
     labeled_iter_cycle = itertools.cycle(labeled_loader)
@@ -484,15 +484,15 @@ def main():
 
     # ---- 损失函数 ----
     criterion = FocalDistanceFieldLoss(gamma=2.0, alpha=0.95).to(device)
-    logger.info("Supervised loss: FocalDistanceFieldLoss (加权Focal + 0.05*TV + 10*MSE, EDT空间权重)")
+    logger.info("Supervised loss: FocalDistanceFieldLoss (双轨空间权重 + 不确定性加权)")
     logger.info(
         f"Unsupervised loss: consistency loss (weight={stage2_cfg['UNSUPERVISED_WEIGHT']})"
     )
 
-    # ---- 优化器（仅 cls_branch + reg_branch） ----
+    # ---- 优化器（cls_branch + reg_branch + 不确定性参数） ----
     trainable_params = get_trainable_params(model)
     optimizer = torch.optim.AdamW(
-        trainable_params,
+        trainable_params + list(criterion.parameters()),
         lr=stage2_cfg["LEARNING_RATE"],
         weight_decay=stage2_cfg["WEIGHT_DECAY"],
         eps=1e-4,
@@ -530,6 +530,11 @@ def main():
         model.decoder.load_state_dict(checkpoint["decoder_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        # 恢复不确定性参数
+        if "uncertainty_state" in checkpoint:
+            criterion.log_var_cls.data = checkpoint["uncertainty_state"]["log_var_cls"].to(device)
+            criterion.log_var_reg.data = checkpoint["uncertainty_state"]["log_var_reg"].to(device)
+            logger.info(f"  Uncertainty restored: log_var_cls={criterion.log_var_cls.item():.4f}, log_var_reg={criterion.log_var_reg.item():.4f}")
         start_epoch = checkpoint["epoch"] + 1
         best_val_iou = checkpoint.get("best_val_iou", 0.0)
         logger.info(f"Resumed from epoch {start_epoch}, best Val IoU: {best_val_iou:.4f}")
@@ -627,11 +632,15 @@ def main():
                     "optimizer_state_dict": optimizer.state_dict(),
                     "scheduler_state_dict": scheduler.state_dict(),
                     "best_val_iou": best_val_iou,
+                    "uncertainty_state": {
+                        "log_var_cls": criterion.log_var_cls.data.cpu(),
+                        "log_var_reg": criterion.log_var_reg.data.cpu(),
+                    },
                     "config": config,
                 },
                 best_path,
             )
-            logger.info(f"  New best model saved: {best_path} (mIoU={best_val_iou:.4f})")
+            logger.info(f"  New best model saved: {best_path} (mIoU={best_val_iou:.4f}, log_var_cls={criterion.log_var_cls.item():.4f}, log_var_reg={criterion.log_var_reg.item():.4f})")
 
         # 定期 checkpoint
         if (epoch + 1) % 10 == 0 and stage2_cfg.get("SAVE_CHECKPOINTS", True):
@@ -643,6 +652,10 @@ def main():
                     "optimizer_state_dict": optimizer.state_dict(),
                     "scheduler_state_dict": scheduler.state_dict(),
                     "best_val_iou": best_val_iou,
+                    "uncertainty_state": {
+                        "log_var_cls": criterion.log_var_cls.data.cpu(),
+                        "log_var_reg": criterion.log_var_reg.data.cpu(),
+                    },
                     "config": config,
                 },
                 ckpt_path,
@@ -655,6 +668,10 @@ def main():
             "epoch": total_epochs - 1,
             "decoder_state_dict": model.decoder.state_dict(),
             "best_val_iou": best_val_iou,
+            "uncertainty_state": {
+                "log_var_cls": criterion.log_var_cls.data.cpu(),
+                "log_var_reg": criterion.log_var_reg.data.cpu(),
+            },
             "config": config,
         },
         final_path,

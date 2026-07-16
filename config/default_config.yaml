@@ -96,7 +96,7 @@ train:
   grad_clip: 1.0
   # 混合精度训练（暂时关闭，回退至FP32）
   amp: false
-  # 距离场回归损失权重（FocalLoss + dist_weight * MSE）
+  # 距离场回归损失权重（已废弃：不确定性加权自动学习缩放因子，此值不再使用）
   dist_weight: 10.0
   # 保留checkpoints
   save_checkpoints: true
@@ -106,7 +106,7 @@ train:
 # -----------------------------------------------------------------------------
 inference:
   # 测试图像目录
-  test_dir: "data/smoketest"
+  test_dir: "data/test"
   # 输出目录
   output_dir: "outputs/inference"
   # 二分类阈值
@@ -131,7 +131,7 @@ inference:
   # checkpoint_stage: 选择推理时加载的模型阶段
   #   "stage1" - 使用第一阶段全量微调解码头权重
   #   "stage2" - 使用第二阶段半监督微调权重（含分支头微调）
-  checkpoint_stage: "stage1"
+  checkpoint_stage: "stage2"
 
   # stage1_checkpoint: 第一阶段权重路径（相对 project_root）
   # 由 train.py 产出，保存完整 decoder_state_dict
@@ -139,7 +139,7 @@ inference:
 
   # stage2_checkpoint: 第二阶段权重路径（相对 project_root）
   # 由 train_stage2.py 产出，保存完整 decoder_state_dict（含微调后的分支头）
-  stage2_checkpoint: "outputs/stage2/final_model_stage2.pth"
+  stage2_checkpoint: "outputs/stage2/best_model_stage2.pth"
 
 # -----------------------------------------------------------------------------
 # 主动学习配置
@@ -167,7 +167,7 @@ post_process:
   min_noise_area: 50
   # 局部极大值自适应阈值参数（用于 watershed 种子提取）
   # alpha: 自适应阈值系数，Threshold = alpha * local_max + beta
-  alpha: 0.75
+  alpha: 0.5
   # beta: 全局偏置常数
   beta: 0.05
   # max_filter_size: 局部极大值滤波窗口尺寸（0=自适应15~31，>0=固定值）
