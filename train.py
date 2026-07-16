@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 """
-微调训练主入口（双任务距离场版本）
-=================================
 冻结 SAM 2 Image Encoder + 自制轻量 FPN 解码头的训练流程。
 
 技术路线：
@@ -10,6 +8,15 @@
 3. 在线 Letterbox 数据管道
 4. 双任务输出：分类 Focal Loss + 连续距离场 MSE 回归
 5. 静态权重 1:10（Focal:MSE）
+微调训练主入口（向量场版本）
+冻结 SAM 2 Image Encoder + 自制轻量 FPN 解码头的训练流程。
+
+技术路线：
+1. SAM 2 Hiera trunk 冻结，仅作为特征提取器
+2. FPN 解码头随机初始化，仅训练解码头参数
+3. 在线 Letterbox 数据管道
+4. 三任务输出：分类 Focal + 向量场 MSE 回归
+5. 不确定性加权自动平衡
 
 使用方法：
     conda activate sam2_env
