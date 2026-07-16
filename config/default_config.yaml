@@ -16,8 +16,8 @@ paths:
   weights_dir: "weights"
   # SAM 2 底座权重文件名
   sam2_ckpt: "sam2_hiera_base_plus.pt"
-  # 训练输出目录
-  output_dir: "outputs"
+  # 训练输出目录（第一阶段 checkpoints 存放于此子目录）
+  output_dir: "outputs/stage1"
   # 伪标签输出目录
   pseudo_label_dir: "outputs/pseudo_labels"
   # 主动学习筛选记录
@@ -135,7 +135,7 @@ inference:
 
   # stage1_checkpoint: 第一阶段权重路径（相对 project_root）
   # 由 train.py 产出，保存完整 decoder_state_dict
-  stage1_checkpoint: "outputs/best_model.pth"
+  stage1_checkpoint: "outputs/stage1/best_model.pth"
 
   # stage2_checkpoint: 第二阶段权重路径（相对 project_root）
   # 由 train_stage2.py 产出，保存完整 decoder_state_dict（含微调后的分支头）

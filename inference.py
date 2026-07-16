@@ -232,7 +232,7 @@ Examples:
 
 Checkpoint selection (priority: --checkpoint > config checkpoint_stage):
   config/default_config.yaml -> inference.checkpoint_stage: "stage1" or "stage2"
-  config/default_config.yaml -> inference.stage1_checkpoint: "outputs/best_model.pth"
+  config/default_config.yaml -> inference.stage1_checkpoint: "outputs/stage1/best_model.pth"
   config/default_config.yaml -> inference.stage2_checkpoint: "outputs/stage2/final_model_stage2.pth"
 
 Output files (per image <basename>):
@@ -299,7 +299,7 @@ Processing:
         else:
             checkpoint_path = os.path.join(
                 paths_cfg["project_root"],
-                infer_cfg.get("stage1_checkpoint", "outputs/best_model.pth"),
+                infer_cfg.get("stage1_checkpoint", "outputs/stage1/best_model.pth"),
             )
             logger.info(f"Using Stage-1 checkpoint from config: {checkpoint_path}")
 

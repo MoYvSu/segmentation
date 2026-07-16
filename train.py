@@ -31,7 +31,8 @@ import time
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp.grad_scaler import GradScaler
+from torch.amp.autocast_mode import autocast
 from torch.utils.data import DataLoader
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -189,7 +190,7 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, grad_cl
         optimizer.zero_grad()
 
         if use_amp:
-            with autocast():
+            with autocast('cuda'):
                 output = model(images, output_size=targets.shape[-2:])
                 total_loss_t, seg_val, dist_val = criterion(output, targets)
             scaler.scale(total_loss_t).backward()
@@ -307,7 +308,7 @@ def main():
         ],
         milestones=[warmup_epochs],
     )
-    scaler = GradScaler(enabled=train_cfg["amp"])
+    scaler = GradScaler('cuda', enabled=train_cfg["amp"])
 
     start_epoch = 0
     best_val_iou = 0.0

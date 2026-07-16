@@ -53,7 +53,7 @@ data:
 # -----------------------------------------------------------------------------
 stage2:
   # 第一阶段最优权重路径（相对 project_root）
-  STAGE1_CHECKPOINT: "outputs/best_model.pth"
+  STAGE1_CHECKPOINT: "outputs/stage1/best_model.pth"
 
   # 有标注数据目录（相对 project_root）
   LABELED_DATA_DIR: "data/raw"

@@ -32,7 +32,8 @@ import time
 
 import numpy as np
 import torch
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp.grad_scaler import GradScaler
+from torch.amp.autocast_mode import autocast
 from torch.utils.data import DataLoader
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -321,7 +322,7 @@ def train_one_epoch(
         optimizer.zero_grad()
 
         if use_amp:
-            with autocast():
+            with autocast('cuda'):
                 out_labeled = model(
                     images_labeled, output_size=targets_labeled.shape[-2:]
                 )
@@ -344,7 +345,7 @@ def train_one_epoch(
                 T_list = unlabeled_batch["T_list"]
 
                 if use_amp:
-                    with autocast():
+                    with autocast('cuda'):
                         unsup_loss, cls_consist_val, reg_consist_val = (
                             compute_stage2_unsupervised_loss(
                                 model,
@@ -518,7 +519,7 @@ def main():
     )
 
     use_amp = stage2_cfg.get("AMP", False)
-    scaler = GradScaler(enabled=use_amp)
+    scaler = GradScaler('cuda', enabled=use_amp)
 
     # ---- 恢复训练 ----
     start_epoch = 0
