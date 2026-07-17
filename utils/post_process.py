@@ -651,7 +651,7 @@ def centroid_collapse_clustering(
     vy_field: np.ndarray,
     image_size: int = 1024,
     dbscan_eps: float = 5.0,
-    dbscan_min_samples: int = 3,
+    dbscan_min_samples: int = 50,
     downsample_grid: int = 4,
     min_instance_area: int = 50,
     max_instance_id: int = 255,
@@ -665,7 +665,7 @@ def centroid_collapse_clustering(
     3. Centroid collapse: coords_collapsed = coords_orig + offsets
     4. Grid downsampling: bucket aggregation to reduce point count
     5. DBSCAN clustering in collapsed space
-    6. Map cluster labels back to original pixel positions
+    6. Two-stage: DBSCAN core pixels as kernels + original-space KDTree for non-core
     7. Area filter + ID assignment (1-255 by descending area)
 
     Args:
@@ -674,7 +674,7 @@ def centroid_collapse_clustering(
         vy_field: [H, W] normalized Y offset [-1, 1]
         image_size: letterbox target size (default 1024). Actual denormalization uses max(h,w).
         dbscan_eps: DBSCAN neighborhood radius in collapsed space (default 5.0)
-        dbscan_min_samples: DBSCAN minimum samples per cluster (default 3)
+        dbscan_min_samples: DBSCAN minimum samples per cluster (default 50, strict for pure kernels)
         downsample_grid: grid size for downsampling (default 4 = 4x4 buckets)
         min_instance_area: minimum instance area in pixels (default 50)
         max_instance_id: maximum instance ID (default 255, uint8)
@@ -750,16 +750,22 @@ def centroid_collapse_clustering(
         for orig_idx in orig_indices:
             pixel_labels[orig_idx] = label
 
-    # Handle noise points: assign to nearest non-noise cluster
-    noise_mask = pixel_labels == -1
-    if noise_mask.any() and not noise_mask.all():
-        noise_indices = np.where(noise_mask)[0]
-        non_noise_indices = np.where(~noise_mask)[0]
-        if len(non_noise_indices) > 0:
-            from scipy.spatial import cKDTree
-            tree = cKDTree(coords_collapsed[non_noise_indices])
-            _, nearest = tree.query(coords_collapsed[noise_indices])
-            pixel_labels[noise_indices] = pixel_labels[non_noise_indices[nearest]]
+    # Two-stage assignment: use original image space KDTree
+    # Core pixels (label >= 0) form reliable grain kernels from strict DBSCAN
+    # Non-core pixels (noise, label == -1) are assigned to nearest kernel
+    # in ORIGINAL IMAGE SPACE (not collapsed space) for stable boundary assignment
+    core_mask = pixel_labels >= 0
+    non_core_mask = ~core_mask
+
+    if core_mask.any() and non_core_mask.any():
+        from scipy.spatial import cKDTree
+        # Build KDTree in original image coordinates using core pixels only
+        core_coords = np.stack([ys[core_mask], xs[core_mask]], axis=1).astype(np.float64)
+        tree = cKDTree(core_coords)
+        # Query all non-core pixels for their nearest core pixel
+        non_core_coords = np.stack([ys[non_core_mask], xs[non_core_mask]], axis=1).astype(np.float64)
+        _, nearest = tree.query(non_core_coords)
+        pixel_labels[non_core_mask] = pixel_labels[core_mask][nearest]
 
     # If all noise (DBSCAN failed), fallback to connected components
     if pixel_labels.max() < 0:
@@ -808,7 +814,7 @@ def post_process_prediction_vector(
     max_instance_id: int = 255,
     threshold: float = 0.5,
     dbscan_eps: float = 5.0,
-    dbscan_min_samples: int = 3,
+    dbscan_min_samples: int = 50,
     downsample_grid: int = 4,
     save_visualization: bool = True,
 ) -> Tuple[Dict[str, str], np.ndarray, Dict[int, int]]:
