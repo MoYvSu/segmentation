@@ -661,7 +661,7 @@ def centroid_collapse_clustering(
 
     Algorithm:
     1. Extract foreground pixels (ferrite_mask > 0)
-    2. Denormalize: offset_x = vx * image_size, offset_y = vy * image_size
+    2. Denormalize: offset = vx * max(h,w)
     3. Centroid collapse: coords_collapsed = coords_orig + offsets
     4. Grid downsampling: bucket aggregation to reduce point count
     5. DBSCAN clustering in collapsed space
@@ -672,7 +672,7 @@ def centroid_collapse_clustering(
         ferrite_mask: [H, W] binary mask (1=ferrite, 0=background)
         vx_field: [H, W] normalized X offset [-1, 1]
         vy_field: [H, W] normalized Y offset [-1, 1]
-        image_size: normalization factor used during training (default 1024)
+        image_size: letterbox target size (default 1024). Actual denormalization uses max(h,w).
         dbscan_eps: DBSCAN neighborhood radius in collapsed space (default 5.0)
         dbscan_min_samples: DBSCAN minimum samples per cluster (default 3)
         downsample_grid: grid size for downsampling (default 4 = 4x4 buckets)
@@ -693,8 +693,12 @@ def centroid_collapse_clustering(
         return np.zeros((h, w), dtype=np.uint8), {}
 
     # Step 2: Denormalize offsets
-    vx_vals = vx_field[ys, xs] * image_size
-    vy_vals = vy_field[ys, xs] * image_size
+    # 训练时向量场在 1024×1024 letterbox 空间中生成: offset = (centroid - pixel) / image_size
+    # 推理时坐标 xs/ys 在原始分辨率空间（如 2584×1936），需要将偏移量也缩放到原始空间
+    # denorm_factor = image_size / scale = image_size / (image_size / max(h,w)) = max(h, w)
+    denorm_factor = float(max(h, w))
+    vx_vals = vx_field[ys, xs] * denorm_factor
+    vy_vals = vy_field[ys, xs] * denorm_factor
 
     # Step 3: Centroid collapse
     collapsed_x = xs.astype(np.float64) + vx_vals
@@ -785,8 +789,8 @@ def centroid_collapse_clustering(
     for area, inst_mask in instances:
         if current_id > max_instance_id:
             current_id = max_instance_id
-        for i, idx in enumerate(np.where(inst_mask)[0]):
-            inst_map[ys[idx], xs[idx]] = current_id
+        pixel_indices = np.where(inst_mask)[0]
+        inst_map[ys[pixel_indices], xs[pixel_indices]] = current_id
         class_map[current_id] = CLASS_FERRITE
         if current_id < max_instance_id:
             current_id += 1

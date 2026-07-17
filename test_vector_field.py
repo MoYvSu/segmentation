@@ -147,8 +147,9 @@ def draw_vector_arrows(
                 continue
 
             # 反归一化偏移
-            dx = vx_field[y, x] * image_size * arrow_scale
-            dy = vy_field[y, x] * image_size * arrow_scale
+            denorm_factor = float(max(image_rgb.shape[0], image_rgb.shape[1]))
+            dx = vx_field[y, x] * denorm_factor * arrow_scale
+            dy = vy_field[y, x] * denorm_factor * arrow_scale
 
             # 跳过零向量
             mag = np.sqrt(dx * dx + dy * dy)
@@ -257,8 +258,9 @@ def draw_collapsed_scatter(
         return canvas
 
     # 反归一化坍塌坐标
-    collapsed_x = xs.astype(np.float64) + vx_field[ys, xs] * image_size
-    collapsed_y = ys.astype(np.float64) + vy_field[ys, xs] * image_size
+    denorm_factor = float(max(mask.shape[0], mask.shape[1]))
+    collapsed_x = xs.astype(np.float64) + vx_field[ys, xs] * denorm_factor
+    collapsed_y = ys.astype(np.float64) + vy_field[ys, xs] * denorm_factor
 
     # 按方向编码颜色
     angles = np.arctan2(vy_field[ys, xs], vx_field[ys, xs])
