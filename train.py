@@ -241,6 +241,11 @@ def validate(model, loader, criterion, device):
     total_loss = 0.0
     n_batches = 0
 
+    # 边界指标累积
+    bnd_tp = 0
+    bnd_fp = 0
+    bnd_fn = 0
+
     for batch in loader:
         images = batch["image"].to(device)
         targets = batch["target"].to(device)
@@ -256,8 +261,21 @@ def validate(model, loader, criterion, device):
         mask = targets[:, 0].long()
         metrics.update_tensor(pred, mask)
 
+        # 边界通道 IoU
+        bnd_logits = output[:, 1]
+        bnd_pred = (torch.sigmoid(bnd_logits) > 0.5).long()
+        bnd_gt = targets[:, 1].long()
+        bnd_tp += ((bnd_pred == 1) & (bnd_gt == 1)).sum().item()
+        bnd_fp += ((bnd_pred == 1) & (bnd_gt == 0)).sum().item()
+        bnd_fn += ((bnd_pred == 0) & (bnd_gt == 1)).sum().item()
+
     val_metrics = metrics.get_metrics()
     val_metrics["loss"] = total_loss / max(n_batches, 1)
+
+    # Boundary IoU = TP / (TP + FP + FN + eps)
+    eps = 1e-7
+    val_metrics["boundary_iou"] = bnd_tp / (bnd_tp + bnd_fp + bnd_fn + eps)
+
     return val_metrics
 
 
@@ -319,16 +337,24 @@ def main():
     )
     scaler = GradScaler('cuda', enabled=train_cfg["amp"])
 
+    # 复合评分权重
+    sem_w = train_cfg.get("composite_sem_weight", 0.4)
+    bnd_w = train_cfg.get("composite_boundary_weight", 0.6)
+    logger.info(f"Best model 保存依据: composite_score = {sem_w:.1f}*mIoU + {bnd_w:.1f}*BndIoU")
+
     start_epoch = 0
-    best_val_iou = 0.0
+    best_composite_score = 0.0
     if args.resume and os.path.exists(args.resume):
         checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
         model.decoder.load_state_dict(checkpoint["decoder_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         start_epoch = checkpoint["epoch"] + 1
-        best_val_iou = checkpoint.get("best_val_iou", 0.0)
-        logger.info(f"从 epoch {start_epoch} 恢复训练，最佳 Val IoU: {best_val_iou:.4f}")
+        # 兼容旧 checkpoint 的 best_val_iou key
+        best_composite_score = checkpoint.get(
+            "best_composite_score", checkpoint.get("best_val_iou", 0.0)
+        )
+        logger.info(f"从 epoch {start_epoch} 恢复训练，最佳 Composite Score: {best_composite_score:.4f}")
 
     logger.info("=" * 60)
     logger.info("开始训练 (边界预测版本)")
@@ -354,9 +380,16 @@ def main():
             f"  Train Loss: {train_metrics['loss']:.4f} "
             f"(seg={train_metrics['seg']:.4f}, boundary={train_metrics['boundary']:.4f})"
         )
+        # 复合评分
+        composite_score = (
+            sem_w * val_metrics["mean_iou"] + bnd_w * val_metrics["boundary_iou"]
+        )
+
         logger.info(
             f"  Val Loss: {val_metrics['loss']:.4f} | "
             f"Val mIoU: {val_metrics['mean_iou']:.4f} | "
+            f"Bnd IoU: {val_metrics['boundary_iou']:.4f} | "
+            f"Composite: {composite_score:.4f} | "
             f"Val mDice: {val_metrics['mean_dice']:.4f}"
         )
         logger.info(
@@ -364,18 +397,23 @@ def main():
             f"ferrite_iou={val_metrics['ferrite_iou']:.4f}"
         )
 
-        if val_metrics["mean_iou"] > best_val_iou:
-            best_val_iou = val_metrics["mean_iou"]
+        if composite_score > best_composite_score:
+            best_composite_score = composite_score
             best_path = os.path.join(output_dir, "best_model.pth")
             torch.save({
                 "epoch": epoch,
                 "decoder_state_dict": model.decoder.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
-                "best_val_iou": best_val_iou,
+                "best_composite_score": best_composite_score,
                 "config": config,
             }, best_path)
-            logger.info(f"  新最佳模型已保存: {best_path} (mIoU={best_val_iou:.4f})")
+            logger.info(
+                f"  新最佳模型已保存: {best_path} "
+                f"(composite={best_composite_score:.4f}, "
+                f"mIoU={val_metrics['mean_iou']:.4f}, "
+                f"bndIoU={val_metrics['boundary_iou']:.4f})"
+            )
 
         if (epoch + 1) % 10 == 0 and train_cfg.get("save_checkpoints", True):
             ckpt_path = os.path.join(output_dir, f"checkpoint_epoch{epoch + 1}.pth")
@@ -384,7 +422,7 @@ def main():
                 "decoder_state_dict": model.decoder.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
-                "best_val_iou": best_val_iou,
+                "best_composite_score": best_composite_score,
                 "config": config,
             }, ckpt_path)
             logger.info(f"  Checkpoint 已保存: {ckpt_path}")
@@ -393,11 +431,11 @@ def main():
     torch.save({
         "epoch": train_cfg["epochs"] - 1,
         "decoder_state_dict": model.decoder.state_dict(),
-        "best_val_iou": best_val_iou,
+        "best_composite_score": best_composite_score,
         "config": config,
     }, final_path)
     logger.info(f"训练完成！最终模型: {final_path}")
-    logger.info(f"最佳 Val mIoU: {best_val_iou:.4f}")
+    logger.info(f"最佳 Composite Score: {best_composite_score:.4f}")
 
 
 if __name__ == "__main__":
