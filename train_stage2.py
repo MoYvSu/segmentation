@@ -20,6 +20,7 @@
 
 import argparse
 import copy
+import glob
 import itertools
 import logging
 import math
@@ -27,6 +28,7 @@ import os
 import sys
 import time
 
+import cv2
 import numpy as np
 import torch
 from torch.amp.grad_scaler import GradScaler
@@ -38,7 +40,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 import yaml
-from data.dataset import BoundaryDataset, collate_fn
+from data.dataset import BoundaryDataset, collate_fn, letterbox
 from data.dataset_semi import (
     LabeledDataset,
     UnlabeledDataset,
@@ -382,6 +384,75 @@ def validate(model, loader, criterion, device):
     return val_metrics
 
 
+@torch.no_grad()
+def monitor_inference(model, config, epoch, device):
+    """对 data/test 前 N 张图像做轻量推理，保存语义+边界概率图。
+
+    保存结构：output_dir/epoch_XX/{basename}_seg.png / {basename}_boundary.png
+    """
+    paths_cfg = config["paths"]
+    data_cfg = config["data"]
+    monitor_cfg = config.get("semi_supervised", {}).get("monitor", {})
+
+    image_dir = os.path.join(
+        paths_cfg["project_root"],
+        monitor_cfg.get("image_dir", "data/test"),
+    )
+    num_images = monitor_cfg.get("num_images", 3)
+    output_base = os.path.join(
+        paths_cfg["project_root"],
+        monitor_cfg.get("output_dir", "outputs/stage2/monitor"),
+    )
+    image_size = data_cfg.get("image_size", 1024)
+
+    epoch_dir = os.path.join(output_base, f"epoch_{epoch + 1:04d}")
+    os.makedirs(epoch_dir, exist_ok=True)
+
+    valid_exts = ("*.jpg", "*.jpeg", "*.png", "*.bmp", "*.tif", "*.tiff")
+    image_paths = []
+    for ext in valid_exts:
+        image_paths.extend(glob.glob(os.path.join(image_dir, ext)))
+    image_paths.sort()
+
+    if len(image_paths) == 0:
+        logger.warning(f"Monitor: no images found in {image_dir}")
+        return
+
+    image_paths = image_paths[:num_images]
+
+    model.eval()
+    for img_path in image_paths:
+        basename = os.path.splitext(os.path.basename(img_path))[0]
+        image = cv2.imread(img_path, cv2.IMREAD_COLOR)
+        if image is None:
+            continue
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        # Letterbox
+        image_lb, _, _, _ = letterbox(image_rgb, image_size)
+        image_tensor = (
+            torch.from_numpy(image_lb).float().permute(2, 0, 1).unsqueeze(0) / 255.0
+        )
+        image_tensor = image_tensor.to(device)
+
+        output = model(image_tensor)
+
+        seg_prob = torch.sigmoid(output[0, 0]).cpu().numpy()
+        bnd_prob = torch.sigmoid(output[0, 1]).cpu().numpy()
+
+        # 语义概率图：伪彩色（JET），珠光体=蓝，铁素体=红
+        seg_vis = (seg_prob * 255).astype(np.uint8)
+        seg_color = cv2.applyColorMap(seg_vis, cv2.COLORMAP_JET)
+        cv2.imwrite(os.path.join(epoch_dir, f"{basename}_seg.png"), seg_color)
+
+        # 边界概率图：热力图（灰度→伪彩色）
+        bnd_vis = (bnd_prob * 255).astype(np.uint8)
+        bnd_color = cv2.applyColorMap(bnd_vis, cv2.COLORMAP_HOT)
+        cv2.imwrite(os.path.join(epoch_dir, f"{basename}_boundary.png"), bnd_color)
+
+    logger.info(f"  Monitor inference saved: {epoch_dir} ({len(image_paths)} images)")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Stage-2 Semi-Supervised Fine-tuning (Mean Teacher + Boundary Prediction)"
@@ -513,6 +584,7 @@ def main():
 
     unlabeled_samples_per_epoch = semi_cfg.get("unlabeled_samples_per_epoch", 0)
     bs_unlabeled = semi_cfg.get("batch_size_unlabeled", 4)
+    checkpoint_interval = semi_cfg.get("checkpoint_interval", 5)
 
     for epoch in range(start_epoch, total_epochs):
         epoch_start = time.time()
@@ -590,7 +662,7 @@ def main():
                 f"bndIoU={val_metrics['boundary_iou']:.4f})"
             )
 
-        if (epoch + 1) % 10 == 0 and semi_cfg.get("save_checkpoints", True):
+        if (epoch + 1) % checkpoint_interval == 0 and semi_cfg.get("save_checkpoints", True):
             ckpt_path = os.path.join(output_dir, f"stage2_epoch{epoch + 1}.pth")
             torch.save({
                 "epoch": epoch,
@@ -601,6 +673,10 @@ def main():
                 "config": config,
             }, ckpt_path)
             logger.info(f"  Checkpoint saved: {ckpt_path}")
+
+        # 监控推理：每 checkpoint_interval 个 epoch 保存概率图
+        if (epoch + 1) % checkpoint_interval == 0:
+            monitor_inference(student_model, config, epoch, device)
 
     final_path = os.path.join(output_dir, "final_model_stage2.pth")
     torch.save({

@@ -148,6 +148,16 @@ semi_supervised:
   unlabeled_samples_per_epoch: 0
   # 保存 checkpoints
   save_checkpoints: true
+  # checkpoint 与监控推理间隔（epoch 数）
+  checkpoint_interval: 5
+  # 训练监控推理（保存语义+边界概率图演进）
+  monitor:
+    # 监控图像目录（相对 project_root）
+    image_dir: "data/test"
+    # 监控图像数量
+    num_images: 3
+    # 监控输出目录
+    output_dir: "outputs/stage2/monitor"
   # Random Patch Masking 参数
   patch_mask_ratio: 0.3
   patch_mask_size: 64
