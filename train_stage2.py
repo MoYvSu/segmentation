@@ -22,6 +22,7 @@ import argparse
 import copy
 import itertools
 import logging
+import math
 import os
 import sys
 import time
@@ -455,19 +456,19 @@ def main():
 
     warmup_epochs = semi_cfg.get("warmup_epochs", 5)
     total_epochs = semi_cfg.get("epochs", 50)
-    cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=total_epochs - warmup_epochs
-    )
-    scheduler = torch.optim.lr_scheduler.SequentialLR(
+
+    def warmup_cosine_lambda(epoch):
+        """Warmup (linear 0.01→1.0) + Cosine decay (1.0→0.0)。"""
+        start_factor = 0.01
+        if epoch < warmup_epochs:
+            return start_factor + (1.0 - start_factor) * epoch / max(1, warmup_epochs)
+        else:
+            progress = (epoch - warmup_epochs) / max(1, total_epochs - warmup_epochs)
+            return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer,
-        schedulers=[
-            torch.optim.lr_scheduler.LinearLR(
-                optimizer, start_factor=0.01, end_factor=1.0,
-                total_iters=warmup_epochs,
-            ),
-            cosine_scheduler,
-        ],
-        milestones=[warmup_epochs],
+        lr_lambda=warmup_cosine_lambda,
     )
 
     use_amp = train_cfg.get("amp", False)
@@ -487,8 +488,15 @@ def main():
         checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
         student_model.decoder.load_state_dict(checkpoint["decoder_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-        start_epoch = checkpoint["epoch"] + 1
+        try:
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        except Exception as e:
+            logger.warning(f"调度器状态加载失败（可能因 SequentialLR→LambdaLR 迁移），从 epoch 0 重新调度: {e}")
+            start_epoch = checkpoint["epoch"] + 1
+            for _ in range(start_epoch):
+                scheduler.step()
+        else:
+            start_epoch = checkpoint["epoch"] + 1
         # 兼容旧 checkpoint 的 best_val_iou key
         best_composite_score = checkpoint.get(
             "best_composite_score", checkpoint.get("best_val_iou", 0.0)
