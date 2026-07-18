@@ -61,7 +61,7 @@ data:
 train:
   learning_rate: 1.5e-4
   weight_decay: 1.0e-4
-  epochs: 100
+  epochs: 50
   scheduler: "cosine"
   warmup_epochs: 25
   grad_clip: 1.0
@@ -69,6 +69,9 @@ train:
   focal_gamma: 2.0
   focal_alpha: 0.75
   boundary_alpha: 0.1
+  # 复合评分权重（best_model 保存依据）
+  composite_sem_weight: 0.4
+  composite_boundary_weight: 0.6
   save_checkpoints: true
 
 # -----------------------------------------------------------------------------
@@ -88,7 +91,7 @@ boundary:
 # 推理配置
 # -----------------------------------------------------------------------------
 inference:
-  test_dir: "data/test"
+  test_dir: "data/smoketest"
   output_dir: "outputs/inference"
   threshold: 0.5
   min_instance_area: 50

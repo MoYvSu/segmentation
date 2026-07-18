@@ -111,9 +111,13 @@ def load_stage1_checkpoint(model, checkpoint_path, device):
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model.decoder.load_state_dict(checkpoint["decoder_state_dict"])
     logger.info(f"Stage-1 checkpoint loaded: {checkpoint_path}")
+    # 兼容新旧 checkpoint key
+    best_score = checkpoint.get(
+        "best_composite_score", checkpoint.get("best_val_iou", "?")
+    )
     logger.info(
         f"  Epoch: {checkpoint.get('epoch', '?')}, "
-        f"Best Val IoU: {checkpoint.get('best_val_iou', '?')}"
+        f"Best Score: {best_score}"
     )
 
 
@@ -340,6 +344,11 @@ def validate(model, loader, criterion, device):
     total_loss = 0.0
     n_batches = 0
 
+    # 边界指标累积
+    bnd_tp = 0
+    bnd_fp = 0
+    bnd_fn = 0
+
     for batch in loader:
         images = batch["image"].to(device)
         targets = batch["target"].to(device)
@@ -354,8 +363,21 @@ def validate(model, loader, criterion, device):
         mask = targets[:, 0].long()
         metrics.update_tensor(pred, mask)
 
+        # 边界通道 IoU
+        bnd_logits = output[:, 1]
+        bnd_pred = (torch.sigmoid(bnd_logits) > 0.5).long()
+        bnd_gt = targets[:, 1].long()
+        bnd_tp += ((bnd_pred == 1) & (bnd_gt == 1)).sum().item()
+        bnd_fp += ((bnd_pred == 1) & (bnd_gt == 0)).sum().item()
+        bnd_fn += ((bnd_pred == 0) & (bnd_gt == 1)).sum().item()
+
     val_metrics = metrics.get_metrics()
     val_metrics["loss"] = total_loss / max(n_batches, 1)
+
+    # Boundary IoU = TP / (TP + FP + FN + eps)
+    eps = 1e-7
+    val_metrics["boundary_iou"] = bnd_tp / (bnd_tp + bnd_fp + bnd_fn + eps)
+
     return val_metrics
 
 
@@ -454,16 +476,24 @@ def main():
     ema_decay = semi_cfg.get("ema_decay", 0.999)
     unsup_weight = semi_cfg.get("unsup_weight", 1.0)
 
+    # 复合评分权重
+    sem_w = train_cfg.get("composite_sem_weight", 0.4)
+    bnd_w = train_cfg.get("composite_boundary_weight", 0.6)
+    logger.info(f"Best model 保存依据: composite_score = {sem_w:.1f}*mIoU + {bnd_w:.1f}*BndIoU")
+
     start_epoch = 0
-    best_val_iou = 0.0
+    best_composite_score = 0.0
     if args.resume and os.path.exists(args.resume):
         checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
         student_model.decoder.load_state_dict(checkpoint["decoder_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         start_epoch = checkpoint["epoch"] + 1
-        best_val_iou = checkpoint.get("best_val_iou", 0.0)
-        logger.info(f"Resumed from epoch {start_epoch}, best Val IoU: {best_val_iou:.4f}")
+        # 兼容旧 checkpoint 的 best_val_iou key
+        best_composite_score = checkpoint.get(
+            "best_composite_score", checkpoint.get("best_val_iou", 0.0)
+        )
+        logger.info(f"Resumed from epoch {start_epoch}, best Composite Score: {best_composite_score:.4f}")
 
     logger.info("=" * 60)
     logger.info("Stage-2 Semi-Supervised Fine-tuning (Mean Teacher)")
@@ -517,27 +547,40 @@ def main():
             f"    unsup_detail: s_c={train_metrics['seg_consist']:.4f} "
             f"b_c={train_metrics['boundary_consist']:.4f}"
         )
+        # 复合评分
+        composite_score = (
+            sem_w * val_metrics["mean_iou"] + bnd_w * val_metrics["boundary_iou"]
+        )
+
         logger.info(
             f"  Val: loss={val_metrics['loss']:.4f} "
-            f"mIoU={val_metrics['mean_iou']:.4f} mDice={val_metrics['mean_dice']:.4f}"
+            f"mIoU={val_metrics['mean_iou']:.4f} "
+            f"Bnd IoU={val_metrics['boundary_iou']:.4f} "
+            f"Composite={composite_score:.4f} "
+            f"mDice={val_metrics['mean_dice']:.4f}"
         )
         logger.info(
             f"  pearlite_iou={val_metrics['pearlite_iou']:.4f} "
             f"ferrite_iou={val_metrics['ferrite_iou']:.4f}"
         )
 
-        if val_metrics["mean_iou"] > best_val_iou:
-            best_val_iou = val_metrics["mean_iou"]
+        if composite_score > best_composite_score:
+            best_composite_score = composite_score
             best_path = os.path.join(output_dir, "best_model_stage2.pth")
             torch.save({
                 "epoch": epoch,
                 "decoder_state_dict": student_model.decoder.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
-                "best_val_iou": best_val_iou,
+                "best_composite_score": best_composite_score,
                 "config": config,
             }, best_path)
-            logger.info(f"  New best model saved: {best_path} (mIoU={best_val_iou:.4f})")
+            logger.info(
+                f"  New best model saved: {best_path} "
+                f"(composite={best_composite_score:.4f}, "
+                f"mIoU={val_metrics['mean_iou']:.4f}, "
+                f"bndIoU={val_metrics['boundary_iou']:.4f})"
+            )
 
         if (epoch + 1) % 10 == 0 and semi_cfg.get("save_checkpoints", True):
             ckpt_path = os.path.join(output_dir, f"stage2_epoch{epoch + 1}.pth")
@@ -546,7 +589,7 @@ def main():
                 "decoder_state_dict": student_model.decoder.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
-                "best_val_iou": best_val_iou,
+                "best_composite_score": best_composite_score,
                 "config": config,
             }, ckpt_path)
             logger.info(f"  Checkpoint saved: {ckpt_path}")
@@ -555,11 +598,11 @@ def main():
     torch.save({
         "epoch": total_epochs - 1,
         "decoder_state_dict": student_model.decoder.state_dict(),
-        "best_val_iou": best_val_iou,
+        "best_composite_score": best_composite_score,
         "config": config,
     }, final_path)
     logger.info(f"Stage-2 training complete! Final model: {final_path}")
-    logger.info(f"Best Val mIoU: {best_val_iou:.4f}")
+    logger.info(f"Best Composite Score: {best_composite_score:.4f}")
 
 
 if __name__ == "__main__":

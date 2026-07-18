@@ -76,9 +76,13 @@ def build_model(config, device, checkpoint_path=None):
         logger.info(f"Loading decoder weights: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         model.decoder.load_state_dict(checkpoint["decoder_state_dict"])
+        # 兼容新旧 checkpoint key
+        best_score = checkpoint.get(
+            "best_composite_score", checkpoint.get("best_val_iou", "?")
+        )
         logger.info(
             f"Weights loaded (epoch={checkpoint.get('epoch', '?')}, "
-            f"best_val_iou={checkpoint.get('best_val_iou', '?')})"
+            f"best_score={best_score})"
         )
     else:
         logger.warning("No decoder weights loaded, using random init!")
