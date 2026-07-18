@@ -1,22 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-冻结 SAM 2 Image Encoder + 自制轻量 FPN 解码头的训练流程。
+冻结 SAM 2 Image Encoder + 自制轻量 FPN 解码头的训练流程（边界预测版本）。
 
 技术路线：
 1. SAM 2 Hiera trunk 冻结，仅作为特征提取器
 2. FPN 解码头随机初始化，仅训练解码头参数
-3. 在线 Letterbox 数据管道
-4. 双任务输出：分类 Focal Loss + 连续距离场 MSE 回归
-5. 静态权重 1:10（Focal:MSE）
-微调训练主入口（向量场版本）
-冻结 SAM 2 Image Encoder + 自制轻量 FPN 解码头的训练流程。
-
-技术路线：
-1. SAM 2 Hiera trunk 冻结，仅作为特征提取器
-2. FPN 解码头随机初始化，仅训练解码头参数
-3. 在线 Letterbox 数据管道
-4. 三任务输出：分类 Focal + 向量场 MSE 回归
-5. 不确定性加权自动平衡
+3. 在线 Letterbox 数据管道 + 离线净化的边界 GT
+4. 双任务输出：语义 BCE Loss + 边界 Focal Loss × EDT 权重
 
 使用方法：
     conda activate sam2_env
@@ -26,7 +16,6 @@
 - 总参数量 < 500M
 - 禁止加载 SAM 2 原生 Mask Decoder 权重
 - 权重文件必须位于项目 weights/ 目录
-- 禁止使用 emoji 或非标准文本图标
 """
 
 import argparse
@@ -37,7 +26,6 @@ import time
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from torch.amp.grad_scaler import GradScaler
 from torch.amp.autocast_mode import autocast
 from torch.utils.data import DataLoader
@@ -47,12 +35,11 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 import yaml
-from data.dataset import MetallographicDataset, collate_fn
+from data.dataset import BoundaryDataset, collate_fn
 from models.fpn_decoder import FPNDecoder, SegmentationModel
 from models.sam2_encoder import SAM2Encoder
-from utils.loss import FocalDistanceFieldLoss
+from utils.loss import BoundaryLoss
 from utils.metrics import SegMetrics
-from utils.post_process import output_to_binary_mask
 
 logging.basicConfig(
     level=logging.INFO,
@@ -74,7 +61,7 @@ def build_model(config, device):
 
     ckpt_path = os.path.join(paths_cfg["weights_dir"], paths_cfg["sam2_ckpt"])
     if not os.path.exists(ckpt_path):
-        logger.warning(f"SAM 2 权重文件不存在: {ckpt_path}\n请将 {paths_cfg['sam2_ckpt']} 下载到 weights/ 目录。")
+        logger.warning(f"SAM 2 权重文件不存在: {ckpt_path}")
 
     encoder = SAM2Encoder(
         config_file=sam2_cfg["config_file"],
@@ -116,41 +103,47 @@ def build_model(config, device):
 def build_dataloaders(config):
     data_cfg = config["data"]
     paths_cfg = config["paths"]
-    data_dir = os.path.join(paths_cfg["project_root"], paths_cfg["raw_data_dir"])
+    boundary_cfg = config.get("boundary", {})
 
-    train_dataset = MetallographicDataset(
+    data_dir = os.path.join(paths_cfg["project_root"], paths_cfg["raw_data_dir"])
+    gt_dir = os.path.join(paths_cfg["project_root"], boundary_cfg.get("gt_dir", "data/purified_gt"))
+
+    boundary_scale_factor = boundary_cfg.get("edt_scale_factor", 10.0)
+    boundary_weight_floor = boundary_cfg.get("edt_weight_floor", 0.3)
+
+    train_dataset = BoundaryDataset(
         data_dir=data_dir,
+        gt_dir=gt_dir,
         image_size=data_cfg["image_size"],
-        erode_pixels=data_cfg.get("erode_pixels", 5),
         augment=True,
         augment_config=data_cfg.get("augmentation", {}),
         split="train",
         train_ratio=data_cfg["train_ratio"],
         seed=data_cfg["seed"],
-        dist_scale_factor=data_cfg.get("dist_scale_factor", 10.0),
+        boundary_scale_factor=boundary_scale_factor,
+        boundary_weight_floor=boundary_weight_floor,
     )
 
-    val_dataset = MetallographicDataset(
+    val_dataset = BoundaryDataset(
         data_dir=data_dir,
+        gt_dir=gt_dir,
         image_size=data_cfg["image_size"],
-        erode_pixels=data_cfg.get("erode_pixels", 5),
         augment=False,
         split="val",
         train_ratio=data_cfg["train_ratio"],
         seed=data_cfg["seed"],
-        dist_scale_factor=data_cfg.get("dist_scale_factor", 10.0),
+        boundary_scale_factor=boundary_scale_factor,
+        boundary_weight_floor=boundary_weight_floor,
     )
 
-    # 防御性检查：在构建 DataLoader 之前检查数据集长度
     if len(train_dataset) == 0:
-        logger.error("训练数据集为空！请将原始图像与同名 .json 标注放入 data/raw/ 目录。")
+        logger.error("训练数据集为空！请先运行 tools/preprocess_labels.py 生成净化 GT。")
         sys.exit(1)
 
     if len(val_dataset) == 0:
         logger.warning("验证数据集为空，将使用训练集进行验证。")
         val_dataset = train_dataset
 
-    # 当 batch_size 大于数据集长度时，自适应调整 batch_size
     train_bs = min(data_cfg["batch_size"], len(train_dataset))
     if train_bs < data_cfg["batch_size"]:
         logger.warning(f"训练 batch_size ({data_cfg['batch_size']}) > 训练集长度 ({len(train_dataset)})，已调整为 {train_bs}")
@@ -178,31 +171,31 @@ def build_dataloaders(config):
     return train_loader, val_loader
 
 
-def train_one_epoch(model, loader, criterion, optimizer, scaler, device, grad_clip=1.0, use_amp=True):
+def train_one_epoch(model, loader, criterion, optimizer, scaler, device,
+                    grad_clip=1.0, use_amp=True):
     model.train()
     model.encoder.eval()
 
     total_loss = 0.0
     total_seg = 0.0
-    total_dist = 0.0
+    total_boundary = 0.0
     n_batches = 0
 
-    # 梯度裁剪参数：解码器参数 + 损失函数不确定性参数
-    clip_params = list(model.decoder.parameters()) + list(criterion.parameters())
+    clip_params = list(model.decoder.parameters())
 
     for batch_idx, batch in enumerate(loader):
         images = batch["image"].to(device)
         targets = batch["target"].to(device)
+        weights = batch["weight"].to(device)
 
         optimizer.zero_grad()
 
         if use_amp:
             with autocast('cuda'):
                 output = model(images, output_size=targets.shape[-2:])
-                total_loss_t, seg_val, dist_val = criterion(output, targets)
+                total_loss_t, seg_val, boundary_val = criterion(output, targets, weights)
             scaler.scale(total_loss_t).backward()
 
-            # 固定梯度裁剪：硬编码 1.0，允许初始阶段强纠偏梯度通过
             if grad_clip > 0:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(clip_params, grad_clip)
@@ -210,26 +203,28 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, grad_cl
             scaler.update()
         else:
             output = model(images, output_size=targets.shape[-2:])
-            total_loss_t, seg_val, dist_val = criterion(output, targets)
+            total_loss_t, seg_val, boundary_val = criterion(output, targets, weights)
             total_loss_t.backward()
 
-            # 固定梯度裁剪：硬编码 1.0，允许初始阶段强纠偏梯度通过
             if grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(clip_params, grad_clip)
             optimizer.step()
 
         total_loss += total_loss_t.item()
         total_seg += seg_val
-        total_dist += dist_val
+        total_boundary += boundary_val
         n_batches += 1
 
         if (batch_idx + 1) % 10 == 0:
-            logger.info(f"  Batch {batch_idx + 1}/{len(loader)}: loss={total_loss_t.item():.4f} seg={seg_val:.4f} dist={dist_val:.4f}")
+            logger.info(
+                f"  Batch {batch_idx + 1}/{len(loader)}: "
+                f"loss={total_loss_t.item():.4f} seg={seg_val:.4f} boundary={boundary_val:.4f}"
+            )
 
     return {
-        "loss": total_loss / n_batches,
-        "seg": total_seg / n_batches,
-        "dist": total_dist / n_batches,
+        "loss": total_loss / max(n_batches, 1),
+        "seg": total_seg / max(n_batches, 1),
+        "boundary": total_boundary / max(n_batches, 1),
     }
 
 
@@ -243,25 +238,25 @@ def validate(model, loader, criterion, device):
     for batch in loader:
         images = batch["image"].to(device)
         targets = batch["target"].to(device)
+        weights = batch["weight"].to(device)
         output = model(images, output_size=targets.shape[-2:])
-        total_loss_t, _, _ = criterion(output, targets)
+        total_loss_t, _, _ = criterion(output, targets, weights)
         total_loss += total_loss_t.item()
         n_batches += 1
 
-        # 从分类 logits 通道提取二值预测
-        seg_logits = output[:, 0]  # [B, H, W]
+        # 语义通道 IoU
+        seg_logits = output[:, 0]
         pred = (torch.sigmoid(seg_logits) > 0.5).long()
-        # 从 target 通道 0 提取二值掩码
-        mask = targets[:, 0].long()  # [B, H, W]
+        mask = targets[:, 0].long()
         metrics.update_tensor(pred, mask)
 
     val_metrics = metrics.get_metrics()
-    val_metrics["loss"] = total_loss / n_batches
+    val_metrics["loss"] = total_loss / max(n_batches, 1)
     return val_metrics
 
 
 def main():
-    parser = argparse.ArgumentParser(description="低碳钢金相分割训练 (双任务距离场版本)")
+    parser = argparse.ArgumentParser(description="低碳钢金相分割训练 (边界预测版本)")
     parser.add_argument("--config", type=str, default="config/default_config.yaml")
     parser.add_argument("--resume", type=str, default=None)
     args = parser.parse_args()
@@ -285,19 +280,20 @@ def main():
 
     train_loader, val_loader = build_dataloaders(config)
 
-    # Focal Loss + 边界加权距离场 MSE 双任务损失 + 不确定性加权
-    criterion = FocalDistanceFieldLoss(gamma=2.0, alpha=0.95).to(device)
-    logger.info("损失函数: FocalDistanceFieldLoss (双轨空间权重 + 向量场 + 不确定性加权)")
+    criterion = BoundaryLoss(
+        gamma=train_cfg.get("focal_gamma", 2.0),
+        alpha_boundary=train_cfg.get("boundary_alpha", 1.0),
+        alpha_focal=train_cfg.get("focal_alpha", 0.75),
+    ).to(device)
+    logger.info("损失函数: BoundaryLoss (语义 BCE + 边界 Focal × EDT 权重)")
 
-    # 优化器：解码器参数 + 损失函数不确定性参数 (log_var_cls, log_var_vec)
     optimizer = torch.optim.AdamW(
-        list(model.decoder.parameters()) + list(criterion.parameters()),
+        model.decoder.parameters(),
         lr=train_cfg["learning_rate"],
         weight_decay=train_cfg["weight_decay"],
         eps=1e-4,
     )
 
-    # Warmup + CosineAnnealing 调度器
     warmup_epochs = train_cfg.get("warmup_epochs", 5)
     cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=train_cfg["epochs"] - warmup_epochs
@@ -324,17 +320,12 @@ def main():
         model.decoder.load_state_dict(checkpoint["decoder_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-        # 恢复不确定性参数
-        if "uncertainty_state" in checkpoint:
-            criterion.log_var_cls.data = checkpoint["uncertainty_state"]["log_var_cls"].to(device)
-            criterion.log_var_vec.data = checkpoint["uncertainty_state"]["log_var_vec"].to(device)
-            logger.info(f"  不确定性参数已恢复: log_var_cls={criterion.log_var_cls.item():.4f}, log_var_vec={criterion.log_var_vec.item():.4f}")
         start_epoch = checkpoint["epoch"] + 1
         best_val_iou = checkpoint.get("best_val_iou", 0.0)
         logger.info(f"从 epoch {start_epoch} 恢复训练，最佳 Val IoU: {best_val_iou:.4f}")
 
     logger.info("=" * 60)
-    logger.info("开始训练 (双任务距离场版本)")
+    logger.info("开始训练 (边界预测版本)")
     logger.info(f"  Epochs: {train_cfg['epochs']}")
     logger.info(f"  Batch size: {config['data']['batch_size']}")
     logger.info(f"  Learning rate: {train_cfg['learning_rate']}")
@@ -344,29 +335,61 @@ def main():
         epoch_start = time.time()
         logger.info(f"\nEpoch {epoch + 1}/{train_cfg['epochs']}")
 
-        train_metrics = train_one_epoch(model, train_loader, criterion, optimizer, scaler, device, grad_clip=train_cfg["grad_clip"], use_amp=train_cfg["amp"])
+        train_metrics = train_one_epoch(
+            model, train_loader, criterion, optimizer, scaler, device,
+            grad_clip=train_cfg["grad_clip"], use_amp=train_cfg["amp"]
+        )
         val_metrics = validate(model, val_loader, criterion, device)
         scheduler.step()
 
         epoch_time = time.time() - epoch_start
         logger.info(f"Epoch {epoch + 1} 完成 ({epoch_time:.1f}s)")
-        logger.info(f"  Train Loss: {train_metrics['loss']:.4f} (seg={train_metrics['seg']:.4f}, dist={train_metrics['dist']:.4f})")
-        logger.info(f"  Val Loss: {val_metrics['loss']:.4f} | Val mIoU: {val_metrics['mean_iou']:.4f} | Val mDice: {val_metrics['mean_dice']:.4f}")
-        logger.info(f"  pearlite_iou={val_metrics['pearlite_iou']:.4f} ferrite_iou={val_metrics['ferrite_iou']:.4f}")
+        logger.info(
+            f"  Train Loss: {train_metrics['loss']:.4f} "
+            f"(seg={train_metrics['seg']:.4f}, boundary={train_metrics['boundary']:.4f})"
+        )
+        logger.info(
+            f"  Val Loss: {val_metrics['loss']:.4f} | "
+            f"Val mIoU: {val_metrics['mean_iou']:.4f} | "
+            f"Val mDice: {val_metrics['mean_dice']:.4f}"
+        )
+        logger.info(
+            f"  pearlite_iou={val_metrics['pearlite_iou']:.4f} "
+            f"ferrite_iou={val_metrics['ferrite_iou']:.4f}"
+        )
 
         if val_metrics["mean_iou"] > best_val_iou:
             best_val_iou = val_metrics["mean_iou"]
             best_path = os.path.join(output_dir, "best_model.pth")
-            torch.save({"epoch": epoch, "decoder_state_dict": model.decoder.state_dict(), "optimizer_state_dict": optimizer.state_dict(), "scheduler_state_dict": scheduler.state_dict(), "best_val_iou": best_val_iou, "uncertainty_state": {"log_var_cls": criterion.log_var_cls.data.cpu(), "log_var_vec": criterion.log_var_vec.data.cpu()}, "config": config}, best_path)
-            logger.info(f"  新最佳模型已保存: {best_path} (mIoU={best_val_iou:.4f}, log_var_cls={criterion.log_var_cls.item():.4f}, log_var_vec={criterion.log_var_vec.item():.4f})")
+            torch.save({
+                "epoch": epoch,
+                "decoder_state_dict": model.decoder.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "best_val_iou": best_val_iou,
+                "config": config,
+            }, best_path)
+            logger.info(f"  新最佳模型已保存: {best_path} (mIoU={best_val_iou:.4f})")
 
-        if (epoch + 1) % 10 == 0 and train_cfg["save_checkpoints"]:
+        if (epoch + 1) % 10 == 0 and train_cfg.get("save_checkpoints", True):
             ckpt_path = os.path.join(output_dir, f"checkpoint_epoch{epoch + 1}.pth")
-            torch.save({"epoch": epoch, "decoder_state_dict": model.decoder.state_dict(), "optimizer_state_dict": optimizer.state_dict(), "scheduler_state_dict": scheduler.state_dict(), "best_val_iou": best_val_iou, "uncertainty_state": {"log_var_cls": criterion.log_var_cls.data.cpu(), "log_var_vec": criterion.log_var_vec.data.cpu()}, "config": config}, ckpt_path)
+            torch.save({
+                "epoch": epoch,
+                "decoder_state_dict": model.decoder.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "best_val_iou": best_val_iou,
+                "config": config,
+            }, ckpt_path)
             logger.info(f"  Checkpoint 已保存: {ckpt_path}")
 
     final_path = os.path.join(output_dir, "final_model.pth")
-    torch.save({"epoch": train_cfg["epochs"] - 1, "decoder_state_dict": model.decoder.state_dict(), "best_val_iou": best_val_iou, "uncertainty_state": {"log_var_cls": criterion.log_var_cls.data.cpu(), "log_var_vec": criterion.log_var_vec.data.cpu()}, "config": config}, final_path)
+    torch.save({
+        "epoch": train_cfg["epochs"] - 1,
+        "decoder_state_dict": model.decoder.state_dict(),
+        "best_val_iou": best_val_iou,
+        "config": config,
+    }, final_path)
     logger.info(f"训练完成！最终模型: {final_path}")
     logger.info(f"最佳 Val mIoU: {best_val_iou:.4f}")
 

@@ -1,18 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-在线数据管道（向量场版本）
-=========================
-通过 PyTorch Dataset 在内存中在线处理图像，禁止离线改图。
+在线数据管道（边界预测版本）
+===========================
+通过 PyTorch Dataset 在内存中在线处理图像，加载离线净化的边界 GT。
 
 核心功能：
 1. 在线 Letterbox 变换：将任意非标准分辨率图像的长边等比例缩放至 1024，
    短边按相同比例缩放后，在右侧/下方利用 0 像素补齐到 1024*1024。
    保证长宽比保真，禁止强行挤压变形缩放。
-2. 三任务目标生成：
-   - 通道 0（二分类掩码）：铁素体（核+晶界）并集 = 1，珠光体 = 0
-   - 通道 1（向量场 Vx）：像素指向所属实例质心的 X 方向偏移量（归一化至 [-1,1]）
-   - 通道 2（向量场 Vy）：像素指向所属实例质心的 Y 方向偏移量（归一化至 [-1,1]）
-3. 向量场基于多边形标注逐实例计算质心，非连通域分析
+2. 双通道目标加载：
+   - 通道 0（语义掩码）：铁素体 = 1，珠光体 = 0
+   - 通道 1（边界掩码）：净化后的晶界带 = 1，非边界 = 0
+3. 在线 EDT 权重图：基于边界通道计算距离权重，边界附近权重高
 """
 
 import json
@@ -27,11 +26,11 @@ from scipy.ndimage import distance_transform_edt
 from torch.utils.data import Dataset
 
 
-# 类别常量（仅用于后处理兼容性，网络不再预测类别 2）
+# 类别常量
 CLASS_PEARLITE = 0       # 珠光体
-CLASS_FERRITE = 1        # 铁素体（核+晶界统一为前景）
+CLASS_FERRITE = 1        # 铁素体
 
-NUM_OUTPUT_CHANNELS = 3  # 三任务输出：掩码 + 向量场(Vx, Vy)
+NUM_OUTPUT_CHANNELS = 2  # 双通道输出：语义掩码 + 边界掩码
 
 
 def letterbox(
@@ -39,41 +38,19 @@ def letterbox(
     target_size: int = 1024,
     pad_value: int = 0,
 ) -> Tuple[np.ndarray, float, int, int]:
-    """
-    在线 Letterbox 变换：长边等比例缩放至 target_size，短边补齐。
-
-    禁止强行挤压变形缩放，保证长宽比保真。
-
-    Args:
-        image: 原始图像 [H, W, C] (BGR or RGB)
-        target_size: 目标长边尺寸（默认 1024）
-        pad_value: 填充像素值（默认 0）
-
-    Returns:
-        letterboxed: [target_size, target_size, C] 图像
-        scale: 缩放比例
-        pad_h: 下方填充像素数
-        pad_w: 右侧填充像素数
-    """
+    """在线 Letterbox 变换：长边等比例缩放至 target_size，短边补齐。"""
     h, w = image.shape[:2]
     scale = target_size / max(h, w)
     new_h, new_w = int(round(h * scale)), int(round(w * scale))
-
-    # 等比例缩放
     resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-
-    # 计算填充量（右侧和下方）
     pad_h = target_size - new_h
     pad_w = target_size - new_w
-
-    # 创建目标画布并粘贴
     letterboxed = np.full(
         (target_size, target_size, image.shape[2]) if image.ndim == 3 else (target_size, target_size),
         pad_value,
         dtype=image.dtype,
     )
     letterboxed[:new_h, :new_w] = resized
-
     return letterboxed, scale, pad_h, pad_w
 
 
@@ -82,33 +59,15 @@ def letterbox_mask(
     target_size: int = 1024,
     pad_value: int = 0,
 ) -> Tuple[np.ndarray, float, int, int]:
-    """
-    对掩码进行 Letterbox 变换（使用最近邻插值保持标签不混叠）。
-
-    Args:
-        mask: 原始掩码 [H, W]
-        target_size: 目标长边尺寸
-        pad_value: 填充值
-
-    Returns:
-        letterboxed: [target_size, target_size] 掩码
-        scale: 缩放比例
-        pad_h: 下方填充像素数
-        pad_w: 右侧填充像素数
-    """
+    """对掩码进行 Letterbox 变换（使用最近邻插值保持标签不混叠）。"""
     h, w = mask.shape[:2]
     scale = target_size / max(h, w)
     new_h, new_w = int(round(h * scale)), int(round(w * scale))
-
-    # 最近邻插值保持标签
     resized = cv2.resize(mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
-
     pad_h = target_size - new_h
     pad_w = target_size - new_w
-
     letterboxed = np.full((target_size, target_size), pad_value, dtype=mask.dtype)
     letterboxed[:new_h, :new_w] = resized
-
     return letterboxed, scale, pad_h, pad_w
 
 
@@ -117,17 +76,7 @@ def polygons_to_mask(
     height: int,
     width: int,
 ) -> np.ndarray:
-    """
-    将 Labelme 多边形标注转换为二值掩码。
-
-    Args:
-        polygons: 多边形点列表，每个多边形是 [[x1,y1], [x2,y2], ...]
-        height: 图像高度
-        width: 图像宽度
-
-    Returns:
-        mask: [H, W] 二值掩码 (0/1)
-    """
+    """将 Labelme 多边形标注转换为二值掩码。"""
     mask = np.zeros((height, width), dtype=np.uint8)
     for poly in polygons:
         pts = np.array(poly, dtype=np.int32).reshape((-1, 1, 2))
@@ -140,36 +89,7 @@ def parse_labelme_json(
     height: int,
     width: int,
 ) -> Dict[str, np.ndarray]:
-    """
-    解析 Labelme JSON 标注文件，提取 ferrite 和 pearlite 多边形。
-
-    Labelme JSON 结构：
-        {
-            "imageHeight": H,
-            "imageWidth": W,
-            "shapes": [
-                {
-                    "label": "ferrite" / "pearlite",
-                    "points": [[x1,y1], [x2,y2], ...],
-                    ...
-                },
-                ...
-            ]
-        }
-
-    Args:
-        json_path: JSON 文件路径
-        height: 图像高度
-        width: 图像宽度
-
-    Returns:
-        dict: {
-            "ferrite": [H, W] 二值掩码,
-            "pearlite": [H, W] 二值掩码,
-            "ferrite_polys": List[List[List[float]]] ferrite 多边形点列表,
-            "pearlite_polys": List[List[List[float]]] pearlite 多边形点列表,
-        }
-    """
+    """解析 Labelme JSON 标注文件，提取 ferrite 和 pearlite 多边形。"""
     with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
@@ -201,197 +121,52 @@ def create_binary_mask(
     ferrite_mask: np.ndarray,
     pearlite_mask: np.ndarray,
 ) -> np.ndarray:
-    """
-    生成二分类掩码：铁素体（核+晶界）= 1，珠光体 = 0。
-
-    Args:
-        ferrite_mask: [H, W] ferrite 二值掩码 (0/1)
-        pearlite_mask: [H, W] pearlite 二值掩码 (0/1)
-
-    Returns:
-        binary_mask: [H, W] 二值掩码 (0=珠光体, 1=铁素体)
-    """
-    # 铁素体并集为前景
+    """生成二分类掩码：铁素体 = 1，珠光体 = 0。"""
     binary_mask = np.where(ferrite_mask > 0, 1, 0).astype(np.uint8)
     return binary_mask
 
 
-def create_offset_vector_field(
-    ferrite_polys: List[List[List[float]]],
-    height: int,
-    width: int,
-    normalize_to: float = 1024.0,
-) -> np.ndarray:
+def compute_boundary_weight(boundary: np.ndarray, scale_factor: float = 10.0,
+                            weight_floor: float = 0.3) -> np.ndarray:
     """
-    基于多边形标注逐实例计算质心偏移向量场。
+    基于边界掩码计算 EDT 边界权重图。
 
-    对于每个独立的铁素体晶粒多边形：
-    1. 填充为独立实例掩码
-    2. 计算几何质心 (cx, cy)
-    3. 对该实例的每个像素 (x, y) 计算偏移 (cx-x, cy-y)
-    4. 归一化至 [-1, 1]：除以 normalize_to
-
-    背景区域（非铁素体）偏移向量设为 (0, 0)。
+    权重在边界处最高（1.0），随着距离边界越远逐渐降低至 weight_floor。
+    用于 Focal Loss 调制，使模型重点学习边界附近的高锐度像素。
 
     Args:
-        ferrite_polys: ferrite 多边形点列表，每个多边形是 [[x1,y1], [x2,y2], ...]
-        height: 图像高度
-        width: 图像宽度
-        normalize_to: 归一化因子（通常为 image_size，默认 1024.0）
+        boundary: [H, W] 二值边界掩码（1=边界, 0=非边界）
+        scale_factor: EDT 非线性缩放因子
+        weight_floor: 权重下限
 
     Returns:
-        offset_field: [H, W, 2] float32 偏移向量场
-                      - offset_field[..., 0] = Vx (X方向偏移)
-                      - offset_field[..., 1] = Vy (Y方向偏移)
-                      范围 [-1, 1]，背景为 0
+        weight: [H, W] float32 权重图，范围 [weight_floor, 1.0]
     """
-    offset_field = np.zeros((height, width, 2), dtype=np.float32)
+    if boundary.sum() == 0:
+        return np.full(boundary.shape, weight_floor, dtype=np.float32)
 
-    for poly in ferrite_polys:
-        pts = np.array(poly, dtype=np.int32).reshape((-1, 1, 2))
+    # 计算每个非边界像素到最近边界像素的距离
+    dist = np.asarray(distance_transform_edt(boundary == 0), dtype=np.float32)
 
-        # 填充独立实例掩码
-        inst_mask = np.zeros((height, width), dtype=np.uint8)
-        cv2.fillPoly(inst_mask, [pts], 1)
-
-        # 计算几何质心
-        M = cv2.moments(inst_mask)
-        if M["m00"] == 0:
-            continue
-        cx = M["m10"] / M["m00"]
-        cy = M["m01"] / M["m00"]
-
-        # 对该实例的每个像素计算偏移
-        ys, xs = np.where(inst_mask > 0)
-        dx = cx - xs.astype(np.float32)
-        dy = cy - ys.astype(np.float32)
-
-        # 归一化至 [-1, 1]
-        offset_field[ys, xs, 0] = np.clip(dx / normalize_to, -1.0, 1.0)
-        offset_field[ys, xs, 1] = np.clip(dy / normalize_to, -1.0, 1.0)
-
-    return offset_field
-
-
-def create_distance_field(
-    ferrite_mask: np.ndarray,
-    pearlite_mask: np.ndarray,
-    scale_factor: float = 10.0,
-) -> np.ndarray:
-    """
-    计算铁素体像素到最近珠光体边界的欧氏距离场。
-
-    使用 scipy.ndimage.distance_transform_edt 计算铁素体区域内每个像素
-    到最近非铁素体像素的欧氏距离，然后进行非线性归一化。
-
-    珠光体区域的距离值完全设为 0。
-    非线性缩放公式: dist_norm = dist / (dist + scale_factor)
-
-    Args:
-        ferrite_mask: [H, W] ferrite 二值掩码 (0/1)
-        pearlite_mask: [H, W] pearlite 二值掩码 (0/1)
-        scale_factor: 非线性缩放因子（默认 10.0）
-
-    Returns:
-        dist_field: [H, W] 归一化距离场，范围 [0, 1]，珠光体区域为 0
-    """
-    # distance_transform_edt 计算前景(>0)像素到最近背景(==0)像素的距离
-    # ferrite_mask > 0 的区域为铁素体，计算其到非铁素体区域的距离
-    if ferrite_mask.sum() == 0:
-        return np.zeros_like(ferrite_mask, dtype=np.float32)
-
-    dist = np.asarray(distance_transform_edt(ferrite_mask > 0), dtype=np.float32)
-
-    # 非线性归一化: dist / (dist + scale_factor)
-    # 使数值平滑落在 [0, 1] 区间
+    # 归一化：距离越远，权重越低
     dist_norm = dist / (dist + scale_factor)
+    dist_norm = np.maximum(dist_norm, weight_floor)
 
-    # 珠光体区域距离值设为 0
-    dist_norm = np.where(ferrite_mask > 0, dist_norm, 0.0).astype(np.float32)
+    # 边界像素本身权重设为 1.0
+    dist_norm[boundary > 0] = 1.0
 
-    return dist_norm
+    return dist_norm.astype(np.float32)
 
 
-def letterbox_distance_field(
-    dist_field: np.ndarray,
-    target_size: int = 1024,
-) -> Tuple[np.ndarray, float, int, int]:
+class BoundaryDataset(Dataset):
     """
-    对距离场进行 Letterbox 变换（使用双线性插值保持连续性）。
+    低碳钢金相图像边界预测数据集。
 
-    Args:
-        dist_field: [H, W] float32 距离场
-        target_size: 目标长边尺寸
-
-    Returns:
-        letterboxed: [target_size, target_size] 距离场
-        scale: 缩放比例
-        pad_h: 下方填充像素数
-        pad_w: 右侧填充像素数
-    """
-    h, w = dist_field.shape[:2]
-    scale = target_size / max(h, w)
-    new_h, new_w = int(round(h * scale)), int(round(w * scale))
-
-    # 双线性插值保持距离场连续性
-    resized = cv2.resize(dist_field, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-
-    pad_h = target_size - new_h
-    pad_w = target_size - new_w
-
-    letterboxed = np.zeros((target_size, target_size), dtype=np.float32)
-    letterboxed[:new_h, :new_w] = resized
-
-    return letterboxed, scale, pad_h, pad_w
-
-
-def letterbox_vector_field(
-    vec_field: np.ndarray,
-    target_size: int = 1024,
-) -> Tuple[np.ndarray, float, int, int]:
-    """
-    对向量场进行 Letterbox 变换（使用双线性插值保持连续性）。
-
-    向量场 [H, W, 2] 分别对 Vx 和 Vy 通道做双线性插值。
-    填充区域设为 (0, 0)。
-
-    Args:
-        vec_field: [H, W, 2] float32 向量场
-        target_size: 目标长边尺寸
-
-    Returns:
-        letterboxed: [target_size, target_size, 2] 向量场
-        scale: 缩放比例
-        pad_h: 下方填充像素数
-        pad_w: 右侧填充像素数
-    """
-    h, w = vec_field.shape[:2]
-    scale = target_size / max(h, w)
-    new_h, new_w = int(round(h * scale)), int(round(w * scale))
-
-    # 对每个分量双线性插值
-    resized_vx = cv2.resize(vec_field[..., 0], (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-    resized_vy = cv2.resize(vec_field[..., 1], (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-
-    pad_h = target_size - new_h
-    pad_w = target_size - new_w
-
-    letterboxed = np.zeros((target_size, target_size, 2), dtype=np.float32)
-    letterboxed[:new_h, :new_w, 0] = resized_vx
-    letterboxed[:new_h, :new_w, 1] = resized_vy
-
-    return letterboxed, scale, pad_h, pad_w
-
-
-class MetallographicDataset(Dataset):
-    """
-    低碳钢金相图像在线数据集（三任务：二分类掩码 + 向量场回归）。
-
-    在 __getitem__ 中实时执行：
-    1. 读取原始图像与同名的 labelme .json 文件
+    加载离线净化的边界 GT（.npz），在线执行：
+    1. 读取原始图像与对应的 _gt.npz 文件
     2. 在线 Letterbox 变换（长边缩放至 1024，短边补 0）
-    3. 生成二分类掩码（铁素体=1，珠光体=0）
-    4. 基于多边形标注计算向量场（逐实例质心偏移，归一化至 [-1,1]）
+    3. 在线计算 EDT 边界权重图
+    4. 数据增强（可选）
     5. 转换为 PyTorch 张量
 
     约束：
@@ -402,54 +177,57 @@ class MetallographicDataset(Dataset):
     def __init__(
         self,
         data_dir: str,
+        gt_dir: str,
         image_size: int = 1024,
-        erode_pixels: int = 2,
         augment: bool = False,
         augment_config: Optional[dict] = None,
         split: str = "train",
         train_ratio: float = 0.8,
         seed: int = 42,
-        dist_scale_factor: float = 10.0,
+        boundary_scale_factor: float = 10.0,
+        boundary_weight_floor: float = 0.3,
     ):
         """
         Args:
             data_dir: 原始数据目录（包含图像与同名 .json）
+            gt_dir: 净化 GT 目录（包含 _gt.npz 文件）
             image_size: Letterbox 目标长边尺寸
-            erode_pixels: （已废弃，保留参数兼容性）
             augment: 是否启用数据增强
             augment_config: 增强配置 dict
             split: "train" / "val"
             train_ratio: 训练集占比
             seed: 随机种子
-            dist_scale_factor: 距离场非线性缩放因子（保留兼容性，向量场版本不使用）
+            boundary_scale_factor: EDT 权重缩放因子
+            boundary_weight_floor: EDT 权重下限
         """
         super().__init__()
         self.data_dir = data_dir
+        self.gt_dir = gt_dir
         self.image_size = image_size
-        self.erode_pixels = erode_pixels
         self.augment = augment and (split == "train")
         self.augment_config = augment_config or {}
         self.split = split
-        self.dist_scale_factor = dist_scale_factor
+        self.boundary_scale_factor = boundary_scale_factor
+        self.boundary_weight_floor = boundary_weight_floor
 
         # 支持的图像扩展名
         valid_exts = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
 
-        # 收集所有有对应 .json 的图像
+        # 收集所有有对应 .json 和 _gt.npz 的图像
         all_samples = []
         for ext in valid_exts:
             for img_path in glob.glob(os.path.join(data_dir, f"*{ext}")):
                 json_path = os.path.splitext(img_path)[0] + ".json"
-                if os.path.exists(json_path):
-                    all_samples.append((img_path, json_path))
+                basename = os.path.splitext(os.path.basename(img_path))[0]
+                gt_path = os.path.join(gt_dir, f"{basename}_gt.npz")
+                if os.path.exists(json_path) and os.path.exists(gt_path):
+                    all_samples.append((img_path, gt_path))
 
         all_samples.sort()
 
         # 划分训练/验证集
         np.random.seed(seed)
         n_total = len(all_samples)
-
-        # 确保至少有 1 张训练集和 1 张验证集（当 n_total >= 2 时）
         n_train = int(n_total * train_ratio)
         if n_total >= 2:
             n_train = max(1, min(n_train, n_total - 1))
@@ -468,7 +246,7 @@ class MetallographicDataset(Dataset):
 
         self.samples = [all_samples[i] for i in selected]
 
-        print(f"[{split}] 数据集: {len(self.samples)} 张图像 (共 {n_total} 张)")
+        print(f"[{split}] BoundaryDataset: {len(self.samples)} images (total {n_total})")
 
     def __len__(self):
         return len(self.samples)
@@ -476,91 +254,70 @@ class MetallographicDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict:
         """
         在线处理流程：
-        1. 读取图像与 JSON
+        1. 读取图像与 GT .npz
         2. Letterbox 变换
-        3. 生成二分类掩码 + 向量场
+        3. 在线计算 EDT 权重图
         4. 数据增强（可选）
         5. 转张量
 
         Returns:
             dict: {
-                "image": [3, H, W] float32 张量 (0-1 归一化),
-                "target": [3, H, W] float32 张量
-                       - target[0] 为二值掩码 (0/1)
-                       - target[1] 为 Vx 归一化偏移量 [-1,1]
-                       - target[2] 为 Vy 归一化偏移量 [-1,1]
+                "image": [3, H, W] float32 (0-1),
+                "target": [2, H, W] float32
+                       - target[0] = 语义掩码 (0/1)
+                       - target[1] = 边界掩码 (0/1)
+                "weight": [1, H, W] float32 边界权重图,
                 "original_size": (H_orig, W_orig),
-                "scale": 缩放比例,
-                "pad_h": 下方填充,
-                "pad_w": 右侧填充,
                 "image_path": 图像路径,
             }
         """
-        img_path, json_path = self.samples[idx]
+        img_path, gt_path = self.samples[idx]
 
         # 1. 读取原始图像（BGR -> RGB）
         image = cv2.imread(img_path, cv2.IMREAD_COLOR)
         if image is None:
-            raise FileNotFoundError(f"无法读取图像: {img_path}")
+            raise FileNotFoundError(f"Cannot read image: {img_path}")
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         h_orig, w_orig = image.shape[:2]
 
-        # 2. 解析 Labelme JSON，获取 ferrite/pearlite 掩码和多边形
-        masks = parse_labelme_json(json_path, h_orig, w_orig)
-        ferrite_mask = masks["ferrite"]
-        pearlite_mask = masks["pearlite"]
-        ferrite_polys = masks["ferrite_polys"]
+        # 2. 加载净化 GT
+        gt_data = np.load(gt_path)
+        semantic = gt_data["semantic"]      # [H, W] uint8 (0/1)
+        boundary = gt_data["boundary"]      # [H, W] uint8 (0/1)
 
-        # 3. 生成二分类掩码（原始尺寸）
-        binary_mask = create_binary_mask(ferrite_mask, pearlite_mask)
+        # 3. Letterbox 变换（图像、语义、边界使用相同缩放参数）
+        image_lb, scale, pad_h, pad_w = letterbox(image, self.image_size)
+        semantic_lb, _, _, _ = letterbox_mask(semantic, self.image_size)
+        boundary_lb, _, _, _ = letterbox_mask(boundary, self.image_size)
 
-        # 4. 计算向量场（原始尺寸，基于多边形实例质心）
-        vec_field = create_offset_vector_field(
-            ferrite_polys, h_orig, w_orig, normalize_to=float(self.image_size)
+        # 4. 在线计算 EDT 边界权重图
+        weight_lb = compute_boundary_weight(
+            boundary_lb,
+            scale_factor=self.boundary_scale_factor,
+            weight_floor=self.boundary_weight_floor,
         )
 
-        # 5. Letterbox 变换（图像、掩码、向量场使用相同缩放参数）
-        image_lb, scale, pad_h, pad_w = letterbox(image, self.image_size)
-        mask_lb, _, _, _ = letterbox_mask(binary_mask, self.image_size)
-        vec_lb, _, _, _ = letterbox_vector_field(vec_field, self.image_size)
-
-        # 6. 数据增强（仅训练时，同时对图像、掩码、向量场做相同变换）
+        # 5. 数据增强（仅训练时）
         if self.augment:
-            image_lb, mask_lb, vec_lb = self._augment(image_lb, mask_lb, vec_lb)
+            image_lb, semantic_lb, boundary_lb, weight_lb = self._augment(
+                image_lb, semantic_lb, boundary_lb, weight_lb
+            )
 
-        # 7. 转换为 PyTorch 张量
-        # 图像归一化到 [0, 1]，通道优先 (C, H, W)
+        # 6. 转换为 PyTorch 张量
         image_tensor = torch.from_numpy(image_lb).float().permute(2, 0, 1) / 255.0
 
-        # 目标：3 通道 [mask, Vx, Vy]
-        mask_tensor = torch.from_numpy(mask_lb).float().unsqueeze(0)    # [1, H, W]
-        vec_tensor = torch.from_numpy(vec_lb).float().permute(2, 0, 1)  # [2, H, W]
-        target_tensor = torch.cat([mask_tensor, vec_tensor], dim=0)     # [3, H, W]
+        # 目标：2 通道 [semantic, boundary]
+        semantic_tensor = torch.from_numpy(semantic_lb).float().unsqueeze(0)  # [1, H, W]
+        boundary_tensor = torch.from_numpy(boundary_lb).float().unsqueeze(0)  # [1, H, W]
+        target_tensor = torch.cat([semantic_tensor, boundary_tensor], dim=0)  # [2, H, W]
 
-        # --- 刚性断言：确保 target 通道对齐 ---
-        assert target_tensor.shape[0] == 3, \
-            f"Target 通道数错误，预期为 3，实际为 {target_tensor.shape[0]}"
-
-        mask_target = target_tensor[0]
-        vx_target = target_tensor[1]
-        vy_target = target_tensor[2]
-
-        # 检查分类标签的二值性
-        unique_vals = torch.unique(mask_target)
-        for val in unique_vals:
-            assert val.item() in (0.0, 1.0), \
-                f"分类标签包含非法值: {val.item()}。" \
-                f"Channel 0 必须严格为二值掩码（0=背景/珠光体, 1=铁素体）"
-
-        # 检查向量场的归一化范围
-        assert vx_target.min().item() >= -1.0 and vx_target.max().item() <= 1.0, \
-            f"Vx 未严格归一化: min={vx_target.min().item()}, max={vx_target.max().item()}"
-        assert vy_target.min().item() >= -1.0 and vy_target.max().item() <= 1.0, \
-            f"Vy 未严格归一化: min={vy_target.min().item()}, max={vy_target.max().item()}"
+        # 权重图
+        weight_tensor = torch.from_numpy(weight_lb).float().unsqueeze(0)  # [1, H, W]
 
         return {
             "image": image_tensor,
             "target": target_tensor,
+            "weight": weight_tensor,
             "original_size": (h_orig, w_orig),
             "scale": scale,
             "pad_h": pad_h,
@@ -569,79 +326,46 @@ class MetallographicDataset(Dataset):
         }
 
     def _augment(
-        self, image: np.ndarray, mask: np.ndarray, vec_field: np.ndarray
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """
-        在线数据增强（同时对图像、掩码、向量场施加相同空间变换）。
-
-        向量场分量 (Vx, Vy) 需要随空间变换同步旋转/翻转：
-        - 水平翻转: Vx -> -Vx, Vy -> Vy
-        - 垂直翻转: Vx -> Vx, Vy -> -Vy
-        - rot90 k=1: Vx -> Vy, Vy -> -Vx
-        - rot90 k=2: Vx -> -Vx, Vy -> -Vy
-        - rot90 k=3: Vx -> -Vy, Vy -> Vx
-
-        Args:
-            image: [H, W, C] RGB 图像
-            mask: [H, W] 二值掩码
-            vec_field: [H, W, 2] 向量场 (Vx, Vy)
-
-        Returns:
-            augmented_image, augmented_mask, augmented_vec_field
-        """
+        self, image: np.ndarray, semantic: np.ndarray,
+        boundary: np.ndarray, weight: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """在线数据增强（同时对图像、语义、边界、权重做相同空间变换）。"""
         cfg = self.augment_config
-        vx = vec_field[..., 0].copy()
-        vy = vec_field[..., 1].copy()
 
         # 水平翻转
         if cfg.get("horizontal_flip", False) and np.random.rand() < 0.5:
             image = np.ascontiguousarray(image[:, ::-1])
-            mask = np.ascontiguousarray(mask[:, ::-1])
-            vx = np.ascontiguousarray(vx[:, ::-1])
-            vy = np.ascontiguousarray(vy[:, ::-1])
-            # 空间水平翻转: Vx -> -Vx, Vy 不变
-            vx = -vx
+            semantic = np.ascontiguousarray(semantic[:, ::-1])
+            boundary = np.ascontiguousarray(boundary[:, ::-1])
+            weight = np.ascontiguousarray(weight[:, ::-1])
 
         # 垂直翻转
         if cfg.get("vertical_flip", False) and np.random.rand() < 0.5:
             image = np.ascontiguousarray(image[::-1, :])
-            mask = np.ascontiguousarray(mask[::-1, :])
-            vx = np.ascontiguousarray(vx[::-1, :])
-            vy = np.ascontiguousarray(vy[::-1, :])
-            # 空间垂直翻转: Vx 不变, Vy -> -Vy
-            vy = -vy
+            semantic = np.ascontiguousarray(semantic[::-1, :])
+            boundary = np.ascontiguousarray(boundary[::-1, :])
+            weight = np.ascontiguousarray(weight[::-1, :])
 
         # 随机旋转 90/180/270 度
         if cfg.get("rotation", False) and np.random.rand() < 0.5:
             k = np.random.choice([1, 2, 3])
             image = np.ascontiguousarray(np.rot90(image, k))
-            mask = np.ascontiguousarray(np.rot90(mask, k))
-            vx = np.ascontiguousarray(np.rot90(vx, k))
-            vy = np.ascontiguousarray(np.rot90(vy, k))
-            # 旋转向量分量
-            for _ in range(k):
-                # rot90 k=1: new_vx = vy, new_vy = -vx
-                vx, vy = vy.copy(), -vx.copy()
+            semantic = np.ascontiguousarray(np.rot90(semantic, k))
+            boundary = np.ascontiguousarray(np.rot90(boundary, k))
+            weight = np.ascontiguousarray(np.rot90(weight, k))
 
-        augmented_vec = np.stack([vx, vy], axis=-1)
-        return image, mask, augmented_vec
+        return image, semantic, boundary, weight
 
 
 def collate_fn(batch: List[Dict]) -> Dict:
-    """
-    自定义 collate 函数，处理变长元数据。
-
-    Args:
-        batch: List of dict from __getitem__
-
-    Returns:
-        batched dict
-    """
+    """自定义 collate 函数，处理变长元数据。"""
     images = torch.stack([item["image"] for item in batch])
     targets = torch.stack([item["target"] for item in batch])
+    weights = torch.stack([item["weight"] for item in batch])
     return {
         "image": images,
         "target": targets,
+        "weight": weights,
         "original_size": [item["original_size"] for item in batch],
         "scale": [item["scale"] for item in batch],
         "pad_h": [item["pad_h"] for item in batch],

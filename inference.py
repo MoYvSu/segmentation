@@ -1,12 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-Test inference entry (vector field version - unified letterbox)
-================================================================
-Load trained FPN decoder weights, run inference on test images,
-perform vector field centroid collapse + DBSCAN clustering for instance separation.
+推理入口（边界预测版本）
+========================
+加载训练好的 FPN decoder 权重，对测试图像执行前向推理，
+执行边界骨架化 + 受阻分水岭 + 语义投票实现实例分割。
 
-All images are processed via Letterbox to 1024x1024 (same as training),
-ensuring consistent preprocessing between train and inference.
+所有图像通过 Letterbox 处理到 1024x1024（与训练一致）。
 """
 
 import argparse
@@ -15,7 +14,6 @@ import logging
 import os
 import sys
 import time
-from typing import Dict, List, Tuple, Optional
 
 import cv2
 import numpy as np
@@ -30,10 +28,7 @@ import yaml
 from data.dataset import letterbox
 from models.fpn_decoder import FPNDecoder, SegmentationModel
 from models.sam2_encoder import SAM2Encoder
-from utils.post_process import (
-    post_process_prediction_vector,
-    centroid_collapse_clustering,
-)
+from utils.post_process import post_process_prediction_boundary
 
 logging.basicConfig(
     level=logging.INFO,
@@ -96,17 +91,11 @@ def predict_single_image(
     model, image_path, device,
     image_size=1024,
     min_instance_area=50, max_instance_id=255,
-    threshold=0.5,
+    threshold=0.5, boundary_threshold=0.5,
+    watershed_dilate_width=2,
     output_dir=None, save_visualization=True,
-    dbscan_eps=5.0, dbscan_min_samples=3, downsample_grid=4,
 ):
-    """
-    Unified Letterbox inference + vector field post-processing for a single image.
-
-    All images are Letterboxed to image_size x image_size (same as training),
-    regardless of original dimensions. This ensures the model sees the same
-    preprocessing it was trained on.
-    """
+    """Letterbox inference + boundary watershed post-processing."""
     image = cv2.imread(image_path, cv2.IMREAD_COLOR)
     if image is None:
         raise FileNotFoundError(f"Cannot read image: {image_path}")
@@ -115,82 +104,37 @@ def predict_single_image(
 
     basename = os.path.splitext(os.path.basename(image_path))[0]
 
-    # Letterbox to image_size x image_size (same as training)
+    # Letterbox
     image_lb, scale, pad_h, pad_w = letterbox(image_rgb, image_size)
     image_tensor = torch.from_numpy(image_lb).float().permute(2, 0, 1).unsqueeze(0) / 255.0
     image_tensor = image_tensor.to(device)
 
     with torch.no_grad():
-        # Forward pass without output_size: get native FPN resolution (image_size//4)
         output = model(image_tensor)
 
-    # Inverse Letterbox: crop padding from model output, then upsample to original size
-    # FPN native output is image_size//4 (e.g. 256 for 1024 input)
-    content_h = int(round(h_orig * scale / 4))  # content rows in native resolution
-    content_w = int(round(w_orig * scale / 4))  # content cols in native resolution
+    # Inverse Letterbox: crop padding, upsample to original size
+    content_h = int(round(h_orig * scale / 4))
+    content_w = int(round(w_orig * scale / 4))
     output = output[:, :, :content_h, :content_w]
     output = F.interpolate(output, size=(h_orig, w_orig), mode="bilinear", align_corners=True)
 
     if output_dir is not None:
-        output_paths, inst_map, class_map = post_process_prediction_vector(
+        output_paths, inst_map, class_map = post_process_prediction_boundary(
             output=output,
             original_size=(h_orig, w_orig),
             output_dir=output_dir,
             image_basename=basename,
-            image_size=image_size,
             min_instance_area=min_instance_area,
             max_instance_id=max_instance_id,
             threshold=threshold,
-            dbscan_eps=dbscan_eps,
-            dbscan_min_samples=dbscan_min_samples,
-            downsample_grid=downsample_grid,
+            boundary_threshold=boundary_threshold,
+            watershed_dilate_width=watershed_dilate_width,
             save_visualization=save_visualization,
         )
     else:
-        # Fallback: no output dir, return inst_map directly
-        from utils.post_process import CLASS_FERRITE, CLASS_PEARLITE
-
-        if output.ndim == 3:
-            output = output.unsqueeze(0)
-
-        seg_logits = output[0, 0].cpu()
-        vx_field = output[0, 1].cpu().numpy().astype(np.float32)
-        vy_field = output[0, 2].cpu().numpy().astype(np.float32)
-        seg_prob = torch.sigmoid(seg_logits)
-        mask = (seg_prob > threshold).numpy().astype(np.uint8)
-
-        ferrite_binary = (mask == CLASS_FERRITE).astype(np.uint8)
-        if ferrite_binary.sum() > 0:
-            inst_map, class_map = centroid_collapse_clustering(
-                ferrite_binary, vx_field, vy_field,
-                image_size=image_size,
-                dbscan_eps=dbscan_eps,
-                dbscan_min_samples=dbscan_min_samples,
-                downsample_grid=downsample_grid,
-                min_instance_area=min_instance_area,
-                max_instance_id=max_instance_id,
-            )
-        else:
-            inst_map = np.zeros((h_orig, w_orig), dtype=np.uint8)
-            class_map = {}
-
-        # Pearlite via connected components
-        pearlite_binary = (mask == CLASS_PEARLITE).astype(np.uint8)
-        if pearlite_binary.sum() > 0:
-            num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(pearlite_binary, connectivity=8)
-            current_id = max(class_map.keys()) + 1 if class_map else 1
-            for label_id in range(1, num_labels):
-                area = int(stats[label_id, cv2.CC_STAT_AREA])
-                if area < min_instance_area:
-                    continue
-                if current_id > max_instance_id:
-                    current_id = max_instance_id
-                inst_map[labels == label_id] = current_id
-                class_map[current_id] = CLASS_PEARLITE
-                if current_id < max_instance_id:
-                    current_id += 1
-
         output_paths = {}
+        inst_map = np.zeros((h_orig, w_orig), dtype=np.uint8)
+        class_map = {}
 
     n_ferrite = sum(1 for v in class_map.values() if v == 1)
     n_pearlite = sum(1 for v in class_map.values() if v == 0)
@@ -207,47 +151,12 @@ def predict_single_image(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Metallographic segmentation inference (vector field version)",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""\
-Examples:
-  # Default: use config checkpoint_stage, run on data/test/
-  python inference.py
-
-  # Override checkpoint path directly (highest priority)
-  python inference.py --checkpoint outputs/stage1/best_model.pth
-
-  # Custom test images and output directory
-  python inference.py --test_dir data/my_test_images --output_dir outputs/my_results
-
-Output files (per image <basename>):
-  <basename>_inst.png   - Instance map (uint8, 1-255 by descending area)
-  <basename>_class.json - Instance ID -> class mapping (1=ferrite, 0=pearlite)
-  <basename>_mask.png   - Binary mask visualization (green=ferrite, red=pearlite)
-  <basename>_vec.png    - Vector field visualization (color-coded by direction)
-
-Processing:
-  All images are Letterboxed to 1024x1024 (same as training), then a single
-  forward pass is performed. Output is upsampled to original resolution for
-  post-processing (vector field centroid collapse + DBSCAN clustering).
-""",
+        description="Metallographic segmentation inference (boundary prediction version)",
     )
-    parser.add_argument(
-        "--config", type=str, default="config/default_config.yaml",
-        help="Path to YAML config file (default: config/default_config.yaml)",
-    )
-    parser.add_argument(
-        "--checkpoint", type=str, default=None,
-        help="Path to trained decoder checkpoint .pth file (overrides config checkpoint_stage)",
-    )
-    parser.add_argument(
-        "--test_dir", type=str, default=None,
-        help="Directory containing test images (default: from config inference.test_dir)",
-    )
-    parser.add_argument(
-        "--output_dir", type=str, default=None,
-        help="Directory for output files (default: from config inference.output_dir)",
-    )
+    parser.add_argument("--config", type=str, default="config/default_config.yaml")
+    parser.add_argument("--checkpoint", type=str, default=None)
+    parser.add_argument("--test_dir", type=str, default=None)
+    parser.add_argument("--output_dir", type=str, default=None)
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -266,9 +175,7 @@ Processing:
     output_dir = args.output_dir or os.path.join(paths_cfg["project_root"], infer_cfg["output_dir"])
     os.makedirs(output_dir, exist_ok=True)
 
-    # ------------------------------------------------------------------
-    # 模型权重路径解析
-    # ------------------------------------------------------------------
+    # Checkpoint path
     if args.checkpoint:
         checkpoint_path = args.checkpoint
         logger.info(f"Using checkpoint from CLI: {checkpoint_path}")
@@ -279,13 +186,12 @@ Processing:
                 paths_cfg["project_root"],
                 infer_cfg.get("stage2_checkpoint", "outputs/stage2/best_model_stage2.pth"),
             )
-            logger.info(f"Using Stage-2 checkpoint from config: {checkpoint_path}")
         else:
             checkpoint_path = os.path.join(
                 paths_cfg["project_root"],
                 infer_cfg.get("stage1_checkpoint", "outputs/stage1/best_model.pth"),
             )
-            logger.info(f"Using Stage-1 checkpoint from config: {checkpoint_path}")
+        logger.info(f"Using Stage-1 checkpoint from config: {checkpoint_path}")
 
     if not os.path.exists(checkpoint_path):
         logger.error(f"Checkpoint not found: {checkpoint_path}")
@@ -321,11 +227,10 @@ Processing:
             min_instance_area=infer_cfg["min_instance_area"],
             max_instance_id=infer_cfg["max_instance_id"],
             threshold=infer_cfg.get("threshold", 0.5),
+            boundary_threshold=infer_cfg.get("boundary_threshold", 0.5),
+            watershed_dilate_width=infer_cfg.get("watershed_dilate_width", 2),
             output_dir=output_dir,
             save_visualization=post_cfg.get("save_visualization", False),
-            dbscan_eps=post_cfg.get("dbscan_eps", 5.0),
-            dbscan_min_samples=post_cfg.get("dbscan_min_samples", 3),
-            downsample_grid=post_cfg.get("downsample_grid", 4),
         )
 
         elapsed = time.time() - start_time

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-增强型 FPN 解码头（残差连接 + 语义平滑头）- 向量场版本
+增强型 FPN 解码头（残差连接 + 语义平滑头）- 边界预测版本
 =========================================================
 完全随机初始化的特征金字塔解码头，禁止加载任何 SAM 2 原生 Mask Decoder 权重。
 
@@ -8,10 +8,9 @@
 1. 通过 1*1 卷积将 SAM 2 trunk 提取的四个尺度特征统一对齐到 256 维。
 2. 每个尺度挂载标准残差卷积块（Residual Block），增强非线性拟合能力。
 3. 自上而下通过双线性插值融合（从最低分辨率 Stage 4 逐步上采样与高层分辨率融合）。
-4. 融合后在最高分辨率特征图上追加两层语义平滑头，再输出 3 通道：
-    - 通道 0（分类分支）：原始 logits，后续送入 Focal Loss
-    - 通道 1（回归分支 Vx）：经 Tanh 的 X 方向偏移量预测 [-1,1]
-    - 通道 2（回归分支 Vy）：经 Tanh 的 Y 方向偏移量预测 [-1,1]
+4. 融合后在最高分辨率特征图上追加两层语义平滑头，再输出 2 通道：
+     - 通道 0（语义分支）：原始 logits，后续送入 BCE Loss
+     - 通道 1（边界分支）：原始 logits，后续送入 Focal Loss × W_boundary
 
 输入约定：features = [feat_s1, feat_s2, feat_s3, feat_s4]
     - feat_s1: 最高分辨率, 112ch
@@ -29,19 +28,9 @@ from typing import List, Optional
 class ResidualBlock(nn.Module):
     """
     标准残差卷积块：两层 3*3 Conv + BatchNorm + ReLU + Identity Shortcut。
-
-    结构：
-        input
-          -> Conv3x3 -> BN -> ReLU -> Conv3x3 -> BN -+
-          ->              Identity                   +-> ReLU -> output
     """
 
     def __init__(self, channels: int, norm_layer=None):
-        """
-        Args:
-            channels: 输入/输出通道数（恒等映射要求输入输出同维）。
-            norm_layer: 归一化层，默认 BatchNorm2d。
-        """
         super().__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
@@ -63,12 +52,11 @@ class ResidualBlock(nn.Module):
 
 class FPNDecoder(nn.Module):
     """
-    增强型 FPN 解码头（残差连接 + 语义平滑头）- 向量场版本。
+    增强型 FPN 解码头（残差连接 + 语义平滑头）- 边界预测版本。
 
-    输出 3 通道：
-    - 通道 0：分类 logits（铁素体 vs 珠光体）
-    - 通道 1：经 Tanh 的 Vx 向量场预测 [-1,1]
-    - 通道 2：经 Tanh 的 Vy 向量场预测 [-1,1]
+    输出 2 通道：
+    - 通道 0：语义 logits（铁素体 vs 珠光体）
+    - 通道 1：边界 logits（晶界 vs 非晶界）
 
     参数量约 6.3M（fpn_channels=256）。
     """
@@ -77,7 +65,7 @@ class FPNDecoder(nn.Module):
         self,
         in_channels: Optional[List[int]] = None,
         fpn_channels: int = 256,
-        num_classes: int = 3,
+        num_classes: int = 2,
         dropout: float = 0.1,
         use_bn: bool = True,
     ):
@@ -86,7 +74,7 @@ class FPNDecoder(nn.Module):
             in_channels: 各 Stage 输入通道数列表，从高分辨率到低分辨率。
                          默认 [112, 224, 448, 896]（Hiera base+）。
             fpn_channels: FPN 统一通道数（默认 256）。
-            num_classes: 输出通道数（固定为 3：分类 + Vx + Vy）。
+            num_classes: 输出通道数（固定为 2：语义 + 边界）。
             dropout: dropout 概率。
             use_bn: 是否使用 BatchNorm。
         """
@@ -95,7 +83,7 @@ class FPNDecoder(nn.Module):
             in_channels = [112, 224, 448, 896]
 
         assert len(in_channels) == 4, "FPN 解码头需要 4 个尺度的输入特征"
-        assert num_classes == 3, "向量场版本固定输出 3 通道（分类 + Vx + Vy）"
+        assert num_classes == 2, "边界预测版本固定输出 2 通道（语义 + 边界）"
 
         self.in_channels = in_channels
         self.fpn_channels = fpn_channels
@@ -131,21 +119,20 @@ class FPNDecoder(nn.Module):
         )
 
         # 解耦双分支输出头
-        # 分类分支：3x3 Conv(通道减半) + BN + ReLU + 1x1 Conv(->1)，输出原始 logits
-        # 回归分支：3x3 Conv(通道减半) + BN + ReLU + 1x1 Conv(->2) + Tanh，输出 [-1,1] 向量场 (Vx, Vy)
+        # 语义分支：3x3 Conv(通道减半) + BN + ReLU + 1x1 Conv(->1)，输出原始 logits
+        # 边界分支：3x3 Conv(通道减半) + BN + ReLU + 1x1 Conv(->1)，输出原始 logits
         half_channels = fpn_channels // 2
-        self.cls_branch = nn.Sequential(
+        self.seg_branch = nn.Sequential(
             nn.Conv2d(fpn_channels, half_channels, kernel_size=3, padding=1, bias=False),
             norm_layer(half_channels) if use_bn else nn.Identity(),
             nn.ReLU(inplace=True),
             nn.Conv2d(half_channels, 1, kernel_size=1, bias=True),
         )
-        self.reg_branch = nn.Sequential(
+        self.boundary_branch = nn.Sequential(
             nn.Conv2d(fpn_channels, half_channels, kernel_size=3, padding=1, bias=False),
             norm_layer(half_channels) if use_bn else nn.Identity(),
             nn.ReLU(inplace=True),
-            nn.Conv2d(half_channels, 2, kernel_size=1, bias=True),
-            nn.Tanh(),
+            nn.Conv2d(half_channels, 1, kernel_size=1, bias=True),
         )
 
         self._init_weights()
@@ -163,19 +150,16 @@ class FPNDecoder(nn.Module):
 
     def forward(self, features, output_size=None):
         """
-        前向传播：FPN 横向投影 + 残差块 + 自上而下融合 + 语义平滑头 + 三通道输出。
+        前向传播：FPN 横向投影 + 残差块 + 自上而下融合 + 语义平滑头 + 双通道输出。
 
         Args:
             features: [feat_s1, feat_s2, feat_s3, feat_s4]
-                - feat_s1: 最高分辨率
-                - feat_s4: 最低分辨率
             output_size: 可选，最终输出的 (H, W) 尺寸。
 
         Returns:
-            output: [B, 3, H, W]
-                - output[:, 0] 为分类 logits
-                - output[:, 1] 为 Vx 预测 [-1,1]（经 Tanh）
-                - output[:, 2] 为 Vy 预测 [-1,1]（经 Tanh）
+            output: [B, 2, H, W]
+                - output[:, 0] 为语义 logits
+                - output[:, 1] 为边界 logits
         """
         assert len(features) == self.num_stages, (
             f"期望 {self.num_stages} 个尺度特征，实际得到 {len(features)}"
@@ -202,9 +186,9 @@ class FPNDecoder(nn.Module):
         semantic = self.semantic_head(top_down)
 
         # Step 4: 解耦双分支输出
-        seg_logits = self.cls_branch(semantic)   # [B, 1, H, W] 分类 logits（无激活）
-        vec_pred = self.reg_branch(semantic)     # [B, 2, H, W] 向量场 [-1,1]（内置 Tanh）
-        output = torch.cat([seg_logits, vec_pred], dim=1)  # [B, 3, H, W]
+        seg_logits = self.seg_branch(semantic)       # [B, 1, H, W] 语义 logits
+        boundary_logits = self.boundary_branch(semantic)  # [B, 1, H, W] 边界 logits
+        output = torch.cat([seg_logits, boundary_logits], dim=1)  # [B, 2, H, W]
 
         # Step 5: 动态上采样到指定尺寸（推理时对齐原图）
         if output_size is not None:
@@ -224,17 +208,10 @@ class FPNDecoder(nn.Module):
 
 class SegmentationModel(nn.Module):
     """
-    完整分割模型：冻结 SAM 2 Encoder + 随机初始化 FPN Decoder（向量场版本）。
-
-    用于训练和推理的统一入口。
+    完整分割模型：冻结 SAM 2 Encoder + 随机初始化 FPN Decoder（边界预测版本）。
     """
 
     def __init__(self, encoder, decoder):
-        """
-        Args:
-            encoder: 冻结的 SAM 2 Image Encoder 提取器。
-            decoder: 随机初始化的 FPN 解码头。
-        """
         super().__init__()
         self.encoder = encoder
         self.decoder = decoder
@@ -248,10 +225,9 @@ class SegmentationModel(nn.Module):
             output_size: 可选，推理时对齐原图尺寸 (H, W)。
 
         Returns:
-            output: [B, 3, H, W]
-                - output[:, 0] 为分类 logits
-                - output[:, 1] 为 Vx 预测 [-1,1]（经 Tanh）
-                - output[:, 2] 为 Vy 预测 [-1,1]（经 Tanh）
+            output: [B, 2, H, W]
+                - output[:, 0] 为语义 logits
+                - output[:, 1] 为边界 logits
         """
         features = self.encoder(x)
         output = self.decoder(features, output_size=output_size)

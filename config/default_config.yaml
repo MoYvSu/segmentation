@@ -1,78 +1,54 @@
 # =============================================================================
-# 低碳钢金相图像无监督相区分割 - 全局配置（向量场版本）
+# 低碳钢金相图像无监督相区分割 - 全局配置（边界预测版本）
 # =============================================================================
 # python 环境: conda activate sam2_env
-# 架构变更：二分类Mask + 二维空间向量场（Vx,Vy）三任务管线
+# 架构变更：双通道边界预测（语义掩码 + 晶界掩码）+ 离线边界净化
 
 # -----------------------------------------------------------------------------
 # 路径配置
 # -----------------------------------------------------------------------------
 paths:
-  # 项目根目录（自动推断为本文件上级目录）
   project_root: &project_root "d:/MY_PROGRAMME/segmentationv2"
-  # 原始数据目录：存放图像与同名 labelme .json
   raw_data_dir: "data/raw"
-  # 本地权重目录：所有第三方权重必须放在此目录下（禁止依赖 ~/.cache）
   weights_dir: "weights"
-  # SAM 2 底座权重文件名
   sam2_ckpt: "sam2_hiera_base_plus.pt"
-  # 训练输出目录（第一阶段 checkpoints 存放于此子目录）
   output_dir: "outputs/stage1"
-  # 伪标签输出目录
   pseudo_label_dir: "outputs/pseudo_labels"
-  # 主动学习筛选记录
   active_learning_log: "outputs/active_learning_log.csv"
 
 # -----------------------------------------------------------------------------
 # SAM 2 Encoder 配置
 # -----------------------------------------------------------------------------
 sam2:
-  # 模型版本：sam2_hiera_base_plus / sam2_hiera_large
   model_version: "sam2_hiera_base_plus"
-  # Hydra 配置文件名（相对 sam2 包 configs 目录）
   config_file: "configs/sam2/sam2_hiera_b+.yaml"
-  # 设备
   device: "cuda"
-  # 显式冻结 encoder
   freeze: true
-  # 本地 segment-anything-2 仓库路径（用于 import sam2）
   sam2_repo_path: "segment-anything-2"
 
 # -----------------------------------------------------------------------------
-# FPN 解码头配置（向量场版本：输出 3 通道 = 分类 logits + Vx + Vy 向量场）
+# FPN 解码头配置（边界预测版本：输出 2 通道 = 语义 logits + 边界 logits）
 # -----------------------------------------------------------------------------
 decoder:
-  # FPN 统一通道数（增强型：残差块 + 语义平滑头，参数量 ~6.3M）
   fpn_channels: 256
-  # 输出通道数：固定为 3（通道0=分类logits, 通道1=Vx向量场, 通道2=Vy向量场）
-  num_classes: 3
-  # 是否使用 dropout
+  num_classes: 2
   dropout: 0.1
-  # 是否使用批量归一化
   use_bn: true
 
 # -----------------------------------------------------------------------------
 # 数据管道配置
 # -----------------------------------------------------------------------------
 data:
-  # 输入图像长边目标尺寸（Letterbox）
   image_size: 1024
-  # 铁素体晶界收缩像素数（已废弃，保留参数兼容性）
   erode_pixels: 5
-  # 距离场非线性缩放因子: dist_norm = dist / (dist + scale_factor)
   dist_scale_factor: 10.0
-  # 类别定义（二分类）
   classes:
-    0: "pearlite"   # 珠光体
-    1: "ferrite"    # 铁素体（核+晶界统一为前景）
-  # 训练集占比
+    0: "pearlite"
+    1: "ferrite"
   train_ratio: 0.8
-  # 随机种子
   seed: 42
-  # DataLoader 参数
   batch_size: 4
   num_workers: 4
-  # 数据增强
   augmentation:
     horizontal_flip: true
     vertical_flip: true
@@ -82,118 +58,60 @@ data:
 # 训练配置
 # -----------------------------------------------------------------------------
 train:
-  # 初始学习率
   learning_rate: 1.5e-4
-  # 权重衰减
   weight_decay: 1.0e-4
-  # 训练轮数
   epochs: 100
-  # 学习率调度器
   scheduler: "cosine"
-  # warmup 轮数
   warmup_epochs: 25
-  # 梯度裁剪（固定 1.0，允许初始阶段强纠偏梯度通过）
   grad_clip: 1.0
-  # 混合精度训练（暂时关闭，回退至FP32）
   amp: false
-  # 距离场回归损失权重（已废弃：不确定性加权自动学习缩放因子，此值不再使用）
-  dist_weight: 10.0
-  # 保留checkpoints
+  focal_gamma: 2.0
+  focal_alpha: 0.75
+  boundary_alpha: 1.0
   save_checkpoints: true
+
+# -----------------------------------------------------------------------------
+# 边界净化与 EDT 权重配置
+# -----------------------------------------------------------------------------
+boundary:
+  gt_dir: "data/purified_gt"
+  purify_erode_radius: 2
+  purify_dilate_width: 2
+  purify_canny_low: 30
+  purify_canny_high: 100
+  edt_scale_factor: 10.0
+  edt_weight_floor: 0.3
 
 # -----------------------------------------------------------------------------
 # 推理配置
 # -----------------------------------------------------------------------------
 inference:
-  # 测试图像目录
   test_dir: "data/smoketest"
-  # 输出目录
   output_dir: "outputs/inference"
-  # 二分类阈值
   threshold: 0.5
-  # 拓扑后处理最小实例面积过滤（像素）
   min_instance_area: 50
-  # 实例 ID 上限（uint8）
   max_instance_id: 255
-  # 多分辨率自适应推理：分块窗口尺寸
-  tile_size: 1024
-  # 多分辨率自适应推理：滑动步长（50% 重叠）
-  tile_stride: 512
-  # 多分辨率判定阈值：任一维度超过此值则启用分块推理
-  tile_threshold: 1224
-  # 训练数据最大边长（用于计算距离场空间补偿系数）
-  # 训练图像 1936x2584，letterbox 后缩放比为 1024/2584
-  train_max_dim: 2584
-
-  # -----------------------------------------------------------------
-  # 模型权重阶段选择
-  # -----------------------------------------------------------------
-  # checkpoint_stage: 选择推理时加载的模型阶段
-  #   "stage1" - 使用第一阶段全量微调解码头权重
-  #   "stage2" - 使用第二阶段半监督微调权重（含分支头微调）
+  boundary_threshold: 0.5
+  watershed_dilate_width: 2
   checkpoint_stage: "stage1"
-
-  # stage1_checkpoint: 第一阶段权重路径（相对 project_root）
-  # 由 train.py 产出，保存完整 decoder_state_dict
   stage1_checkpoint: "outputs/stage1/best_model.pth"
-
-  # stage2_checkpoint: 第二阶段权重路径（相对 project_root）
-  # 由 train_stage2.py 产出，保存完整 decoder_state_dict（含微调后的分支头）
   stage2_checkpoint: "outputs/stage2/best_model_stage2.pth"
 
 # -----------------------------------------------------------------------------
 # 主动学习配置
 # -----------------------------------------------------------------------------
 active_learning:
-  # 采样策略：entropy / boundary_variance
   strategy: "entropy"
-  # 每轮采样数量
   sample_size: 10
-  # 信息熵阈值
   entropy_threshold: 0.5
-  # 边界方差阈值
   boundary_variance_threshold: 0.1
 
 # -----------------------------------------------------------------------------
 # 后处理配置
 # -----------------------------------------------------------------------------
 post_process:
-  # 动态上采样插值模式
   interpolate_mode: "bilinear"
   align_corners: true
-  # 连通域分析参数
   connectivity: 8
-  # 噪点面积过滤
   min_noise_area: 50
-  # 局部极大值自适应阈值参数（用于 watershed 种子提取）
-  # alpha: 自适应阈值系数，Threshold = alpha * local_max + beta
-  alpha: 0.80
-  # beta: 全局偏置常数
-  beta: 0.05
-  # max_filter_size: 局部极大值滤波窗口尺寸（0=自适应15~31，>0=固定值）
-  max_filter_size: 0
-  # area_ratio_threshold: 相对面积过滤阈值（小于最大斑块面积此比例的噪声斑块被剔除）
-  area_ratio_threshold: 0.2
-  # 是否保存可视化图（_mask.png 和 _dist.png），默认关闭只生成实例ID图
   save_visualization: false
-  # Active Contour (Snake) 边缘平滑参数
-  # enable_snake_smoothing: 是否启用 Snake 边缘平滑（默认关闭，性能考虑）
-  enable_snake_smoothing: false
-  # snake_alpha: 弹性系数（消除外凸毛刺，推荐 0.01~0.05）
-  snake_alpha: 0.02
-  # snake_beta: 刚性系数（惩罚高曲率，推荐 0.1~0.5）
-  snake_beta: 0.2
-  # snake_max_iter: 最大迭代次数
-  snake_max_iter: 80
-  # snake_area_shrink_threshold: 面积缩水回退阈值（超过此比例则放弃平滑结果）
-  snake_area_shrink_threshold: 0.15
-
-  # -----------------------------------------------------------------
-  # 向量场后处理参数（Phase 2: Centroid Collapse + DBSCAN）
-  # -----------------------------------------------------------------
-  # dbscan_eps: DBSCAN 聚类邻域半径（降采样空间中的像素距离）
-  dbscan_eps: 10.0
-  # dbscan_min_samples: DBSCAN 最小聚类点数
-  dbscan_min_samples: 50
-  # downsample_grid: 网格降采样桶大小（4 = 4x4 像素桶聚合）
-  downsample_grid: 4
