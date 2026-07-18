@@ -133,28 +133,34 @@ def build_dataloaders(config):
     augment_config = data_cfg.get("augmentation", {})
     num_workers = data_cfg.get("num_workers", 4)
     boundary_scale_factor = boundary_cfg.get("edt_scale_factor", 10.0)
-    boundary_weight_floor = boundary_cfg.get("edt_weight_floor", 0.3)
+    boundary_weight_floor = boundary_cfg.get("edt_weight_floor", 1.0)
+    boundary_weight_ceil = boundary_cfg.get("edt_weight_ceil", 4.0)
+    crop_size = data_cfg.get("crop_size", 0)
 
     labeled_dataset = LabeledDataset(
         data_dir=data_dir,
         gt_dir=gt_dir,
         image_size=image_size,
+        crop_size=crop_size,
         augment=True,
         augment_config=augment_config,
         boundary_scale_factor=boundary_scale_factor,
         boundary_weight_floor=boundary_weight_floor,
+        boundary_weight_ceil=boundary_weight_ceil,
     )
 
     val_dataset = BoundaryDataset(
         data_dir=data_dir,
         gt_dir=gt_dir,
         image_size=image_size,
+        crop_size=0,
         augment=False,
         split="val",
         train_ratio=data_cfg.get("train_ratio", 0.8),
         seed=data_cfg.get("seed", 42),
         boundary_scale_factor=boundary_scale_factor,
         boundary_weight_floor=boundary_weight_floor,
+        boundary_weight_ceil=boundary_weight_ceil,
     )
 
     if len(labeled_dataset) == 0:
@@ -397,12 +403,33 @@ def main():
     ).to(device)
     logger.info("Supervised loss: BoundaryLoss (semantic BCE + boundary Focal x EDT)")
 
+    # 分层参数优化器：FPN 组件低学习率，解耦头标准学习率
+    base_lr = semi_cfg.get("learning_rate", train_cfg["learning_rate"])
+    fpn_lr_ratio = semi_cfg.get("fpn_lr_ratio", 0.1)  # FPN 学习率 = 0.1 * base_lr
+    fpn_lr = base_lr * fpn_lr_ratio
+    head_lr = base_lr
+
+    fpn_params = []
+    head_params = []
+    for name, param in student_model.decoder.named_parameters():
+        if not param.requires_grad:
+            continue
+        if "seg_branch" in name or "boundary_branch" in name:
+            head_params.append(param)
+        else:
+            fpn_params.append(param)
+
     optimizer = torch.optim.AdamW(
-        student_model.decoder.parameters(),
-        lr=semi_cfg.get("learning_rate", train_cfg["learning_rate"]),
+        [
+            {"params": fpn_params, "lr": fpn_lr},
+            {"params": head_params, "lr": head_lr},
+        ],
+        lr=base_lr,
         weight_decay=train_cfg["weight_decay"],
         eps=1e-4,
     )
+    logger.info(f"Layered optimizer: FPN lr={fpn_lr:.2e} ({len(fpn_params)} params), "
+                f"Head lr={head_lr:.2e} ({len(head_params)} params)")
 
     warmup_epochs = semi_cfg.get("warmup_epochs", 5)
     total_epochs = semi_cfg.get("epochs", 50)

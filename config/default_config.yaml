@@ -40,6 +40,7 @@ decoder:
 # -----------------------------------------------------------------------------
 data:
   image_size: 1024
+  crop_size: 512
   erode_pixels: 5
   dist_scale_factor: 10.0
   classes:
@@ -67,7 +68,7 @@ train:
   amp: false
   focal_gamma: 2.0
   focal_alpha: 0.75
-  boundary_alpha: 1.0
+  boundary_alpha: 0.1
   save_checkpoints: true
 
 # -----------------------------------------------------------------------------
@@ -80,13 +81,14 @@ boundary:
   purify_canny_low: 30
   purify_canny_high: 100
   edt_scale_factor: 10.0
-  edt_weight_floor: 0.3
+  edt_weight_floor: 1.0
+  edt_weight_ceil: 4.0
 
 # -----------------------------------------------------------------------------
 # 推理配置
 # -----------------------------------------------------------------------------
 inference:
-  test_dir: "data/smoketest"
+  test_dir: "data/test"
   output_dir: "outputs/inference"
   threshold: 0.5
   min_instance_area: 50
@@ -132,6 +134,8 @@ semi_supervised:
   epochs: 50
   # 学习率
   learning_rate: 5.0e-5
+  # FPN 组件学习率比例（FPN lr = fpn_lr_ratio * learning_rate）
+  fpn_lr_ratio: 0.1
   # warmup 轮数
   warmup_epochs: 5
   # 批量大小

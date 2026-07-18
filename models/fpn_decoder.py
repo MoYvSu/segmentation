@@ -107,31 +107,29 @@ class FPNDecoder(nn.Module):
                 else ResidualBlock(fpn_channels, norm_layer=nn.Identity)
             )
 
-        # 语义平滑头：融合到最高分辨率后，两层 3*3 Conv + BN + ReLU
-        self.semantic_head = nn.Sequential(
-            nn.Conv2d(fpn_channels, fpn_channels, kernel_size=3, padding=1, bias=False),
-            norm_layer(fpn_channels) if use_bn else nn.Identity(),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(fpn_channels, fpn_channels, kernel_size=3, padding=1, bias=False),
-            norm_layer(fpn_channels) if use_bn else nn.Identity(),
-            nn.ReLU(inplace=True),
-            nn.Dropout2d(dropout) if dropout > 0 else nn.Identity(),
-        )
-
-        # 解耦双分支输出头
-        # 语义分支：3x3 Conv(通道减半) + BN + ReLU + 1x1 Conv(->1)，输出原始 logits
-        # 边界分支：3x3 Conv(通道减半) + BN + ReLU + 1x1 Conv(->1)，输出原始 logits
+        # 完全解耦双分支输出头（取消共用语义平滑头）
+        # 每个分支独立完成：两层 3x3 Conv + BN + ReLU + Dropout + 1x1 Conv(->1)
+        # 语义分支：聚焦低频面状特征
         half_channels = fpn_channels // 2
         self.seg_branch = nn.Sequential(
+            nn.Conv2d(fpn_channels, fpn_channels, kernel_size=3, padding=1, bias=False),
+            norm_layer(fpn_channels) if use_bn else nn.Identity(),
+            nn.ReLU(inplace=True),
             nn.Conv2d(fpn_channels, half_channels, kernel_size=3, padding=1, bias=False),
             norm_layer(half_channels) if use_bn else nn.Identity(),
             nn.ReLU(inplace=True),
+            nn.Dropout2d(dropout) if dropout > 0 else nn.Identity(),
             nn.Conv2d(half_channels, 1, kernel_size=1, bias=True),
         )
+        # 边界分支：聚焦高频线状特征
         self.boundary_branch = nn.Sequential(
+            nn.Conv2d(fpn_channels, fpn_channels, kernel_size=3, padding=1, bias=False),
+            norm_layer(fpn_channels) if use_bn else nn.Identity(),
+            nn.ReLU(inplace=True),
             nn.Conv2d(fpn_channels, half_channels, kernel_size=3, padding=1, bias=False),
             norm_layer(half_channels) if use_bn else nn.Identity(),
             nn.ReLU(inplace=True),
+            nn.Dropout2d(dropout) if dropout > 0 else nn.Identity(),
             nn.Conv2d(half_channels, 1, kernel_size=1, bias=True),
         )
 
@@ -182,12 +180,9 @@ class FPNDecoder(nn.Module):
             )
             top_down = top_down + laterals[i]
 
-        # Step 3: 语义平滑头
-        semantic = self.semantic_head(top_down)
-
-        # Step 4: 解耦双分支输出
-        seg_logits = self.seg_branch(semantic)       # [B, 1, H, W] 语义 logits
-        boundary_logits = self.boundary_branch(semantic)  # [B, 1, H, W] 边界 logits
+        # Step 3: 完全解耦双分支输出（各自独立处理 FPN 融合特征）
+        seg_logits = self.seg_branch(top_down)            # [B, 1, H, W] 语义 logits
+        boundary_logits = self.boundary_branch(top_down)  # [B, 1, H, W] 边界 logits
         output = torch.cat([seg_logits, boundary_logits], dim=1)  # [B, 2, H, W]
 
         # Step 5: 动态上采样到指定尺寸（推理时对齐原图）

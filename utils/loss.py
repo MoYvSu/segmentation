@@ -19,10 +19,16 @@ import torch.nn.functional as F
 
 class BoundaryLoss(nn.Module):
     """
-    双通道边界预测损失。
+    双通道边界预测损失（梯度过载保护版本）。
 
     语义分支：标准 BCEWithLogitsLoss
-    边界分支：Focal Loss × EDT 边界权重图
+    边界分支：Focal Loss × clamp(EDT 边界权重图, 1.0, 4.0)
+
+    改造说明：
+    - alpha_boundary 调低至 0.1，截断边界损失的梯度过载
+    - EDT 权重图在 loss 内部 clamp 到 [1.0, 4.0]，防止稀疏边界区域
+      释放毁灭性的宏观梯度
+    - 确保语义损失与 alpha*边界损失在同一量级
 
     pred[:, 0] 为语义 logits，target[:, 0] 为二值语义掩码 (0/1)。
     pred[:, 1] 为边界 logits，target[:, 1] 为二值边界掩码 (0/1)。
@@ -32,21 +38,27 @@ class BoundaryLoss(nn.Module):
     def __init__(
         self,
         gamma: float = 2.0,
-        alpha_boundary: float = 1.0,
+        alpha_boundary: float = 0.1,
         alpha_focal: float = 0.75,
+        weight_clamp_min: float = 1.0,
+        weight_clamp_max: float = 4.0,
         eps: float = 1e-6,
     ):
         """
         Args:
             gamma: Focal Loss 聚焦参数。
-            alpha_boundary: 边界损失总权重系数。
+            alpha_boundary: 边界损失总权重系数（推荐 0.05~0.2）。
             alpha_focal: Focal Loss 平衡参数（正样本权重）。
+            weight_clamp_min: EDT 权重截断下限。
+            weight_clamp_max: EDT 权重截断上限。
             eps: 数值稳定常数。
         """
         super(BoundaryLoss, self).__init__()
         self.gamma = gamma
         self.alpha_boundary = alpha_boundary
         self.alpha_focal = alpha_focal
+        self.weight_clamp_min = weight_clamp_min
+        self.weight_clamp_max = weight_clamp_max
         self.eps = eps
 
     def forward(self, pred, target, weight=None):
@@ -91,6 +103,8 @@ class BoundaryLoss(nn.Module):
                 w = weight[:, 0]  # [B, H, W]
             else:
                 w = weight  # [B, H, W]
+            # 梯度过载保护：截断 EDT 权重到 [1.0, 4.0]
+            w = torch.clamp(w, min=self.weight_clamp_min, max=self.weight_clamp_max)
             loss_boundary = (alpha_t * focal_weight * w * bce_boundary).mean()
         else:
             loss_boundary = (alpha_t * focal_weight * bce_boundary).mean()

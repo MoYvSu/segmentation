@@ -127,20 +127,26 @@ def create_binary_mask(
 
 
 def compute_boundary_weight(boundary: np.ndarray, scale_factor: float = 10.0,
-                            weight_floor: float = 0.3) -> np.ndarray:
+                            weight_floor: float = 1.0,
+                            weight_ceil: float = 4.0) -> np.ndarray:
     """
-    基于边界掩码计算 EDT 边界权重图。
+    基于边界掩码计算 EDT 边界权重图（梯度过载保护版本）。
 
-    权重在边界处最高（1.0），随着距离边界越远逐渐降低至 weight_floor。
+    权重在边界处最高（weight_ceil），随着距离边界越远逐渐降低至 weight_floor。
     用于 Focal Loss 调制，使模型重点学习边界附近的高锐度像素。
+
+    改造说明：原先权重范围 [0.3, 1.0]，边界处仅 1.0 倍梯度，
+    稀疏边界区域可能释放毁灭性宏观梯度。现改为 [1.0, 4.0] 范围，
+    边界处最高 4 倍梯度，远处基线 1.0，配合 clamp 防止梯度过载。
 
     Args:
         boundary: [H, W] 二值边界掩码（1=边界, 0=非边界）
         scale_factor: EDT 非线性缩放因子
-        weight_floor: 权重下限
+        weight_floor: 权重下限（远处基线）
+        weight_ceil: 权重上限（边界处峰值）
 
     Returns:
-        weight: [H, W] float32 权重图，范围 [weight_floor, 1.0]
+        weight: [H, W] float32 权重图，范围 [weight_floor, weight_ceil]
     """
     if boundary.sum() == 0:
         return np.full(boundary.shape, weight_floor, dtype=np.float32)
@@ -148,14 +154,64 @@ def compute_boundary_weight(boundary: np.ndarray, scale_factor: float = 10.0,
     # 计算每个非边界像素到最近边界像素的距离
     dist = np.asarray(distance_transform_edt(boundary == 0), dtype=np.float32)
 
-    # 归一化：距离越远，权重越低
-    dist_norm = dist / (dist + scale_factor)
-    dist_norm = np.maximum(dist_norm, weight_floor)
+    # 归一化：距离越近边界，权重越高（从 floor 升至 ceil）
+    dist_norm = 1.0 - dist / (dist + scale_factor)  # 边界处=1.0, 远处→0.0
+    # 映射到 [weight_floor, weight_ceil] 区间
+    weight = weight_floor + (weight_ceil - weight_floor) * dist_norm
 
-    # 边界像素本身权重设为 1.0
-    dist_norm[boundary > 0] = 1.0
+    # 边界像素本身权重设为 weight_ceil
+    weight[boundary > 0] = weight_ceil
 
-    return dist_norm.astype(np.float32)
+    return weight.astype(np.float32)
+
+
+def random_crop(
+    image: np.ndarray,
+    semantic: np.ndarray,
+    boundary: np.ndarray,
+    weight: np.ndarray,
+    crop_size: int,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    局部随机裁剪：对图像、语义、边界、权重使用相同的裁剪坐标。
+
+    在 Letterbox 变换后的全图上随机选取 crop_size×crop_size 区域。
+    若全图小于 crop_size，则 pad 到 crop_size。
+
+    Args:
+        image: [H, W, C] 图像
+        semantic: [H, W] 语义掩码
+        boundary: [H, W] 边界掩码
+        weight: [H, W] 权重图
+        crop_size: 裁剪边长
+
+    Returns:
+        裁剪后的 (image, semantic, boundary, weight)
+    """
+    h, w = image.shape[:2]
+
+    # 若图像小于 crop_size，先 pad
+    if h < crop_size or w < crop_size:
+        pad_h = max(0, crop_size - h)
+        pad_w = max(0, crop_size - w)
+        image = np.pad(image, ((0, pad_h), (0, pad_w), (0, 0)), mode='constant', constant_values=0)
+        semantic = np.pad(semantic, ((0, pad_h), (0, pad_w)), mode='constant', constant_values=0)
+        boundary = np.pad(boundary, ((0, pad_h), (0, pad_w)), mode='constant', constant_values=0)
+        weight = np.pad(weight, ((0, pad_h), (0, pad_w)), mode='constant', constant_values=0)
+        h, w = image.shape[:2]
+
+    # 随机选取裁剪起点
+    top = np.random.randint(0, h - crop_size + 1)
+    left = np.random.randint(0, w - crop_size + 1)
+    bottom = top + crop_size
+    right = left + crop_size
+
+    image_c = image[top:bottom, left:right]
+    semantic_c = semantic[top:bottom, left:right]
+    boundary_c = boundary[top:bottom, left:right]
+    weight_c = weight[top:bottom, left:right]
+
+    return image_c, semantic_c, boundary_c, weight_c
 
 
 class BoundaryDataset(Dataset):
@@ -179,36 +235,42 @@ class BoundaryDataset(Dataset):
         data_dir: str,
         gt_dir: str,
         image_size: int = 1024,
+        crop_size: int = 0,
         augment: bool = False,
         augment_config: Optional[dict] = None,
         split: str = "train",
         train_ratio: float = 0.8,
         seed: int = 42,
         boundary_scale_factor: float = 10.0,
-        boundary_weight_floor: float = 0.3,
+        boundary_weight_floor: float = 1.0,
+        boundary_weight_ceil: float = 4.0,
     ):
         """
         Args:
             data_dir: 原始数据目录（包含图像与同名 .json）
             gt_dir: 净化 GT 目录（包含 _gt.npz 文件）
             image_size: Letterbox 目标长边尺寸
+            crop_size: 局部随机裁剪尺寸（0=不裁剪，使用全图）
             augment: 是否启用数据增强
             augment_config: 增强配置 dict
             split: "train" / "val"
             train_ratio: 训练集占比
             seed: 随机种子
             boundary_scale_factor: EDT 权重缩放因子
-            boundary_weight_floor: EDT 权重下限
+            boundary_weight_floor: EDT 权重下限（远处基线）
+            boundary_weight_ceil: EDT 权重上限（边界处峰值）
         """
         super().__init__()
         self.data_dir = data_dir
         self.gt_dir = gt_dir
         self.image_size = image_size
+        self.crop_size = crop_size
         self.augment = augment and (split == "train")
         self.augment_config = augment_config or {}
         self.split = split
         self.boundary_scale_factor = boundary_scale_factor
         self.boundary_weight_floor = boundary_weight_floor
+        self.boundary_weight_ceil = boundary_weight_ceil
 
         # 支持的图像扩展名
         valid_exts = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
@@ -295,15 +357,22 @@ class BoundaryDataset(Dataset):
             boundary_lb,
             scale_factor=self.boundary_scale_factor,
             weight_floor=self.boundary_weight_floor,
+            weight_ceil=self.boundary_weight_ceil,
         )
 
-        # 5. 数据增强（仅训练时）
+        # 5. 局部随机裁剪（训练时，斩断空间记忆）
+        if self.augment and self.crop_size > 0:
+            image_lb, semantic_lb, boundary_lb, weight_lb = random_crop(
+                image_lb, semantic_lb, boundary_lb, weight_lb, self.crop_size
+            )
+
+        # 6. 数据增强（仅训练时）
         if self.augment:
             image_lb, semantic_lb, boundary_lb, weight_lb = self._augment(
                 image_lb, semantic_lb, boundary_lb, weight_lb
             )
 
-        # 6. 转换为 PyTorch 张量
+        # 7. 转换为 PyTorch 张量
         image_tensor = torch.from_numpy(image_lb).float().permute(2, 0, 1) / 255.0
 
         # 目标：2 通道 [semantic, boundary]
