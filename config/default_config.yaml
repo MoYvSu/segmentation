@@ -61,17 +61,17 @@ data:
 train:
   learning_rate: 1.5e-4
   weight_decay: 1.0e-4
-  epochs: 50
+  epochs: 100
   scheduler: "cosine"
   warmup_epochs: 25
   grad_clip: 1.0
   amp: false
   focal_gamma: 2.0
   focal_alpha: 0.75
-  boundary_alpha: 0.1
+  boundary_alpha: 1.5
   # 复合评分权重（best_model 保存依据）
-  composite_sem_weight: 0.4
-  composite_boundary_weight: 0.6
+  composite_sem_weight: 0.2
+  composite_boundary_weight: 0.8
   save_checkpoints: true
 
 # -----------------------------------------------------------------------------
