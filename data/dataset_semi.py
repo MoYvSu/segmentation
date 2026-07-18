@@ -21,7 +21,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from data.dataset import letterbox
+from data.dataset import letterbox, random_crop
 
 
 # =============================================================================
@@ -38,19 +38,23 @@ class LabeledDataset(Dataset):
         data_dir: str,
         gt_dir: str,
         image_size: int = 1024,
+        crop_size: int = 0,
         augment: bool = False,
         augment_config: Optional[dict] = None,
         boundary_scale_factor: float = 10.0,
-        boundary_weight_floor: float = 0.3,
+        boundary_weight_floor: float = 1.0,
+        boundary_weight_ceil: float = 4.0,
     ):
         super().__init__()
         self.data_dir = data_dir
         self.gt_dir = gt_dir
         self.image_size = image_size
+        self.crop_size = crop_size
         self.augment = augment
         self.augment_config = augment_config or {}
         self.boundary_scale_factor = boundary_scale_factor
         self.boundary_weight_floor = boundary_weight_floor
+        self.boundary_weight_ceil = boundary_weight_ceil
 
         valid_exts = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
         self.samples: List[Tuple[str, str]] = []
@@ -87,7 +91,13 @@ class LabeledDataset(Dataset):
             boundary_lb,
             scale_factor=self.boundary_scale_factor,
             weight_floor=self.boundary_weight_floor,
+            weight_ceil=self.boundary_weight_ceil,
         )
+
+        if self.augment and self.crop_size > 0:
+            image_lb, semantic_lb, boundary_lb, weight_lb = random_crop(
+                image_lb, semantic_lb, boundary_lb, weight_lb, self.crop_size
+            )
 
         if self.augment:
             image_lb, semantic_lb, boundary_lb, weight_lb = self._augment(

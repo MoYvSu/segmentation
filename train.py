@@ -109,12 +109,15 @@ def build_dataloaders(config):
     gt_dir = os.path.join(paths_cfg["project_root"], boundary_cfg.get("gt_dir", "data/purified_gt"))
 
     boundary_scale_factor = boundary_cfg.get("edt_scale_factor", 10.0)
-    boundary_weight_floor = boundary_cfg.get("edt_weight_floor", 0.3)
+    boundary_weight_floor = boundary_cfg.get("edt_weight_floor", 1.0)
+    boundary_weight_ceil = boundary_cfg.get("edt_weight_ceil", 4.0)
+    crop_size = data_cfg.get("crop_size", 0)
 
     train_dataset = BoundaryDataset(
         data_dir=data_dir,
         gt_dir=gt_dir,
         image_size=data_cfg["image_size"],
+        crop_size=crop_size,
         augment=True,
         augment_config=data_cfg.get("augmentation", {}),
         split="train",
@@ -122,18 +125,21 @@ def build_dataloaders(config):
         seed=data_cfg["seed"],
         boundary_scale_factor=boundary_scale_factor,
         boundary_weight_floor=boundary_weight_floor,
+        boundary_weight_ceil=boundary_weight_ceil,
     )
 
     val_dataset = BoundaryDataset(
         data_dir=data_dir,
         gt_dir=gt_dir,
         image_size=data_cfg["image_size"],
+        crop_size=0,
         augment=False,
         split="val",
         train_ratio=data_cfg["train_ratio"],
         seed=data_cfg["seed"],
         boundary_scale_factor=boundary_scale_factor,
         boundary_weight_floor=boundary_weight_floor,
+        boundary_weight_ceil=boundary_weight_ceil,
     )
 
     if len(train_dataset) == 0:
