@@ -52,6 +52,13 @@ def compute_unsupervised_loss(
     img_strong = img_strong.to(device)
     patch_mask = patch_mask.to(device)
 
+    # 如果指定了 output_size，将 patch_mask 对齐到该尺寸
+    # （有标签数据经过 crop 后 output_size 可能小于无标签数据的原始尺寸）
+    if output_size is not None:
+        patch_mask = torch.nn.functional.interpolate(
+            patch_mask, size=output_size, mode="nearest"
+        )
+
     # ---- 教师路径（无梯度）----
     with torch.no_grad():
         teacher_output = teacher_model(img_weak, output_size=output_size)
