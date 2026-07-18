@@ -1,29 +1,25 @@
 # -*- coding: utf-8 -*-
 """
-第二阶段半监督微调主入口
-========================
-冻结 SAM 2 Encoder + 冻结 FPN Decoder 主体，仅微调 cls_branch + reg_branch。
-使用有标签数据（Focal+MSE）与无标签数据（双路一致性）联合训练。
+第二阶段半监督微调主入口（边界预测版本 - Mean Teacher）
+=========================================================
+使用有标签数据（BoundaryLoss）与无标签数据（Mean Teacher 一致性）联合训练。
 
 技术路线：
-1. 加载第一阶段最优权重
-2. 硬冻结：encoder + decoder 主体 requires_grad=False
-3. 仅解冻：decoder.cls_branch + decoder.reg_branch
+1. 加载第一阶段最优权重到学生模型
+2. 创建教师模型（学生权重的 EMA 副本）
+3. 仅冻结 encoder，全量训练 decoder
 4. 双流混合 Batch：itertools.cycle(labeled_loader) + unlabeled_loader
-5. 有标签流：FocalDistanceFieldLoss（与第一阶段一致）
-6. 无标签流：compute_stage2_unsupervised_loss（分类一致性 + 回归几何一致性）
+5. 有标签流：BoundaryLoss（语义 BCE + 边界 Focal x EDT 权重）
+6. 无标签流：Mean Teacher 一致性损失（MSE，遮挡区域加权）
+7. 每个 step 结束后更新教师模型 EMA 权重
 
 使用方法：
     conda activate sam2_env
-    python train_stage2.py --config config/stage2_config.yaml
-
-约束：
-- 非侵入式：不修改第一阶段 train.py
-- 仅有 cls_branch + reg_branch 参数产生梯度
-- 保持 encoder.eval() 和 decoder 非头模块 eval()
+    python train_stage2.py --config config/default_config.yaml
 """
 
 import argparse
+import copy
 import itertools
 import logging
 import os
@@ -41,7 +37,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 import yaml
-from data.dataset import MetallographicDataset, collate_fn
+from data.dataset import BoundaryDataset, collate_fn
 from data.dataset_semi import (
     LabeledDataset,
     UnlabeledDataset,
@@ -50,8 +46,8 @@ from data.dataset_semi import (
 )
 from models.fpn_decoder import FPNDecoder, SegmentationModel
 from models.sam2_encoder import SAM2Encoder
-from utils.loss import FocalDistanceFieldLoss
-from utils.loss_semi import compute_stage2_unsupervised_loss
+from utils.loss import BoundaryLoss
+from utils.loss_semi import compute_unsupervised_loss, update_ema
 from utils.metrics import SegMetrics
 
 logging.basicConfig(
@@ -68,7 +64,7 @@ def load_config(config_path):
 
 
 def build_model(config, device):
-    """构建模型（与第一阶段一致）。"""
+    """构建学生模型。"""
     sam2_cfg = config["sam2"]
     decoder_cfg = config["decoder"]
     paths_cfg = config["paths"]
@@ -95,20 +91,20 @@ def build_model(config, device):
 
     model = SegmentationModel(encoder, decoder)
     model = model.to(device)
-
-    param_info = model.total_param_count()
-    logger.info("=" * 60)
-    logger.info("Model parameter count:")
-    logger.info(f"  Encoder:  {param_info['encoder'] / 1e6:.2f}M")
-    logger.info(f"  Decoder:  {param_info['decoder'] / 1e6:.2f}M")
-    logger.info(f"  Total:    {param_info['total_M']:.2f}M")
-    logger.info("=" * 60)
-
     return model
 
 
+def build_teacher_model(student_model):
+    """创建教师模型（学生权重的深拷贝）。"""
+    teacher_model = copy.deepcopy(student_model)
+    for param in teacher_model.parameters():
+        param.requires_grad = False
+    teacher_model.eval()
+    return teacher_model
+
+
 def load_stage1_checkpoint(model, checkpoint_path, device):
-    """加载第一阶段最优权重到 decoder。"""
+    """加载第一阶段最优权重到学生模型 decoder。"""
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Stage-1 checkpoint not found: {checkpoint_path}")
 
@@ -121,142 +117,92 @@ def load_stage1_checkpoint(model, checkpoint_path, device):
     )
 
 
-def freeze_model_for_stage2(model):
-    """
-    硬冻结：encoder + decoder 主体 requires_grad=False
-    仅解冻：decoder.cls_branch + decoder.reg_branch
-    """
-    # Step 1: 冻结所有参数
-    for param in model.parameters():
-        param.requires_grad = False
-
-    # Step 2: 仅解冻 cls_branch + reg_branch
-    trainable_count = 0
-    for name, param in model.decoder.cls_branch.named_parameters():
-        param.requires_grad = True
-        trainable_count += param.numel()
-    for name, param in model.decoder.reg_branch.named_parameters():
-        param.requires_grad = True
-        trainable_count += param.numel()
-
-    logger.info("=" * 60)
-    logger.info("Stage-2 Freeze Strategy:")
-    logger.info(f"  Frozen: encoder + decoder (except cls_branch + reg_branch)")
-    logger.info(f"  Trainable: decoder.cls_branch + decoder.reg_branch")
-    logger.info(f"  Trainable params: {trainable_count} ({trainable_count / 1e6:.4f}M)")
-    logger.info("=" * 60)
-
-    # 打印详细参数列表（验证基准 3）
-    logger.info("Parameter requires_grad status:")
-    for name, param in model.named_parameters():
-        logger.info(
-            f"  {'[TRAIN]' if param.requires_grad else '[FROZEN]'} {name} "
-            f"({param.numel()})"
-        )
-
-    return trainable_count
-
-
-def get_trainable_params(model):
-    """获取可训练参数（仅 cls_branch + reg_branch）。"""
-    params = []
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            params.append(param)
-    return params
-
-
 def build_dataloaders(config):
     """构建有标签和无标签 DataLoader。"""
     paths_cfg = config["paths"]
     data_cfg = config["data"]
-    stage2_cfg = config["stage2"]
+    boundary_cfg = config.get("boundary", {})
+    semi_cfg = config.get("semi_supervised", {})
 
     project_root = paths_cfg["project_root"]
-    labeled_dir = os.path.join(project_root, stage2_cfg["LABELED_DATA_DIR"])
-    unlabeled_dir = os.path.join(project_root, stage2_cfg["UNLABELED_DATA_DIR"])
+    data_dir = os.path.join(project_root, paths_cfg["raw_data_dir"])
+    gt_dir = os.path.join(project_root, boundary_cfg.get("gt_dir", "data/purified_gt"))
+    unlabeled_dir = os.path.join(project_root, semi_cfg.get("unlabeled_dir", "data/unlabeled"))
 
     image_size = data_cfg["image_size"]
-    dist_scale_factor = data_cfg.get("dist_scale_factor", 10.0)
     augment_config = data_cfg.get("augmentation", {})
     num_workers = data_cfg.get("num_workers", 4)
+    boundary_scale_factor = boundary_cfg.get("edt_scale_factor", 10.0)
+    boundary_weight_floor = boundary_cfg.get("edt_weight_floor", 0.3)
 
-    # 有标签数据集（带增强）
     labeled_dataset = LabeledDataset(
-        data_dir=labeled_dir,
+        data_dir=data_dir,
+        gt_dir=gt_dir,
         image_size=image_size,
         augment=True,
         augment_config=augment_config,
-        dist_scale_factor=dist_scale_factor,
+        boundary_scale_factor=boundary_scale_factor,
+        boundary_weight_floor=boundary_weight_floor,
     )
 
-    # 验证集（有标签，不增强）—— 复用 MetallographicDataset 的 split 逻辑
-    val_dataset = MetallographicDataset(
-        data_dir=labeled_dir,
+    val_dataset = BoundaryDataset(
+        data_dir=data_dir,
+        gt_dir=gt_dir,
         image_size=image_size,
         augment=False,
         split="val",
         train_ratio=data_cfg.get("train_ratio", 0.8),
         seed=data_cfg.get("seed", 42),
-        dist_scale_factor=dist_scale_factor,
+        boundary_scale_factor=boundary_scale_factor,
+        boundary_weight_floor=boundary_weight_floor,
     )
 
     if len(labeled_dataset) == 0:
-        logger.error(f"Labeled dataset is empty: {labeled_dir}")
+        logger.error(f"Labeled dataset is empty: {data_dir}")
         sys.exit(1)
 
     if len(val_dataset) == 0:
         logger.warning("Validation dataset is empty, using labeled dataset for validation.")
         val_dataset = labeled_dataset
 
-    # 无标签数据集
-    if not os.path.exists(unlabeled_dir) or len(os.listdir(unlabeled_dir)) == 0:
-        logger.warning(f"Unlabeled dataset is empty: {unlabeled_dir}")
-        logger.warning("Training will proceed with supervised loss only (no unsupervised loss).")
-        unlabeled_dataset = None
-    else:
+    unlabeled_dataset = None
+    if os.path.exists(unlabeled_dir) and len(os.listdir(unlabeled_dir)) > 0:
         unlabeled_dataset = UnlabeledDataset(
             data_dir=unlabeled_dir,
             image_size=image_size,
+            patch_mask_ratio=semi_cfg.get("patch_mask_ratio", 0.3),
+            patch_mask_size=semi_cfg.get("patch_mask_size", 64),
+            num_patches=semi_cfg.get("num_patches", 8),
         )
+    else:
+        logger.warning(f"Unlabeled dataset is empty: {unlabeled_dir}")
+        logger.warning("Training will proceed with supervised loss only.")
 
-    bs_labeled = stage2_cfg["BATCH_SIZE_LABELED"]
-    bs_unlabeled = stage2_cfg["BATCH_SIZE_UNLABELED"]
+    bs_labeled = semi_cfg.get("batch_size_labeled", data_cfg.get("batch_size", 4))
+    bs_unlabeled = semi_cfg.get("batch_size_unlabeled", data_cfg.get("batch_size", 4))
 
-    # 自适应：batch_size 不超过数据集长度
     bs_labeled = min(bs_labeled, len(labeled_dataset))
     if unlabeled_dataset is not None:
         bs_unlabeled = min(bs_unlabeled, len(unlabeled_dataset))
 
     labeled_loader = DataLoader(
-        labeled_dataset,
-        batch_size=bs_labeled,
-        shuffle=True,
-        num_workers=num_workers,
-        collate_fn=labeled_collate_fn,
-        pin_memory=True,
-        drop_last=False,
+        labeled_dataset, batch_size=bs_labeled, shuffle=True,
+        num_workers=num_workers, collate_fn=labeled_collate_fn,
+        pin_memory=True, drop_last=False,
     )
 
     val_loader = DataLoader(
-        val_dataset,
-        batch_size=bs_labeled,
-        shuffle=False,
-        num_workers=num_workers,
-        collate_fn=collate_fn,
+        val_dataset, batch_size=bs_labeled, shuffle=False,
+        num_workers=num_workers, collate_fn=collate_fn,
         pin_memory=True,
     )
 
     unlabeled_loader = None
     if unlabeled_dataset is not None:
         unlabeled_loader = DataLoader(
-            unlabeled_dataset,
-            batch_size=bs_unlabeled,
-            shuffle=True,
-            num_workers=num_workers,
-            collate_fn=unlabeled_collate_fn,
-            pin_memory=True,
-            drop_last=True,
+            unlabeled_dataset, batch_size=bs_unlabeled, shuffle=True,
+            num_workers=num_workers, collate_fn=unlabeled_collate_fn,
+            pin_memory=True, drop_last=True,
         )
 
     logger.info(f"Labeled batch size: {bs_labeled}")
@@ -266,116 +212,76 @@ def build_dataloaders(config):
 
 
 def train_one_epoch(
-    model,
-    labeled_loader,
-    unlabeled_iter,
-    num_steps,
-    num_unlabeled_steps,
-    criterion,
-    unsup_weight,
-    confidence_threshold,
-    dist_weight,
-    optimizer,
-    scaler,
-    device,
-    grad_clip=1.0,
-    use_amp=False,
+    student_model, teacher_model, labeled_loader, unlabeled_iter,
+    num_steps, num_unlabeled_steps, criterion, unsup_weight, ema_decay,
+    optimizer, scaler, device, grad_clip=1.0, use_amp=False,
 ):
-    """训练一个 epoch（双流混合 Batch）。
-
-    Args:
-        num_unlabeled_steps: 无标签数据迭代步数限制（方案 D）。
-            超过此步数后仅进行有标签训练，不再抽取无标签数据。
-    """
-    model.train()
-    # 保持 encoder 和 decoder 非头模块在 eval 模式
-    model.encoder.eval()
-    # decoder 的 BN/Dropout 在非头模块也应保持 eval
-    model.decoder.lateral_convs.eval()
-    model.decoder.residual_blocks.eval()
-    model.decoder.semantic_head.eval()
-    # 但 cls_branch 和 reg_branch 保持 train 模式
-    model.decoder.cls_branch.train()
-    model.decoder.reg_branch.train()
+    """训练一个 epoch（双流混合 Batch + EMA 更新）。"""
+    student_model.train()
+    student_model.encoder.eval()
+    teacher_model.eval()
 
     total_loss_sum = 0.0
     total_sup_loss = 0.0
     total_unsup_loss = 0.0
     total_seg = 0.0
-    total_dist = 0.0
-    total_cls_consist = 0.0
-    total_reg_consist = 0.0
+    total_boundary = 0.0
+    total_seg_consist = 0.0
+    total_boundary_consist = 0.0
     n_steps = 0
 
-    # 梯度裁剪参数：可训练参数 + 损失函数不确定性参数
-    clip_params = get_trainable_params(model) + list(criterion.parameters())
-
-    # 使用 itertools.cycle 包裹 labeled_loader
+    clip_params = list(student_model.decoder.parameters())
     labeled_iter_cycle = itertools.cycle(labeled_loader)
 
     for step_idx in range(num_steps):
-        # ---- 有标签流 ----
         labeled_batch = next(labeled_iter_cycle)
         images_labeled = labeled_batch["image"].to(device)
         targets_labeled = labeled_batch["target"].to(device)
+        weights_labeled = labeled_batch["weight"].to(device)
 
         optimizer.zero_grad()
 
         if use_amp:
             with autocast('cuda'):
-                out_labeled = model(
-                    images_labeled, output_size=targets_labeled.shape[-2:]
-                )
-                sup_loss, seg_val, dist_val = criterion(out_labeled, targets_labeled)
+                out_labeled = student_model(images_labeled, output_size=targets_labeled.shape[-2:])
+                sup_loss, seg_val, boundary_val = criterion(out_labeled, targets_labeled, weights_labeled)
         else:
-            out_labeled = model(images_labeled, output_size=targets_labeled.shape[-2:])
-            sup_loss, seg_val, dist_val = criterion(out_labeled, targets_labeled)
+            out_labeled = student_model(images_labeled, output_size=targets_labeled.shape[-2:])
+            sup_loss, seg_val, boundary_val = criterion(out_labeled, targets_labeled, weights_labeled)
 
-        # ---- 无标签流（方案 D：超过 num_unlabeled_steps 后不再抽取无标签数据）----
         unsup_loss = torch.tensor(0.0, device=device)
-        cls_consist_val = 0.0
-        reg_consist_val = 0.0
+        seg_consist_val = 0.0
+        boundary_consist_val = 0.0
 
         if unlabeled_iter is not None and step_idx < num_unlabeled_steps:
             try:
                 unlabeled_batch = next(unlabeled_iter)
                 img_weak = unlabeled_batch["img_weak"]
-                img_strong_app = unlabeled_batch["img_strong_appearance"]
-                img_strong_geo = unlabeled_batch["img_strong_geometric"]
-                T_list = unlabeled_batch["T_list"]
+                img_strong = unlabeled_batch["img_strong"]
+                patch_mask = unlabeled_batch["patch_mask"]
 
                 if use_amp:
                     with autocast('cuda'):
-                        unsup_loss, cls_consist_val, reg_consist_val = (
-                            compute_stage2_unsupervised_loss(
-                                model,
-                                img_weak,
-                                img_strong_app,
-                                img_strong_geo,
-                                T_list,
-                                confidence_threshold=confidence_threshold,
-                                dist_weight=dist_weight,
+                        unsup_loss, seg_consist_val, boundary_consist_val = (
+                            compute_unsupervised_loss(
+                                student_model, teacher_model,
+                                img_weak, img_strong, patch_mask,
+                                output_size=targets_labeled.shape[-2:],
                             )
                         )
                 else:
-                    unsup_loss, cls_consist_val, reg_consist_val = (
-                        compute_stage2_unsupervised_loss(
-                            model,
-                            img_weak,
-                            img_strong_app,
-                            img_strong_geo,
-                            T_list,
-                            confidence_threshold=confidence_threshold,
-                            dist_weight=dist_weight,
+                    unsup_loss, seg_consist_val, boundary_consist_val = (
+                        compute_unsupervised_loss(
+                            student_model, teacher_model,
+                            img_weak, img_strong, patch_mask,
+                            output_size=targets_labeled.shape[-2:],
                         )
                     )
             except StopIteration:
                 pass
 
-        # ---- 总损失 ----
         total_loss = sup_loss + unsup_weight * unsup_loss
 
-        # ---- 反向传播 ----
         if use_amp:
             scaler.scale(total_loss).backward()
             if grad_clip > 0:
@@ -389,21 +295,23 @@ def train_one_epoch(
                 torch.nn.utils.clip_grad_norm_(clip_params, grad_clip)
             optimizer.step()
 
+        update_ema(teacher_model, student_model, ema_decay)
+
         total_loss_sum += total_loss.item()
         total_sup_loss += sup_loss.item()
         total_unsup_loss += unsup_loss.item()
         total_seg += seg_val
-        total_dist += dist_val
-        total_cls_consist += cls_consist_val
-        total_reg_consist += reg_consist_val
+        total_boundary += boundary_val
+        total_seg_consist += seg_consist_val
+        total_boundary_consist += boundary_consist_val
         n_steps += 1
 
         if (step_idx + 1) % 5 == 0:
             logger.info(
                 f"  Step {step_idx + 1}/{num_steps}: "
                 f"total={total_loss.item():.4f} "
-                f"sup={sup_loss.item():.4f} (seg={seg_val:.4f} dist={dist_val:.4f}) "
-                f"unsup={unsup_loss.item():.4f} (cls_c={cls_consist_val:.4f} reg_c={reg_consist_val:.4f})"
+                f"sup={sup_loss.item():.4f} (seg={seg_val:.4f} bnd={boundary_val:.4f}) "
+                f"unsup={unsup_loss.item():.4f} (s_c={seg_consist_val:.4f} b_c={boundary_consist_val:.4f})"
             )
 
     n = max(n_steps, 1)
@@ -412,15 +320,15 @@ def train_one_epoch(
         "sup_loss": total_sup_loss / n,
         "unsup_loss": total_unsup_loss / n,
         "seg": total_seg / n,
-        "dist": total_dist / n,
-        "cls_consist": total_cls_consist / n,
-        "reg_consist": total_reg_consist / n,
+        "boundary": total_boundary / n,
+        "seg_consist": total_seg_consist / n,
+        "boundary_consist": total_boundary_consist / n,
     }
 
 
 @torch.no_grad()
 def validate(model, loader, criterion, device):
-    """验证（复用第一阶段逻辑）。"""
+    """验证。"""
     model.eval()
     metrics = SegMetrics(num_classes=2)
     total_loss = 0.0
@@ -429,8 +337,9 @@ def validate(model, loader, criterion, device):
     for batch in loader:
         images = batch["image"].to(device)
         targets = batch["target"].to(device)
+        weights = batch["weight"].to(device)
         output = model(images, output_size=targets.shape[-2:])
-        total_loss_t, _, _ = criterion(output, targets)
+        total_loss_t, _, _ = criterion(output, targets, weights)
         total_loss += total_loss_t.item()
         n_batches += 1
 
@@ -446,16 +355,17 @@ def validate(model, loader, criterion, device):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Stage-2 Semi-Supervised Fine-tuning (Dual-Task Distance Field)"
+        description="Stage-2 Semi-Supervised Fine-tuning (Mean Teacher + Boundary Prediction)"
     )
-    parser.add_argument("--config", type=str, default="config/stage2_config.yaml")
+    parser.add_argument("--config", type=str, default="config/default_config.yaml")
     parser.add_argument("--resume", type=str, default=None)
     args = parser.parse_args()
 
     config = load_config(args.config)
     sam2_cfg = config["sam2"]
     paths_cfg = config["paths"]
-    stage2_cfg = config["stage2"]
+    train_cfg = config["train"]
+    semi_cfg = config.get("semi_supervised", {})
 
     device = sam2_cfg["device"]
     if not torch.cuda.is_available() and device == "cuda":
@@ -464,43 +374,38 @@ def main():
 
     logger.info(f"Device: {device}")
 
-    output_dir = os.path.join(paths_cfg["project_root"], paths_cfg["output_dir"])
+    output_dir = os.path.join(paths_cfg["project_root"], semi_cfg.get("output_dir", "outputs/stage2"))
     os.makedirs(output_dir, exist_ok=True)
 
-    # ---- 构建模型 ----
-    model = build_model(config, device)
+    student_model = build_model(config, device)
 
-    # ---- 加载第一阶段权重 ----
     stage1_ckpt_path = os.path.join(
-        paths_cfg["project_root"], stage2_cfg["STAGE1_CHECKPOINT"]
+        paths_cfg["project_root"],
+        config["inference"].get("stage1_checkpoint", "outputs/stage1/best_model.pth"),
     )
-    load_stage1_checkpoint(model, stage1_ckpt_path, device)
+    load_stage1_checkpoint(student_model, stage1_ckpt_path, device)
 
-    # ---- 硬冻结 ----
-    freeze_model_for_stage2(model)
+    teacher_model = build_teacher_model(student_model)
+    logger.info("Teacher model created (EMA of student)")
 
-    # ---- 数据加载 ----
     labeled_loader, unlabeled_loader, val_loader = build_dataloaders(config)
 
-    # ---- 损失函数 ----
-    criterion = FocalDistanceFieldLoss(gamma=2.0, alpha=0.95).to(device)
-    logger.info("Supervised loss: FocalDistanceFieldLoss (双轨空间权重 + 向量场 + 不确定性加权)")
-    logger.info(
-        f"Unsupervised loss: consistency loss (weight={stage2_cfg['UNSUPERVISED_WEIGHT']})"
-    )
+    criterion = BoundaryLoss(
+        gamma=train_cfg.get("focal_gamma", 2.0),
+        alpha_boundary=train_cfg.get("boundary_alpha", 1.0),
+        alpha_focal=train_cfg.get("focal_alpha", 0.75),
+    ).to(device)
+    logger.info("Supervised loss: BoundaryLoss (semantic BCE + boundary Focal x EDT)")
 
-    # ---- 优化器（cls_branch + reg_branch + 不确定性参数） ----
-    trainable_params = get_trainable_params(model)
     optimizer = torch.optim.AdamW(
-        trainable_params + list(criterion.parameters()),
-        lr=stage2_cfg["LEARNING_RATE"],
-        weight_decay=stage2_cfg["WEIGHT_DECAY"],
+        student_model.decoder.parameters(),
+        lr=semi_cfg.get("learning_rate", train_cfg["learning_rate"]),
+        weight_decay=train_cfg["weight_decay"],
         eps=1e-4,
     )
 
-    # ---- 调度器 ----
-    warmup_epochs = stage2_cfg.get("WARMUP_EPOCHS", 5)
-    total_epochs = stage2_cfg["EPOCHS"]
+    warmup_epochs = semi_cfg.get("warmup_epochs", 5)
+    total_epochs = semi_cfg.get("epochs", 50)
     cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=total_epochs - warmup_epochs
     )
@@ -508,9 +413,7 @@ def main():
         optimizer,
         schedulers=[
             torch.optim.lr_scheduler.LinearLR(
-                optimizer,
-                start_factor=0.01,
-                end_factor=1.0,
+                optimizer, start_factor=0.01, end_factor=1.0,
                 total_iters=warmup_epochs,
             ),
             cosine_scheduler,
@@ -518,164 +421,116 @@ def main():
         milestones=[warmup_epochs],
     )
 
-    use_amp = stage2_cfg.get("AMP", False)
+    use_amp = train_cfg.get("amp", False)
     scaler = GradScaler('cuda', enabled=use_amp)
 
-    # ---- 恢复训练 ----
+    ema_decay = semi_cfg.get("ema_decay", 0.999)
+    unsup_weight = semi_cfg.get("unsup_weight", 1.0)
+
     start_epoch = 0
     best_val_iou = 0.0
     if args.resume and os.path.exists(args.resume):
         checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
-        # 加载完整 decoder 权重（统一格式）
-        model.decoder.load_state_dict(checkpoint["decoder_state_dict"])
+        student_model.decoder.load_state_dict(checkpoint["decoder_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-        # 恢复不确定性参数
-        if "uncertainty_state" in checkpoint:
-            criterion.log_var_cls.data = checkpoint["uncertainty_state"]["log_var_cls"].to(device)
-            criterion.log_var_vec.data = checkpoint["uncertainty_state"]["log_var_vec"].to(device)
-            logger.info(f"  Uncertainty restored: log_var_cls={criterion.log_var_cls.item():.4f}, log_var_vec={criterion.log_var_vec.item():.4f}")
         start_epoch = checkpoint["epoch"] + 1
         best_val_iou = checkpoint.get("best_val_iou", 0.0)
         logger.info(f"Resumed from epoch {start_epoch}, best Val IoU: {best_val_iou:.4f}")
 
-    # ---- 训练循环 ----
     logger.info("=" * 60)
-    logger.info("Stage-2 Semi-Supervised Fine-tuning")
+    logger.info("Stage-2 Semi-Supervised Fine-tuning (Mean Teacher)")
     logger.info(f"  Epochs: {total_epochs}")
-    logger.info(f"  Batch labeled: {stage2_cfg['BATCH_SIZE_LABELED']}")
-    logger.info(f"  Batch unlabeled: {stage2_cfg['BATCH_SIZE_UNLABELED']}")
-    logger.info(f"  LR: {stage2_cfg['LEARNING_RATE']}")
-    logger.info(f"  Unsupervised weight: {stage2_cfg['UNSUPERVISED_WEIGHT']}")
-    logger.info(f"  Confidence threshold: {stage2_cfg['PSEUDO_LABEL_CONFIDENCE']}")
+    logger.info(f"  EMA decay: {ema_decay}")
+    logger.info(f"  Unsupervised weight: {unsup_weight}")
+    logger.info(f"  LR: {semi_cfg.get('learning_rate', train_cfg['learning_rate'])}")
     logger.info("=" * 60)
 
-    # 方案 D：限制每 epoch 无标签采样步数
-    unlabeled_samples_per_epoch = stage2_cfg.get("UNLABELED_SAMPLES_PER_EPOCH", 0)
-    bs_unlabeled = stage2_cfg["BATCH_SIZE_UNLABELED"]
+    unlabeled_samples_per_epoch = semi_cfg.get("unlabeled_samples_per_epoch", 0)
+    bs_unlabeled = semi_cfg.get("batch_size_unlabeled", 4)
 
     for epoch in range(start_epoch, total_epochs):
         epoch_start = time.time()
         logger.info(f"\nEpoch {epoch + 1}/{total_epochs}")
 
-        # 每个 epoch 开始前重置 unlabeled_loader 的迭代器
         if unlabeled_loader is not None:
             unlabeled_iter = iter(unlabeled_loader)
-            # 方案 D：限制无标签步数
             full_unlabeled_steps = len(unlabeled_loader)
             if unlabeled_samples_per_epoch > 0:
                 max_unlabeled_steps = max(1, unlabeled_samples_per_epoch // bs_unlabeled)
                 num_unlabeled_steps = min(full_unlabeled_steps, max_unlabeled_steps)
             else:
                 num_unlabeled_steps = full_unlabeled_steps
-            # 总步数取 max(无标签步数, 有标签步数) 保证有标签训练充分
             num_steps = max(num_unlabeled_steps, len(labeled_loader))
-            logger.info(
-                f"  Unlabeled steps: {num_unlabeled_steps}/{full_unlabeled_steps} "
-                f"(samples limit: {unlabeled_samples_per_epoch if unlabeled_samples_per_epoch > 0 else 'unlimited'})"
-            )
+            logger.info(f"  Unlabeled steps: {num_unlabeled_steps}/{full_unlabeled_steps}")
         else:
             unlabeled_iter = None
             num_steps = len(labeled_loader)
 
         train_metrics = train_one_epoch(
-            model,
-            labeled_loader,
-            unlabeled_iter,
-            num_steps,
-            num_unlabeled_steps if unlabeled_loader is not None else 0,
-            criterion,
-            unsup_weight=stage2_cfg["UNSUPERVISED_WEIGHT"],
-            confidence_threshold=stage2_cfg["PSEUDO_LABEL_CONFIDENCE"],
-            dist_weight=stage2_cfg["DIST_WEIGHT"],
-            optimizer=optimizer,
-            scaler=scaler,
-            device=device,
-            grad_clip=stage2_cfg["GRAD_CLIP"],
-            use_amp=use_amp,
+            student_model, teacher_model, labeled_loader, unlabeled_iter,
+            num_steps, num_unlabeled_steps if unlabeled_loader is not None else 0,
+            criterion, unsup_weight=unsup_weight, ema_decay=ema_decay,
+            optimizer=optimizer, scaler=scaler, device=device,
+            grad_clip=train_cfg.get("grad_clip", 1.0), use_amp=use_amp,
         )
-        val_metrics = validate(model, val_loader, criterion, device)
+        val_metrics = validate(student_model, val_loader, criterion, device)
         scheduler.step()
 
         epoch_time = time.time() - epoch_start
         logger.info(f"Epoch {epoch + 1} done ({epoch_time:.1f}s)")
         logger.info(
             f"  Train: total={train_metrics['loss']:.4f} "
-            f"sup={train_metrics['sup_loss']:.4f} "
-            f"unsup={train_metrics['unsup_loss']:.4f}"
+            f"sup={train_metrics['sup_loss']:.4f} unsup={train_metrics['unsup_loss']:.4f}"
         )
         logger.info(
-            f"    sup_detail: seg={train_metrics['seg']:.4f} dist={train_metrics['dist']:.4f}"
+            f"    sup_detail: seg={train_metrics['seg']:.4f} bnd={train_metrics['boundary']:.4f}"
         )
         logger.info(
-            f"    unsup_detail: cls_c={train_metrics['cls_consist']:.4f} "
-            f"reg_c={train_metrics['reg_consist']:.4f}"
+            f"    unsup_detail: s_c={train_metrics['seg_consist']:.4f} "
+            f"b_c={train_metrics['boundary_consist']:.4f}"
         )
         logger.info(
             f"  Val: loss={val_metrics['loss']:.4f} "
-            f"mIoU={val_metrics['mean_iou']:.4f} "
-            f"mDice={val_metrics['mean_dice']:.4f}"
+            f"mIoU={val_metrics['mean_iou']:.4f} mDice={val_metrics['mean_dice']:.4f}"
         )
         logger.info(
             f"  pearlite_iou={val_metrics['pearlite_iou']:.4f} "
             f"ferrite_iou={val_metrics['ferrite_iou']:.4f}"
         )
 
-        # 保存最优模型
         if val_metrics["mean_iou"] > best_val_iou:
             best_val_iou = val_metrics["mean_iou"]
             best_path = os.path.join(output_dir, "best_model_stage2.pth")
-            torch.save(
-                {
-                    "epoch": epoch,
-                    "decoder_state_dict": model.decoder.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "scheduler_state_dict": scheduler.state_dict(),
-                    "best_val_iou": best_val_iou,
-                    "uncertainty_state": {
-                        "log_var_cls": criterion.log_var_cls.data.cpu(),
-                        "log_var_vec": criterion.log_var_vec.data.cpu(),
-                    },
-                    "config": config,
-                },
-                best_path,
-            )
-            logger.info(f"  New best model saved: {best_path} (mIoU={best_val_iou:.4f}, log_var_cls={criterion.log_var_cls.item():.4f}, log_var_vec={criterion.log_var_vec.item():.4f})")
+            torch.save({
+                "epoch": epoch,
+                "decoder_state_dict": student_model.decoder.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "best_val_iou": best_val_iou,
+                "config": config,
+            }, best_path)
+            logger.info(f"  New best model saved: {best_path} (mIoU={best_val_iou:.4f})")
 
-        # 定期 checkpoint
-        if (epoch + 1) % 10 == 0 and stage2_cfg.get("SAVE_CHECKPOINTS", True):
+        if (epoch + 1) % 10 == 0 and semi_cfg.get("save_checkpoints", True):
             ckpt_path = os.path.join(output_dir, f"stage2_epoch{epoch + 1}.pth")
-            torch.save(
-                {
-                    "epoch": epoch,
-                    "decoder_state_dict": model.decoder.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "scheduler_state_dict": scheduler.state_dict(),
-                    "best_val_iou": best_val_iou,
-                    "uncertainty_state": {
-                        "log_var_cls": criterion.log_var_cls.data.cpu(),
-                        "log_var_vec": criterion.log_var_vec.data.cpu(),
-                    },
-                    "config": config,
-                },
-                ckpt_path,
-            )
+            torch.save({
+                "epoch": epoch,
+                "decoder_state_dict": student_model.decoder.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "best_val_iou": best_val_iou,
+                "config": config,
+            }, ckpt_path)
             logger.info(f"  Checkpoint saved: {ckpt_path}")
 
     final_path = os.path.join(output_dir, "final_model_stage2.pth")
-    torch.save(
-        {
-            "epoch": total_epochs - 1,
-            "decoder_state_dict": model.decoder.state_dict(),
-            "best_val_iou": best_val_iou,
-            "uncertainty_state": {
-                "log_var_cls": criterion.log_var_cls.data.cpu(),
-                "log_var_vec": criterion.log_var_vec.data.cpu(),
-            },
-            "config": config,
-        },
-        final_path,
-    )
+    torch.save({
+        "epoch": total_epochs - 1,
+        "decoder_state_dict": student_model.decoder.state_dict(),
+        "best_val_iou": best_val_iou,
+        "config": config,
+    }, final_path)
     logger.info(f"Stage-2 training complete! Final model: {final_path}")
     logger.info(f"Best Val mIoU: {best_val_iou:.4f}")
 

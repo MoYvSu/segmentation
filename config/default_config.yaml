@@ -115,3 +115,33 @@ post_process:
   connectivity: 8
   min_noise_area: 50
   save_visualization: false
+
+# -----------------------------------------------------------------------------
+# 半监督配置（Stage 2: Mean Teacher）
+# -----------------------------------------------------------------------------
+semi_supervised:
+  # 无标注数据目录
+  unlabeled_dir: "data/unlabeled"
+  # 输出目录（第二阶段 checkpoints）
+  output_dir: "outputs/stage2"
+  # EMA 衰减系数
+  ema_decay: 0.999
+  # 无监督损失权重
+  unsup_weight: 1.0
+  # 训练轮数
+  epochs: 50
+  # 学习率
+  learning_rate: 5.0e-5
+  # warmup 轮数
+  warmup_epochs: 5
+  # 批量大小
+  batch_size_labeled: 4
+  batch_size_unlabeled: 4
+  # 无标签采样限制（0=不限制）
+  unlabeled_samples_per_epoch: 0
+  # 保存 checkpoints
+  save_checkpoints: true
+  # Random Patch Masking 参数
+  patch_mask_ratio: 0.3
+  patch_mask_size: 64
+  num_patches: 8
