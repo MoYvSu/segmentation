@@ -6,8 +6,8 @@
 
 核心功能：
 1. 在线 Letterbox 变换：将任意非标准分辨率图像的长边等比例缩放至 1024，
-   短边按相同比例缩放后，在右侧/下方利用 0 像素补齐到 1024*1024。
-   保证长宽比保真，禁止强行挤压变形缩放。
+   短边按相同比例缩放后，在右侧/下方利用镜像反射（BORDER_REFLECT）补齐到 1024*1024。
+   保证长宽比保真，禁止强行挤压变形缩放，且镜像填充避免零值污染。
 2. 双通道目标加载：
    - 通道 0（语义掩码）：铁素体 = 1，珠光体 = 0
    - 通道 1（边界掩码）：净化后的晶界带 = 1，非边界 = 0
@@ -36,38 +36,36 @@ NUM_OUTPUT_CHANNELS = 2  # 双通道输出：语义掩码 + 边界掩码
 def letterbox(
     image: np.ndarray,
     target_size: int = 1024,
-    pad_value: int = 0,
+    pad_value: int = 0,  # deprecated: 现使用 BORDER_REFLECT 镜像填充
 ) -> Tuple[np.ndarray, float, int, int]:
-    """在线 Letterbox 变换：长边等比例缩放至 target_size，短边补齐。"""
+    """在线 Letterbox 变换：长边等比例缩放至 target_size，短边镜像填充。"""
     h, w = image.shape[:2]
     scale = target_size / max(h, w)
     new_h, new_w = int(round(h * scale)), int(round(w * scale))
     resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
     pad_h = target_size - new_h
     pad_w = target_size - new_w
-    letterboxed = np.full(
-        (target_size, target_size, image.shape[2]) if image.ndim == 3 else (target_size, target_size),
-        pad_value,
-        dtype=image.dtype,
+    letterboxed = cv2.copyMakeBorder(
+        resized, 0, pad_h, 0, pad_w, cv2.BORDER_REFLECT
     )
-    letterboxed[:new_h, :new_w] = resized
     return letterboxed, scale, pad_h, pad_w
 
 
 def letterbox_mask(
     mask: np.ndarray,
     target_size: int = 1024,
-    pad_value: int = 0,
+    pad_value: int = 0,  # deprecated: 现使用 BORDER_REFLECT 镜像填充
 ) -> Tuple[np.ndarray, float, int, int]:
-    """对掩码进行 Letterbox 变换（使用最近邻插值保持标签不混叠）。"""
+    """对掩码进行 Letterbox 变换（最近邻插值 + 镜像填充，保持标签不混叠）。"""
     h, w = mask.shape[:2]
     scale = target_size / max(h, w)
     new_h, new_w = int(round(h * scale)), int(round(w * scale))
     resized = cv2.resize(mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
     pad_h = target_size - new_h
     pad_w = target_size - new_w
-    letterboxed = np.full((target_size, target_size), pad_value, dtype=mask.dtype)
-    letterboxed[:new_h, :new_w] = resized
+    letterboxed = cv2.copyMakeBorder(
+        resized, 0, pad_h, 0, pad_w, cv2.BORDER_REFLECT
+    )
     return letterboxed, scale, pad_h, pad_w
 
 
@@ -194,10 +192,10 @@ def random_crop(
     if h < crop_size or w < crop_size:
         pad_h = max(0, crop_size - h)
         pad_w = max(0, crop_size - w)
-        image = np.pad(image, ((0, pad_h), (0, pad_w), (0, 0)), mode='constant', constant_values=0)
-        semantic = np.pad(semantic, ((0, pad_h), (0, pad_w)), mode='constant', constant_values=0)
-        boundary = np.pad(boundary, ((0, pad_h), (0, pad_w)), mode='constant', constant_values=0)
-        weight = np.pad(weight, ((0, pad_h), (0, pad_w)), mode='constant', constant_values=0)
+        image = np.pad(image, ((0, pad_h), (0, pad_w), (0, 0)), mode='symmetric')
+        semantic = np.pad(semantic, ((0, pad_h), (0, pad_w)), mode='symmetric')
+        boundary = np.pad(boundary, ((0, pad_h), (0, pad_w)), mode='symmetric')
+        weight = np.pad(weight, ((0, pad_h), (0, pad_w)), mode='symmetric')
         h, w = image.shape[:2]
 
     # 随机选取裁剪起点
@@ -220,7 +218,7 @@ class BoundaryDataset(Dataset):
 
     加载离线净化的边界 GT（.npz），在线执行：
     1. 读取原始图像与对应的 _gt.npz 文件
-    2. 在线 Letterbox 变换（长边缩放至 1024，短边补 0）
+    2. 在线 Letterbox 变换（长边缩放至 1024，短边镜像填充 BORDER_REFLECT）
     3. 在线计算 EDT 边界权重图
     4. 数据增强（可选）
     5. 转换为 PyTorch 张量
