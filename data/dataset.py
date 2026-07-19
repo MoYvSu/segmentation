@@ -112,7 +112,7 @@ def parse_labelme_json(
         "pearlite": pearlite_mask,
         "ferrite_polys": ferrite_polys,
         "pearlite_polys": pearlite_polys,
-    }
+    } # type: ignore
 
 
 def create_binary_mask(
