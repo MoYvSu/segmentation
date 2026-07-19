@@ -52,6 +52,7 @@ from models.sam2_encoder import SAM2Encoder
 from utils.loss import BoundaryLoss
 from utils.loss_semi import compute_unsupervised_loss, update_ema
 from utils.metrics import SegMetrics
+from utils.progressive_aug import ProgressiveAppearanceAug
 
 logging.basicConfig(
     level=logging.INFO,
@@ -124,8 +125,14 @@ def load_stage1_checkpoint(model, checkpoint_path, device):
     )
 
 
-def build_dataloaders(config):
-    """构建有标签和无标签 DataLoader。"""
+def build_dataloaders(config, disable_unlabeled_appearance_aug=False):
+    """构建有标签和无标签 DataLoader。
+
+    Args:
+        config: 全局配置
+        disable_unlabeled_appearance_aug: 如果为 True，禁用 UnlabeledDataset
+            内置外观增强（用于渐进式外观增强接管时避免双重增强）
+    """
     paths_cfg = config["paths"]
     data_cfg = config["data"]
     boundary_cfg = config.get("boundary", {})
@@ -186,6 +193,7 @@ def build_dataloaders(config):
             patch_mask_ratio=semi_cfg.get("patch_mask_ratio", 0.3),
             patch_mask_size=semi_cfg.get("patch_mask_size", 64),
             num_patches=semi_cfg.get("num_patches", 8),
+            enable_appearance_aug=not disable_unlabeled_appearance_aug,
         )
     else:
         logger.warning(f"Unlabeled dataset is empty: {unlabeled_dir}")
@@ -228,8 +236,14 @@ def train_one_epoch(
     student_model, teacher_model, labeled_loader, unlabeled_iter,
     num_steps, num_unlabeled_steps, criterion, unsup_weight, ema_decay,
     optimizer, scaler, device, grad_clip=1.0, use_amp=False,
+    augmentor=None,
 ):
-    """训练一个 epoch（双流混合 Batch + EMA 更新）。"""
+    """训练一个 epoch（双流混合 Batch + EMA 更新）。
+
+    Args:
+        augmentor: 可选的渐进式外观增强器，仅施加于学生模型输入
+                   （有标签图像 + 无标签强增强图像），教师输入不触碰。
+    """
     student_model.train()
     student_model.encoder.eval()
     teacher_model.eval()
@@ -252,6 +266,10 @@ def train_one_epoch(
         targets_labeled = labeled_batch["target"].to(device)
         weights_labeled = labeled_batch["weight"].to(device)
 
+        # 渐进式外观增强：仅施加于学生输入（有标签路径）
+        if augmentor is not None:
+            images_labeled = augmentor(images_labeled)
+
         optimizer.zero_grad()
 
         if use_amp:
@@ -272,6 +290,11 @@ def train_one_epoch(
                 img_weak = unlabeled_batch["img_weak"]
                 img_strong = unlabeled_batch["img_strong"]
                 patch_mask = unlabeled_batch["patch_mask"]
+
+                # 渐进式外观增强：仅施加于学生输入（无标签强增强路径）
+                # 教师的 img_weak 保持干净
+                if augmentor is not None:
+                    img_strong = augmentor(img_strong)
 
                 if use_amp:
                     with autocast('cuda'):
@@ -488,7 +511,26 @@ def main():
     teacher_model = build_teacher_model(student_model)
     logger.info("Teacher model created (EMA of student)")
 
-    labeled_loader, unlabeled_loader, val_loader = build_dataloaders(config)
+    # 渐进式外观增强配置
+    prog_aug_cfg = config.get("progressive_aug", {})
+    prog_aug_enabled = prog_aug_cfg.get("enabled", False)
+
+    # 如果启用了渐进式外观增强，禁用 UnlabeledDataset 内置外观增强（避免双重增强）
+    labeled_loader, unlabeled_loader, val_loader = build_dataloaders(
+        config, disable_unlabeled_appearance_aug=prog_aug_enabled
+    )
+
+    # 实例化渐进式外观增强器
+    augmentor = None
+    if prog_aug_enabled:
+        augmentor = ProgressiveAppearanceAug(prog_aug_cfg, device)
+        logger.info(
+            f"Progressive appearance augmentation: ENABLED "
+            f"(start_epoch={augmentor.start_epoch}, ramp={augmentor.ramp_epochs}, "
+            f"max_prob={augmentor.max_prob})"
+        )
+    else:
+        logger.info("Progressive appearance augmentation: DISABLED")
 
     criterion = BoundaryLoss(
         gamma=train_cfg.get("focal_gamma", 2.0),
@@ -590,6 +632,12 @@ def main():
         epoch_start = time.time()
         logger.info(f"\nEpoch {epoch + 1}/{total_epochs}")
 
+        # 更新渐进式外观增强的当前 epoch
+        if augmentor is not None:
+            augmentor.set_epoch(epoch)
+            if (epoch + 1) % 5 == 0 or epoch == start_epoch:
+                logger.info(f"  Progressive aug prob: {augmentor.current_prob:.3f}")
+
         if unlabeled_loader is not None:
             unlabeled_iter = iter(unlabeled_loader)
             full_unlabeled_steps = len(unlabeled_loader)
@@ -610,6 +658,7 @@ def main():
             criterion, unsup_weight=unsup_weight, ema_decay=ema_decay,
             optimizer=optimizer, scaler=scaler, device=device,
             grad_clip=train_cfg.get("grad_clip", 1.0), use_amp=use_amp,
+            augmentor=augmentor,
         )
         val_metrics = validate(student_model, val_loader, criterion, device)
         scheduler.step()

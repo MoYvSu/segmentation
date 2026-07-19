@@ -94,13 +94,13 @@ inference:
   test_dir: "data/smoketest"
   output_dir: "outputs/inference"
   threshold: 0.5
-  min_instance_area: 50
+  min_instance_area: 500
   max_instance_id: 255
-  boundary_threshold: 0.5
+  boundary_threshold: 0.2
   watershed_dilate_width: 2
-  checkpoint_stage: "stage1"
+  checkpoint_stage: "stage2"
   stage1_checkpoint: "outputs/stage1/best_model.pth"
-  stage2_checkpoint: "outputs/stage2/best_model_stage2.pth"
+  stage2_checkpoint: "outputs/stage2/stage2_epoch80.pth"
 
 # -----------------------------------------------------------------------------
 # 主动学习配置
@@ -162,3 +162,27 @@ semi_supervised:
   patch_mask_ratio: 0.3
   patch_mask_size: 64
   num_patches: 8
+
+# -----------------------------------------------------------------------------
+# 渐进式外观增强配置（Stage 2: 学生模型输入专用）
+# -----------------------------------------------------------------------------
+# 解决训练集与测试集在清晰度、亮度等方面的域差异。
+# 仅对学生模型输入施加，教师模型始终收到干净数据。
+# 增强概率随 epoch 从 0 线性增长到 max_prob，之后维持高位。
+progressive_aug:
+  # 是否启用渐进式外观增强
+  enabled: true
+  # 增强起始 epoch（之前 prob=0）
+  start_epoch: 0
+  # 线性增长期长度（epoch 数）
+  ramp_epochs: 10
+  # 最终增强概率（达到 ramp_end 后维持）
+  max_prob: 0.8
+  # 亮度抖动范围（乘法因子）
+  brightness_range: [0.6, 1.4]
+  # 对比度抖动范围（乘法因子）
+  contrast_range: [0.6, 1.4]
+  # 锐度抖动范围（负=模糊, 正=锐化, 基于 unsharp mask）
+  sharpness_range: [-0.5, 1.0]
+  # 高斯噪声标准差（0=禁用）
+  gaussian_noise_std: 0.01

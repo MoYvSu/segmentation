@@ -160,6 +160,7 @@ class UnlabeledDataset(Dataset):
         patch_mask_ratio: float = 0.3,
         patch_mask_size: int = 64,
         num_patches: int = 8,
+        enable_appearance_aug: bool = True,
     ):
         super().__init__()
         self.data_dir = data_dir
@@ -167,6 +168,7 @@ class UnlabeledDataset(Dataset):
         self.patch_mask_ratio = patch_mask_ratio
         self.patch_mask_size = patch_mask_size
         self.num_patches = num_patches
+        self.enable_appearance_aug = enable_appearance_aug
         self.appearance_config = appearance_aug_config or {
             "gaussian_blur_kernel": 5,
             "gaussian_blur_sigma_range": (0.5, 2.0),
@@ -197,9 +199,10 @@ class UnlabeledDataset(Dataset):
         # img_weak: 仅 letterbox
         img_weak, _, _, _ = letterbox(image, self.image_size)
 
-        # img_strong: 空间增强 + 外观增强
+        # img_strong: 空间增强（+ 外观增强，可被渐进式增强替代时禁用）
         img_strong = self._apply_spatial_aug(img_weak)
-        img_strong = self._apply_appearance_aug(img_strong)
+        if self.enable_appearance_aug:
+            img_strong = self._apply_appearance_aug(img_strong)
 
         # patch_mask: 随机遮挡
         patch_mask = self._generate_patch_mask()
