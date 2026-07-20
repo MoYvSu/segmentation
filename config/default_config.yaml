@@ -164,16 +164,14 @@ semi_supervised:
   num_patches: 8
   # 边界伪标签硬门控截断（防止雾状区域冲刷边界头）
   boundary_gate:
-    # 是否启用硬门控 + Focal Loss（false 时回退到原 MSE）
+    # 是否启用硬门控 + BCE + alpha 加权（false 时回退到原 MSE）
     enabled: true
     # 正样本阈值：teacher_boundary_prob > 此值 → 伪标签=1
     positive_threshold: 0.7
     # 负样本阈值：teacher_boundary_prob < 此值 → 伪标签=0
     negative_threshold: 0.1
-    # Focal Loss 聚焦参数
-    focal_gamma: 2.0
-    # Focal Loss 正样本权重（alpha=0.75 上调正样本，稀释负样本）
-    focal_alpha: 0.75
+    # 正样本权重（alpha=0.75 上调正样本，稀释负样本；不用 Focal Loss 避免破坏流形连续性）
+    alpha: 0.75
 
 # -----------------------------------------------------------------------------
 # 渐进式外观增强配置（Stage 2: 学生模型输入专用）

@@ -9,13 +9,17 @@ Mean Teacher 框架的无监督一致性损失。
 2. 学生路径（有梯度）：强增强图像 -> 学生模型 -> 预测概率图
 3. 一致性损失：
    - 语义通道：MSE（学生预测 vs 教师伪标签），Patch Masking 加权
-   - 边界通道：硬门控截断 + 非对称 Focal Loss（防止雾状区域冲刷边界头）
+   - 边界通道：硬门控截断 + BCE + alpha 小样本加权（防止雾状区域冲刷边界头）
 
 边界硬门控机制：
   - teacher_boundary_prob > positive_threshold -> 伪标签=1（高置信度正样本）
   - teacher_boundary_prob < negative_threshold -> 伪标签=0（高置信度负样本）
   - 处于 [negative_threshold, positive_threshold] 之间的"雾状区域"被屏蔽，
     不贡献梯度，防止海量不确定像素冲刷边界预测头。
+
+注意：不使用 Focal Loss 聚焦（gamma），因为硬门控已将教师连续概率截断为二值
+标签，Focal Loss 的难样本放大效应会破坏模型流形的连续性。改为 BCE + alpha
+小样本加权即可实现正负样本平衡。
 
 教师模型通过学生模型权重的 EMA（Exponential Moving Average）动态更新。
 """
@@ -43,7 +47,7 @@ def compute_unsupervised_loss(
 
     语义通道：MSE 一致性损失，Patch Masking 加权。
     边界通道：
-      - 如果 boundary_gate_cfg 启用 -> 硬门控截断 + 非对称 Focal Loss
+      - 如果 boundary_gate_cfg 启用 -> 硬门控截断 + BCE + alpha 小样本加权
       - 否则 -> 回退到 MSE 一致性损失
 
     Args:
@@ -57,8 +61,7 @@ def compute_unsupervised_loss(
             - enabled: bool
             - positive_threshold: float（正样本阈值）
             - negative_threshold: float（负样本阈值）
-            - focal_gamma: float（Focal Loss 聚焦参数）
-            - focal_alpha: float（Focal Loss 正样本权重）
+            - alpha: float（正样本权重，用于小样本加权平衡）
 
     Returns:
         total_loss: 标量张量，总一致性损失
@@ -105,8 +108,7 @@ def compute_unsupervised_loss(
     if gate_enabled and boundary_gate_cfg is not None:
         pos_thresh = boundary_gate_cfg.get("positive_threshold", 0.7)
         neg_thresh = boundary_gate_cfg.get("negative_threshold", 0.1)
-        gamma = boundary_gate_cfg.get("focal_gamma", 2.0)
-        alpha = boundary_gate_cfg.get("focal_alpha", 0.75)
+        alpha = boundary_gate_cfg.get("alpha", 0.75)
 
         # 硬门控截断：生成二值伪标签 + 有效区域掩码
         target_b = (teacher_boundary_prob > pos_thresh).float()
@@ -115,19 +117,17 @@ def compute_unsupervised_loss(
             | (teacher_boundary_prob < neg_thresh)
         ).float()
 
-        # 非对称半监督 Focal Loss（基于学生 logits）
+        # BCE + alpha 小样本加权（不用 Focal Loss 聚焦，避免破坏流形连续性）
         student_boundary_logits = student_output[:, 1]  # [B, H, W]
         bce = F.binary_cross_entropy_with_logits(
             student_boundary_logits, target_b, reduction="none"
         )  # [B, H, W]
 
-        p_t = torch.exp(-bce)
-        focal_weight = (1.0 - p_t) ** gamma
         alpha_t = alpha * target_b + (1.0 - alpha) * (1.0 - target_b)
 
-        # 叠加 loss_mask（屏蔽雾状区域）+ patch_mask 权重
+        # 叠加 alpha 加权 + loss_mask（屏蔽雾状区域）+ patch_mask 权重
         loss_boundary = (
-            alpha_t * focal_weight * bce * loss_mask * weight_map
+            alpha_t * bce * loss_mask * weight_map
         ).sum() / (loss_mask.sum() + 1e-6)
     else:
         # 回退到原 MSE 一致性损失
