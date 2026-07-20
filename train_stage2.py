@@ -236,13 +236,14 @@ def train_one_epoch(
     student_model, teacher_model, labeled_loader, unlabeled_iter,
     num_steps, num_unlabeled_steps, criterion, unsup_weight, ema_decay,
     optimizer, scaler, device, grad_clip=1.0, use_amp=False,
-    augmentor=None,
+    augmentor=None, boundary_gate_cfg=None,
 ):
     """训练一个 epoch（双流混合 Batch + EMA 更新）。
 
     Args:
         augmentor: 可选的渐进式外观增强器，仅施加于学生模型输入
                    （有标签图像 + 无标签强增强图像），教师输入不触碰。
+        boundary_gate_cfg: 边界硬门控配置，传入 compute_unsupervised_loss。
     """
     student_model.train()
     student_model.encoder.eval()
@@ -303,6 +304,7 @@ def train_one_epoch(
                                 student_model, teacher_model,
                                 img_weak, img_strong, patch_mask,
                                 output_size=targets_labeled.shape[-2:],
+                                boundary_gate_cfg=boundary_gate_cfg,
                             )
                         )
                 else:
@@ -311,6 +313,7 @@ def train_one_epoch(
                             student_model, teacher_model,
                             img_weak, img_strong, patch_mask,
                             output_size=targets_labeled.shape[-2:],
+                            boundary_gate_cfg=boundary_gate_cfg,
                         )
                     )
             except StopIteration:
@@ -590,6 +593,19 @@ def main():
     ema_decay = semi_cfg.get("ema_decay", 0.999)
     unsup_weight = semi_cfg.get("unsup_weight", 1.0)
 
+    # 边界硬门控配置
+    boundary_gate_cfg = semi_cfg.get("boundary_gate", {})
+    if boundary_gate_cfg.get("enabled", False):
+        logger.info(
+            f"Boundary gate: ENABLED "
+            f"(pos_thresh={boundary_gate_cfg.get('positive_threshold', 0.7)}, "
+            f"neg_thresh={boundary_gate_cfg.get('negative_threshold', 0.1)}, "
+            f"gamma={boundary_gate_cfg.get('focal_gamma', 2.0)}, "
+            f"alpha={boundary_gate_cfg.get('focal_alpha', 0.75)})"
+        )
+    else:
+        logger.info("Boundary gate: DISABLED (using MSE consistency)")
+
     # 复合评分权重
     sem_w = train_cfg.get("composite_sem_weight", 0.4)
     bnd_w = train_cfg.get("composite_boundary_weight", 0.6)
@@ -659,6 +675,7 @@ def main():
             optimizer=optimizer, scaler=scaler, device=device,
             grad_clip=train_cfg.get("grad_clip", 1.0), use_amp=use_amp,
             augmentor=augmentor,
+            boundary_gate_cfg=boundary_gate_cfg,
         )
         val_metrics = validate(student_model, val_loader, criterion, device)
         scheduler.step()

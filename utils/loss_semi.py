@@ -7,7 +7,15 @@ Mean Teacher 框架的无监督一致性损失。
 双路一致性：
 1. 教师路径（无梯度）：干净图像 -> 教师模型 -> 伪标签（语义+边界概率图）
 2. 学生路径（有梯度）：强增强图像 -> 学生模型 -> 预测概率图
-3. 一致性损失：MSE（学生预测 vs 教师伪标签），重点惩罚被 Patch Masking 遮挡的区域
+3. 一致性损失：
+   - 语义通道：MSE（学生预测 vs 教师伪标签），Patch Masking 加权
+   - 边界通道：硬门控截断 + 非对称 Focal Loss（防止雾状区域冲刷边界头）
+
+边界硬门控机制：
+  - teacher_boundary_prob > positive_threshold -> 伪标签=1（高置信度正样本）
+  - teacher_boundary_prob < negative_threshold -> 伪标签=0（高置信度负样本）
+  - 处于 [negative_threshold, positive_threshold] 之间的"雾状区域"被屏蔽，
+    不贡献梯度，防止海量不确定像素冲刷边界预测头。
 
 教师模型通过学生模型权重的 EMA（Exponential Moving Average）动态更新。
 """
@@ -16,6 +24,7 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 def compute_unsupervised_loss(
@@ -25,13 +34,17 @@ def compute_unsupervised_loss(
     img_strong: torch.Tensor,
     patch_mask: torch.Tensor,
     output_size: Optional[Tuple[int, int]] = None,
+    boundary_gate_cfg: Optional[dict] = None,
 ) -> Tuple[torch.Tensor, float, float]:
     """
     计算 Mean Teacher 无监督一致性损失。
 
-    教师模型（EMA）对干净图像生成伪标签，学生模型对强增强图像生成预测，
-    两者之间的 MSE 损失作为一致性约束。被 Patch Masking 遮挡的区域
-    权重加倍，迫使网络从上下文插值出缺失的晶界。
+    教师模型（EMA）对干净图像生成伪标签，学生模型对强增强图像生成预测。
+
+    语义通道：MSE 一致性损失，Patch Masking 加权。
+    边界通道：
+      - 如果 boundary_gate_cfg 启用 -> 硬门控截断 + 非对称 Focal Loss
+      - 否则 -> 回退到 MSE 一致性损失
 
     Args:
         student_model: 学生模型（有梯度）
@@ -40,6 +53,12 @@ def compute_unsupervised_loss(
         img_strong: [B, 3, H, W] 强增强 + Patch Masking 图像
         patch_mask: [B, 1, H, W] Patch Masking 掩码（1=遮挡, 0=保留）
         output_size: 可选，输出尺寸 (H, W)
+        boundary_gate_cfg: 边界硬门控配置，包含:
+            - enabled: bool
+            - positive_threshold: float（正样本阈值）
+            - negative_threshold: float（负样本阈值）
+            - focal_gamma: float（Focal Loss 聚焦参数）
+            - focal_alpha: float（Focal Loss 正样本权重）
 
     Returns:
         total_loss: 标量张量，总一致性损失
@@ -53,7 +72,6 @@ def compute_unsupervised_loss(
     patch_mask = patch_mask.to(device)
 
     # 如果指定了 output_size，将 patch_mask 对齐到该尺寸
-    # （有标签数据经过 crop 后 output_size 可能小于无标签数据的原始尺寸）
     if output_size is not None:
         patch_mask = torch.nn.functional.interpolate(
             patch_mask, size=output_size, mode="nearest"
@@ -70,16 +88,51 @@ def compute_unsupervised_loss(
     student_seg_prob = torch.sigmoid(student_output[:, 0])
     student_boundary_prob = torch.sigmoid(student_output[:, 1])
 
-    # ---- 一致性损失（MSE）----
-    seg_mse = (student_seg_prob - teacher_seg_prob) ** 2
-    boundary_mse = (student_boundary_prob - teacher_boundary_prob) ** 2
-
     # Patch Masking 权重：被遮挡区域权重加倍
     pm = patch_mask[:, 0]  # [B, H, W]
     weight_map = 1.0 + pm  # 遮挡区域=2.0, 非遮挡=1.0
 
+    # ---- 语义一致性损失（MSE，保持不变）----
+    seg_mse = (student_seg_prob - teacher_seg_prob) ** 2
     loss_seg = (seg_mse * weight_map).mean()
-    loss_boundary = (boundary_mse * weight_map).mean()
+
+    # ---- 边界一致性损失 ----
+    gate_enabled = (
+        boundary_gate_cfg is not None
+        and boundary_gate_cfg.get("enabled", False)
+    )
+
+    if gate_enabled and boundary_gate_cfg is not None:
+        pos_thresh = boundary_gate_cfg.get("positive_threshold", 0.7)
+        neg_thresh = boundary_gate_cfg.get("negative_threshold", 0.1)
+        gamma = boundary_gate_cfg.get("focal_gamma", 2.0)
+        alpha = boundary_gate_cfg.get("focal_alpha", 0.75)
+
+        # 硬门控截断：生成二值伪标签 + 有效区域掩码
+        target_b = (teacher_boundary_prob > pos_thresh).float()
+        loss_mask = (
+            (teacher_boundary_prob > pos_thresh)
+            | (teacher_boundary_prob < neg_thresh)
+        ).float()
+
+        # 非对称半监督 Focal Loss（基于学生 logits）
+        student_boundary_logits = student_output[:, 1]  # [B, H, W]
+        bce = F.binary_cross_entropy_with_logits(
+            student_boundary_logits, target_b, reduction="none"
+        )  # [B, H, W]
+
+        p_t = torch.exp(-bce)
+        focal_weight = (1.0 - p_t) ** gamma
+        alpha_t = alpha * target_b + (1.0 - alpha) * (1.0 - target_b)
+
+        # 叠加 loss_mask（屏蔽雾状区域）+ patch_mask 权重
+        loss_boundary = (
+            alpha_t * focal_weight * bce * loss_mask * weight_map
+        ).sum() / (loss_mask.sum() + 1e-6)
+    else:
+        # 回退到原 MSE 一致性损失
+        boundary_mse = (student_boundary_prob - teacher_boundary_prob) ** 2
+        loss_boundary = (boundary_mse * weight_map).mean()
 
     total_loss = loss_seg + loss_boundary
 
