@@ -600,8 +600,7 @@ def main():
             f"Boundary gate: ENABLED "
             f"(pos_thresh={boundary_gate_cfg.get('positive_threshold', 0.7)}, "
             f"neg_thresh={boundary_gate_cfg.get('negative_threshold', 0.1)}, "
-            f"gamma={boundary_gate_cfg.get('focal_gamma', 2.0)}, "
-            f"alpha={boundary_gate_cfg.get('focal_alpha', 0.75)})"
+            f"alpha={boundary_gate_cfg.get('alpha', 0.75)})"
         )
     else:
         logger.info("Boundary gate: DISABLED (using MSE consistency)")
