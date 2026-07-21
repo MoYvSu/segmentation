@@ -171,7 +171,11 @@ semi_supervised:
     # 从 1.0 衰减到 anchor_floor 的 epoch 数
     anchor_ramp_epochs: 20
     # 正样本重加权因子（负样本保持 1.0 满格梯度，正样本乘以 pos_weight 放大）
-    pos_weight: 5.0
+    pos_weight: 3.0
+    # 温度锐化参数（<1 锐化软目标到接近二值，1.0=不锐化，防止背景概率膨胀）
+    sharpen_temp: 0.5
+    # 掩码区域权重（1.0=不降权，0=完全忽略，防止 Patch Masking 圆斑过拟合）
+    mask_region_weight: 0.3
 
 # -----------------------------------------------------------------------------
 # 渐进式外观增强配置（Stage 2: 学生模型输入专用）
