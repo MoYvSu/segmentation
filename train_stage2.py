@@ -624,11 +624,15 @@ def main():
 
         anchor_floor = boundary_anchor_cfg.get("anchor_floor", 0.3)
         anchor_ramp_epochs = boundary_anchor_cfg.get("anchor_ramp_epochs", 20)
-        pos_weight = boundary_anchor_cfg.get("pos_weight", 5.0)
+        pos_weight = boundary_anchor_cfg.get("pos_weight", 3.0)
+        sharpen_temp = boundary_anchor_cfg.get("sharpen_temp", 0.5)
+        mask_region_weight = boundary_anchor_cfg.get("mask_region_weight", 0.3)
         logger.info(
             f"  anchor_floor={anchor_floor}, "
             f"ramp_epochs={anchor_ramp_epochs}, "
-            f"pos_weight={pos_weight}"
+            f"pos_weight={pos_weight}, "
+            f"sharpen_temp={sharpen_temp}, "
+            f"mask_region_weight={mask_region_weight}"
         )
     else:
         logger.info("Boundary anchor: DISABLED (using MSE consistency)")
