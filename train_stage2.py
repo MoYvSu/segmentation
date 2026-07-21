@@ -236,14 +236,16 @@ def train_one_epoch(
     student_model, teacher_model, labeled_loader, unlabeled_iter,
     num_steps, num_unlabeled_steps, criterion, unsup_weight, ema_decay,
     optimizer, scaler, device, grad_clip=1.0, use_amp=False,
-    augmentor=None, boundary_gate_cfg=None,
+    augmentor=None, boundary_anchor_cfg=None, ref_model=None, anchor_alpha=1.0,
 ):
     """训练一个 epoch（双流混合 Batch + EMA 更新）。
 
     Args:
         augmentor: 可选的渐进式外观增强器，仅施加于学生模型输入
                    （有标签图像 + 无标签强增强图像），教师输入不触碰。
-        boundary_gate_cfg: 边界硬门控配置，传入 compute_unsupervised_loss。
+        boundary_anchor_cfg: 边界锚点配置，传入 compute_unsupervised_loss。
+        ref_model: Stage-1 冻结参考模型，提供稳定边界伪标签。
+        anchor_alpha: Stage-1 锚点权重（1.0=纯 Stage-1, 0.0=纯 EMA 教师）。
     """
     student_model.train()
     student_model.encoder.eval()
@@ -304,7 +306,9 @@ def train_one_epoch(
                                 student_model, teacher_model,
                                 img_weak, img_strong, patch_mask,
                                 output_size=targets_labeled.shape[-2:],
-                                boundary_gate_cfg=boundary_gate_cfg,
+                                boundary_anchor_cfg=boundary_anchor_cfg,
+                                ref_model=ref_model,
+                                anchor_alpha=anchor_alpha,
                             )
                         )
                 else:
@@ -313,7 +317,9 @@ def train_one_epoch(
                             student_model, teacher_model,
                             img_weak, img_strong, patch_mask,
                             output_size=targets_labeled.shape[-2:],
-                            boundary_gate_cfg=boundary_gate_cfg,
+                            boundary_anchor_cfg=boundary_anchor_cfg,
+                            ref_model=ref_model,
+                            anchor_alpha=anchor_alpha,
                         )
                     )
             except StopIteration:
@@ -593,17 +599,39 @@ def main():
     ema_decay = semi_cfg.get("ema_decay", 0.999)
     unsup_weight = semi_cfg.get("unsup_weight", 1.0)
 
-    # 边界硬门控配置
-    boundary_gate_cfg = semi_cfg.get("boundary_gate", {})
-    if boundary_gate_cfg.get("enabled", False):
+    # 边界锚点配置（Stage-1 冻结参考模型）
+    boundary_anchor_cfg = semi_cfg.get("boundary_anchor", {})
+    anchor_enabled = boundary_anchor_cfg.get("enabled", False)
+    ref_model = None
+
+    if anchor_enabled:
+        # 构建 Stage-1 冻结参考模型（共享 student 的 encoder，仅加载 Stage-1 decoder）
+        ref_decoder = FPNDecoder(
+            in_channels=student_model.encoder.get_stage_channels(),
+            fpn_channels=config["decoder"]["fpn_channels"],
+            num_classes=config["decoder"]["num_classes"],
+            dropout=config["decoder"]["dropout"],
+            use_bn=config["decoder"]["use_bn"],
+        )
+        ref_checkpoint = torch.load(stage1_ckpt_path, map_location=device, weights_only=False)
+        ref_decoder.load_state_dict(ref_checkpoint["decoder_state_dict"])
+        ref_decoder = ref_decoder.to(device)
+        for param in ref_decoder.parameters():
+            param.requires_grad = False
+        ref_decoder.eval()
+        ref_model = SegmentationModel(student_model.encoder, ref_decoder)
+        logger.info(f"Boundary anchor: ENABLED (Stage-1 ref model loaded, shared encoder)")
+
+        anchor_floor = boundary_anchor_cfg.get("anchor_floor", 0.3)
+        anchor_ramp_epochs = boundary_anchor_cfg.get("anchor_ramp_epochs", 20)
+        pos_weight = boundary_anchor_cfg.get("pos_weight", 5.0)
         logger.info(
-            f"Boundary gate: ENABLED "
-            f"(pos_thresh={boundary_gate_cfg.get('positive_threshold', 0.7)}, "
-            f"neg_thresh={boundary_gate_cfg.get('negative_threshold', 0.1)}, "
-            f"pos_weight={boundary_gate_cfg.get('pos_weight', 5.0)})"
+            f"  anchor_floor={anchor_floor}, "
+            f"ramp_epochs={anchor_ramp_epochs}, "
+            f"pos_weight={pos_weight}"
         )
     else:
-        logger.info("Boundary gate: DISABLED (using MSE consistency)")
+        logger.info("Boundary anchor: DISABLED (using MSE consistency)")
 
     # 复合评分权重
     sem_w = train_cfg.get("composite_sem_weight", 0.4)
@@ -667,6 +695,18 @@ def main():
             unlabeled_iter = None
             num_steps = len(labeled_loader)
 
+        # 计算 Stage-1 锚点权重（从 1.0 渐进衰减到 anchor_floor）
+        anchor_alpha = 1.0
+        if anchor_enabled:
+            anchor_floor = boundary_anchor_cfg.get("anchor_floor", 0.3)
+            anchor_ramp_epochs = boundary_anchor_cfg.get("anchor_ramp_epochs", 20)
+            if anchor_ramp_epochs > 0 and epoch < anchor_ramp_epochs:
+                anchor_alpha = 1.0 - (1.0 - anchor_floor) * epoch / anchor_ramp_epochs
+            else:
+                anchor_alpha = anchor_floor
+            if (epoch + 1) % 5 == 0 or epoch == start_epoch:
+                logger.info(f"  Boundary anchor alpha: {anchor_alpha:.3f}")
+
         train_metrics = train_one_epoch(
             student_model, teacher_model, labeled_loader, unlabeled_iter,
             num_steps, num_unlabeled_steps if unlabeled_loader is not None else 0,
@@ -674,7 +714,9 @@ def main():
             optimizer=optimizer, scaler=scaler, device=device,
             grad_clip=train_cfg.get("grad_clip", 1.0), use_amp=use_amp,
             augmentor=augmentor,
-            boundary_gate_cfg=boundary_gate_cfg,
+            boundary_anchor_cfg=boundary_anchor_cfg,
+            ref_model=ref_model,
+            anchor_alpha=anchor_alpha,
         )
         val_metrics = validate(student_model, val_loader, criterion, device)
         scheduler.step()

@@ -91,16 +91,16 @@ boundary:
 # 推理配置
 # -----------------------------------------------------------------------------
 inference:
-  test_dir: "data/test"
+  test_dir: "data/smoketest"
   output_dir: "outputs/inference"
   threshold: 0.5
   min_instance_area: 500
   max_instance_id: 255
-  boundary_threshold: 0.05
-  watershed_dilate_width: 2
-  checkpoint_stage: "stage2"
+  boundary_threshold: 0.3
+  watershed_dilate_width: 1
+  checkpoint_stage: "stage1"
   stage1_checkpoint: "outputs/stage1/best_model.pth"
-  stage2_checkpoint: "outputs/stage2/stage2_epoch80.pth"
+  stage2_checkpoint: "outputs/stage2/stage2_epoch5.pth"
 
 # -----------------------------------------------------------------------------
 # 主动学习配置
@@ -162,14 +162,14 @@ semi_supervised:
   patch_mask_ratio: 0.3
   patch_mask_size: 64
   num_patches: 8
-  # 边界伪标签硬门控截断（防止雾状区域冲刷边界头）
-  boundary_gate:
-    # 是否启用硬门控 + BCE + pos_weight 重加权（false 时回退到原 MSE）
+  # 边界锚点配置（Stage-1 冻结模型提供稳定边界伪标签，替代硬门控）
+  boundary_anchor:
+    # 是否启用 Stage-1 锚点 + EMA 渐进混合 + BCE 软目标（false 时回退到 MSE）
     enabled: true
-    # 正样本阈值：teacher_boundary_prob > 此值 → 伪标签=1
-    positive_threshold: 0.7
-    # 负样本阈值：teacher_boundary_prob < 此值 → 伪标签=0
-    negative_threshold: 0.1
+    # Stage-1 锚点权重下限（始终保留锚点防止边界头崩塌）
+    anchor_floor: 0.3
+    # 从 1.0 衰减到 anchor_floor 的 epoch 数
+    anchor_ramp_epochs: 20
     # 正样本重加权因子（负样本保持 1.0 满格梯度，正样本乘以 pos_weight 放大）
     pos_weight: 5.0
 
