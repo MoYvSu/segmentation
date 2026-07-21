@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-半监督一致性损失（边界预测版本 - Mean Teacher）
-================================================
+半监督一致性损失（边界预测版本 - Mean Teacher + Stage-1 锚点）
+=============================================================
 Mean Teacher 框架的无监督一致性损失。
 
 双路一致性：
@@ -9,18 +9,14 @@ Mean Teacher 框架的无监督一致性损失。
 2. 学生路径（有梯度）：强增强图像 -> 学生模型 -> 预测概率图
 3. 一致性损失：
    - 语义通道：MSE（学生预测 vs 教师伪标签），Patch Masking 加权
-   - 边界通道：硬门控截断 + BCE + pos_weight 重加权（防止雾状区域冲刷边界头）
+   - 边界通道：Stage-1 锚点 + EMA 教师渐进混合 + BCE 软目标 + pos_weight
 
-边界硬门控机制：
-  - teacher_boundary_prob > positive_threshold -> 伪标签=1（高置信度正样本）
-  - teacher_boundary_prob < negative_threshold -> 伪标签=0（高置信度负样本）
-  - 处于 [negative_threshold, positive_threshold] 之间的"雾状区域"被屏蔽，
-    不贡献梯度，防止海量不确定像素冲刷边界预测头。
-
-注意：不使用 Focal Loss 聚焦（gamma），因为硬门控已将教师连续概率截断为二值
-标签，Focal Loss 的难样本放大效应会破坏模型流形的连续性。改为 BCE + pos_weight
-重加权：负样本（背景）保持 1.0 满格梯度，正样本（晶界）乘以 pos_weight 放大，
-与 BCEWithLogitsLoss(pos_weight=) 设计理念一致。
+边界锚点机制（替代硬门控）：
+  - Stage-1 模型用 GT 训练，边界预测稳定锐利，不会随训练漂移
+  - 边界伪标签 = anchor_alpha * stage1_prob + (1-anchor_alpha) * teacher_prob
+  - anchor_alpha 从 1.0 渐进衰减到 anchor_floor（如 0.3），始终保留锚点
+  - 使用 BCE 软目标（混合概率作为连续 target），无需门控截断
+  - pos_weight 放大正样本梯度，解决类别不平衡（边界像素仅占 2~5%）
 
 教师模型通过学生模型权重的 EMA（Exponential Moving Average）动态更新。
 """
@@ -39,16 +35,18 @@ def compute_unsupervised_loss(
     img_strong: torch.Tensor,
     patch_mask: torch.Tensor,
     output_size: Optional[Tuple[int, int]] = None,
-    boundary_gate_cfg: Optional[dict] = None,
+    boundary_anchor_cfg: Optional[dict] = None,
+    ref_model: Optional[nn.Module] = None,
+    anchor_alpha: float = 1.0,
 ) -> Tuple[torch.Tensor, float, float]:
     """
     计算 Mean Teacher 无监督一致性损失。
 
-    教师模型（EMA）对干净图像生成伪标签，学生模型对强增强图像生成预测。
+    教师模型（EMA）对干净图像生成语义伪标签，学生模型对强增强图像生成预测。
 
     语义通道：MSE 一致性损失，Patch Masking 加权。
     边界通道：
-      - 如果 boundary_gate_cfg 启用 -> 硬门控截断 + BCE + pos_weight 重加权
+      - 如果 boundary_anchor_cfg 启用且有 ref_model -> Stage-1 锚点 + EMA 渐进混合 + BCE 软目标
       - 否则 -> 回退到 MSE 一致性损失
 
     Args:
@@ -58,11 +56,11 @@ def compute_unsupervised_loss(
         img_strong: [B, 3, H, W] 强增强 + Patch Masking 图像
         patch_mask: [B, 1, H, W] Patch Masking 掩码（1=遮挡, 0=保留）
         output_size: 可选，输出尺寸 (H, W)
-        boundary_gate_cfg: 边界硬门控配置，包含:
+        boundary_anchor_cfg: 边界锚点配置，包含:
             - enabled: bool
-            - positive_threshold: float（正样本阈值）
-            - negative_threshold: float（负样本阈值）
             - pos_weight: float（正样本重加权因子，负样本保持 1.0）
+        ref_model: Stage-1 冻结参考模型（提供稳定边界伪标签）
+        anchor_alpha: Stage-1 锚点权重（1.0=纯 Stage-1, 0.0=纯 EMA 教师）
 
     Returns:
         total_loss: 标量张量，总一致性损失
@@ -101,38 +99,33 @@ def compute_unsupervised_loss(
     loss_seg = (seg_mse * weight_map).mean()
 
     # ---- 边界一致性损失 ----
-    gate_enabled = (
-        boundary_gate_cfg is not None
-        and boundary_gate_cfg.get("enabled", False)
-    )
+    if boundary_anchor_cfg is not None and ref_model is not None and boundary_anchor_cfg.get("enabled", False):
+        pos_weight_val = boundary_anchor_cfg.get("pos_weight", 5.0)
 
-    if gate_enabled and boundary_gate_cfg is not None:
-        pos_thresh = boundary_gate_cfg.get("positive_threshold", 0.7)
-        neg_thresh = boundary_gate_cfg.get("negative_threshold", 0.1)
-        pos_weight_val = boundary_gate_cfg.get("pos_weight", 5.0)
+        # Stage-1 锚点：冻结参考模型提供稳定边界概率
+        with torch.no_grad():
+            ref_output = ref_model(img_weak, output_size=output_size)
+            ref_boundary_prob = torch.sigmoid(ref_output[:, 1])
 
-        # 硬门控截断：生成二值伪标签 + 有效区域掩码
-        target_b = (teacher_boundary_prob > pos_thresh).float()
-        loss_mask = (
-            (teacher_boundary_prob > pos_thresh)
-            | (teacher_boundary_prob < neg_thresh)
-        ).float()
+        # 渐进混合：anchor_alpha * stage1 + (1-anchor_alpha) * ema_teacher
+        mixed_boundary_prob = (
+            anchor_alpha * ref_boundary_prob
+            + (1.0 - anchor_alpha) * teacher_boundary_prob
+        )
 
-        # BCE + pos_weight 重加权（负样本=1.0 满格梯度，正样本=pos_weight 放大）
+        # BCE 软目标（混合概率作为连续 target）+ pos_weight 重加权
         student_boundary_logits = student_output[:, 1]  # [B, H, W]
         bce = F.binary_cross_entropy_with_logits(
-            student_boundary_logits, target_b, reduction="none"
+            student_boundary_logits, mixed_boundary_prob, reduction="none"
         )  # [B, H, W]
 
-        weight_matrix = torch.ones_like(target_b)
-        weight_matrix[target_b == 1.0] = pos_weight_val
+        # pos_weight 矩阵：正样本（混合概率 > 0.5）放大，负样本保持 1.0
+        weight_matrix = torch.ones_like(mixed_boundary_prob)
+        weight_matrix[mixed_boundary_prob > 0.5] = pos_weight_val
 
-        # 叠加 pos_weight 矩阵 + loss_mask（屏蔽雾状区域）+ patch_mask 权重
-        loss_boundary = (
-            weight_matrix * bce * loss_mask * weight_map
-        ).sum() / (loss_mask.sum() + 1e-6)
+        loss_boundary = (weight_matrix * bce * weight_map).mean()
     else:
-        # 回退到原 MSE 一致性损失
+        # 回退到 MSE 一致性损失
         boundary_mse = (student_boundary_prob - teacher_boundary_prob) ** 2
         loss_boundary = (boundary_mse * weight_map).mean()
 
