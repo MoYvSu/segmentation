@@ -137,8 +137,10 @@ semi_supervised:
   epochs: 50
   # 学习率
   learning_rate: 5.0e-5
-  # FPN 组件学习率比例（FPN lr = fpn_lr_ratio * learning_rate）
-  fpn_lr_ratio: 0.1
+  # 语义分支学习率比例（seg lr = seg_lr_ratio * learning_rate）
+  seg_lr_ratio: 0.1
+  # 边界分支学习率比例（boundary lr = boundary_lr_ratio * learning_rate）
+  boundary_lr_ratio: 0.1
   # warmup 轮数
   warmup_epochs: 5
   # warmup 起始学习率比例（lr = warmup_start_factor * base_lr）

@@ -548,33 +548,37 @@ def main():
     ).to(device)
     logger.info("Supervised loss: BoundaryLoss (semantic BCE + boundary Focal x EDT)")
 
-    # 分层参数优化器：FPN 组件低学习率，解耦头标准学习率
+    # 分层参数优化器：语义分支和边界分支各自独立学习率（方案 B - 三分组）
     base_lr = semi_cfg.get("learning_rate", train_cfg["learning_rate"])
-    fpn_lr_ratio = semi_cfg.get("fpn_lr_ratio", 0.1)  # FPN 学习率 = 0.1 * base_lr
-    fpn_lr = base_lr * fpn_lr_ratio
-    head_lr = base_lr
+    seg_lr_ratio = semi_cfg.get("seg_lr_ratio", 0.1)
+    boundary_lr_ratio = semi_cfg.get("boundary_lr_ratio", 0.1)
+    seg_lr = base_lr * seg_lr_ratio
+    boundary_lr = base_lr * boundary_lr_ratio
 
-    fpn_params = []
-    head_params = []
+    seg_params = []
+    boundary_params = []
     for name, param in student_model.decoder.named_parameters():
         if not param.requires_grad:
             continue
-        if "seg_branch" in name or "boundary_branch" in name:
-            head_params.append(param)
+        if "seg_fpn" in name or "seg_branch" in name:
+            seg_params.append(param)
+        elif "boundary_fpn" in name or "boundary_branch" in name:
+            boundary_params.append(param)
         else:
-            fpn_params.append(param)
+            seg_params.append(param)
 
     optimizer = torch.optim.AdamW(
         [
-            {"params": fpn_params, "lr": fpn_lr},
-            {"params": head_params, "lr": head_lr},
+            {"params": seg_params, "lr": seg_lr},
+            {"params": boundary_params, "lr": boundary_lr},
         ],
         lr=base_lr,
         weight_decay=train_cfg["weight_decay"],
         eps=1e-4,
     )
-    logger.info(f"Layered optimizer: FPN lr={fpn_lr:.2e} ({len(fpn_params)} params), "
-                f"Head lr={head_lr:.2e} ({len(head_params)} params)")
+    logger.info(f"Layered optimizer (dual FPN): "
+                f"Seg lr={seg_lr:.2e} ({len(seg_params)} params), "
+                f"Boundary lr={boundary_lr:.2e} ({len(boundary_params)} params)")
 
     warmup_epochs = semi_cfg.get("warmup_epochs", 5)
     total_epochs = semi_cfg.get("epochs", 50)
