@@ -578,15 +578,16 @@ def main():
 
     warmup_epochs = semi_cfg.get("warmup_epochs", 5)
     total_epochs = semi_cfg.get("epochs", 50)
+    warmup_start_factor = semi_cfg.get("warmup_start_factor", 0.01)
+    cosine_end_factor = semi_cfg.get("cosine_end_factor", 0.0)
 
     def warmup_cosine_lambda(epoch):
-        """Warmup (linear 0.01→1.0) + Cosine decay (1.0→0.0)。"""
-        start_factor = 0.01
+        """Warmup (linear start_factor→1.0) + Cosine decay (1.0→end_factor)。"""
         if epoch < warmup_epochs:
-            return start_factor + (1.0 - start_factor) * epoch / max(1, warmup_epochs)
+            return warmup_start_factor + (1.0 - warmup_start_factor) * epoch / max(1, warmup_epochs)
         else:
             progress = (epoch - warmup_epochs) / max(1, total_epochs - warmup_epochs)
-            return 0.5 * (1.0 + math.cos(math.pi * progress))
+            return cosine_end_factor + 0.5 * (1.0 - cosine_end_factor) * (1.0 + math.cos(math.pi * progress))
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer,
