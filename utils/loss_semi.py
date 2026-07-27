@@ -25,9 +25,99 @@ Mean Teacher 框架的无监督一致性损失。
 
 from typing import Optional, Tuple
 
+import cv2
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+def skeleton_filter_boundary(
+    boundary_prob: torch.Tensor,
+    threshold: float = 0.5,
+    dilate_width: int = 1,
+    blur_sigma: float = 1.0,
+) -> torch.Tensor:
+    """
+    对教师边界概率图施加骨架过滤（形态学先验精炼伪标签）。
+
+    流程（逐样本）：
+      1. 概率图 > threshold -> 二值边界
+      2. 骨架化（Zhang-Suen / skimage fallback）-> 1px 中心线
+      3. 膨胀 dilate_width -> 可配置宽度边界带
+      4. 高斯模糊（blur_sigma > 0 时）-> 软概率 [0, 1]
+
+    边界情况：边界像素过少或骨架化为空时，返回原始概率图（跳过过滤）。
+
+    Args:
+        boundary_prob: [B, H, W] 教师边界概率图（sigmoid 后，值域 [0, 1]）
+        threshold: 二值化阈值
+        dilate_width: 骨架膨胀宽度（最终边界宽度 = 2*w+1 px）
+        blur_sigma: 高斯模糊 sigma（0=硬二值目标，>0=软目标）
+
+    Returns:
+        filtered_prob: [B, H, W] 过滤后的边界概率图
+    """
+    device = boundary_prob.device
+    B, H, W = boundary_prob.shape
+
+    # 转 CPU numpy 逐样本处理
+    prob_np = boundary_prob.detach().cpu().numpy()
+    filtered_np = np.zeros_like(prob_np)
+
+    for i in range(B):
+        p = prob_np[i]  # [H, W]
+
+        # Step 1: 二值化
+        binary = (p > threshold).astype(np.uint8) * 255
+
+        # 边界像素过少 -> 跳过
+        if cv2.countNonZero(binary) < 10:
+            filtered_np[i] = p
+            continue
+
+        # Step 2: 骨架化
+        try:
+            skeleton = cv2.ximgproc.thinning(
+                binary, thinningType=cv2.ximgproc.THINNING_ZHANGSUEN
+            )
+        except (AttributeError, cv2.error):
+            from skimage.morphology import skeletonize as sk_skeletonize
+            skeleton = (sk_skeletonize(binary > 0) * 255).astype(np.uint8)
+
+        # 骨架化为空 -> 跳过
+        if cv2.countNonZero(skeleton) < 5:
+            filtered_np[i] = p
+            continue
+
+        # Step 3: 膨胀
+        if dilate_width > 0:
+            kernel_size = 2 * dilate_width + 1
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)
+            )
+            belt = cv2.dilate(skeleton, kernel)
+        else:
+            belt = skeleton
+
+        # Step 4: 转回概率图
+        belt_float = (belt > 0).astype(np.float32)
+
+        if blur_sigma > 0:
+            ksize = int(2 * round(2 * blur_sigma) + 1)
+            if ksize < 3:
+                ksize = 3
+            belt_float = cv2.GaussianBlur(
+                belt_float, (ksize, ksize), blur_sigma
+            )
+            # 归一化到 [0, 1]
+            mx = belt_float.max()
+            if mx > 0:
+                belt_float = belt_float / mx
+
+        filtered_np[i] = belt_float
+
+    return torch.from_numpy(filtered_np).to(device=device, dtype=boundary_prob.dtype)
 
 
 def compute_unsupervised_loss(
@@ -40,6 +130,7 @@ def compute_unsupervised_loss(
     boundary_anchor_cfg: Optional[dict] = None,
     ref_model: Optional[nn.Module] = None,
     anchor_alpha: float = 1.0,
+    skeleton_filter_cfg: Optional[dict] = None,
 ) -> Tuple[torch.Tensor, float, float]:
     """
     计算 Mean Teacher 无监督一致性损失。
@@ -50,6 +141,9 @@ def compute_unsupervised_loss(
     边界通道：
       - 如果 boundary_anchor_cfg 启用且有 ref_model -> Stage-1 锚点 + EMA 渐进混合 + BCE 软目标
       - 否则 -> 回退到 MSE 一致性损失
+
+    骨架过滤（可选）：在教师边界概率输出后、混合/锐化前，施加形态学骨架过滤，
+    去除弥散噪声和拓扑毛刺，精炼边界伪标签。
 
     Args:
         student_model: 学生模型（有梯度）
@@ -65,6 +159,11 @@ def compute_unsupervised_loss(
             - mask_region_weight: float（掩码区域权重，1.0=不降权，0=完全忽略）
         ref_model: Stage-1 冻结参考模型（提供稳定边界伪标签）
         anchor_alpha: Stage-1 锚点权重（1.0=纯 Stage-1, 0.0=纯 EMA 教师）
+        skeleton_filter_cfg: 骨架过滤配置，包含:
+            - enabled: bool
+            - threshold: float（二值化阈值）
+            - dilate_width: int（骨架膨胀宽度，最终边界宽度=2*w+1 px）
+            - blur_sigma: float（高斯模糊 sigma，0=硬二值，>0=软目标）
 
     Returns:
         total_loss: 标量张量，总一致性损失
@@ -88,6 +187,15 @@ def compute_unsupervised_loss(
         teacher_output = teacher_model(img_weak, output_size=output_size)
         teacher_seg_prob = torch.sigmoid(teacher_output[:, 0])
         teacher_boundary_prob = torch.sigmoid(teacher_output[:, 1])
+
+        # 骨架过滤：精炼教师边界伪标签（去除弥散噪声和拓扑毛刺）
+        if skeleton_filter_cfg is not None and skeleton_filter_cfg.get("enabled", False):
+            teacher_boundary_prob = skeleton_filter_boundary(
+                teacher_boundary_prob,
+                threshold=skeleton_filter_cfg.get("threshold", 0.5),
+                dilate_width=skeleton_filter_cfg.get("dilate_width", 1),
+                blur_sigma=skeleton_filter_cfg.get("blur_sigma", 1.0),
+            )
 
     # ---- 学生路径（有梯度）----
     student_output = student_model(img_strong, output_size=output_size)

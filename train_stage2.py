@@ -237,6 +237,7 @@ def train_one_epoch(
     num_steps, num_unlabeled_steps, criterion, unsup_weight, ema_decay,
     optimizer, scaler, device, grad_clip=1.0, use_amp=False,
     augmentor=None, boundary_anchor_cfg=None, ref_model=None, anchor_alpha=1.0,
+    skeleton_filter_cfg=None,
 ):
     """训练一个 epoch（双流混合 Batch + EMA 更新）。
 
@@ -246,6 +247,7 @@ def train_one_epoch(
         boundary_anchor_cfg: 边界锚点配置，传入 compute_unsupervised_loss。
         ref_model: Stage-1 冻结参考模型，提供稳定边界伪标签。
         anchor_alpha: Stage-1 锚点权重（1.0=纯 Stage-1, 0.0=纯 EMA 教师）。
+        skeleton_filter_cfg: 骨架过滤配置，传入 compute_unsupervised_loss。
     """
     student_model.train()
     student_model.encoder.eval()
@@ -309,6 +311,7 @@ def train_one_epoch(
                                 boundary_anchor_cfg=boundary_anchor_cfg,
                                 ref_model=ref_model,
                                 anchor_alpha=anchor_alpha,
+                                skeleton_filter_cfg=skeleton_filter_cfg,
                             )
                         )
                 else:
@@ -320,6 +323,7 @@ def train_one_epoch(
                             boundary_anchor_cfg=boundary_anchor_cfg,
                             ref_model=ref_model,
                             anchor_alpha=anchor_alpha,
+                            skeleton_filter_cfg=skeleton_filter_cfg,
                         )
                     )
             except StopIteration:
@@ -642,6 +646,18 @@ def main():
     else:
         logger.info("Boundary anchor: DISABLED (using MSE consistency)")
 
+    # 骨架过滤配置（教师边界伪标签形态学精炼）
+    skeleton_filter_cfg = semi_cfg.get("skeleton_filter", {})
+    if skeleton_filter_cfg.get("enabled", False):
+        logger.info(
+            f"Skeleton filter: ENABLED "
+            f"(threshold={skeleton_filter_cfg.get('threshold', 0.5)}, "
+            f"dilate_width={skeleton_filter_cfg.get('dilate_width', 1)}, "
+            f"blur_sigma={skeleton_filter_cfg.get('blur_sigma', 1.0)})"
+        )
+    else:
+        logger.info("Skeleton filter: DISABLED")
+
     # 复合评分权重
     sem_w = train_cfg.get("composite_sem_weight", 0.4)
     bnd_w = train_cfg.get("composite_boundary_weight", 0.6)
@@ -726,6 +742,7 @@ def main():
             boundary_anchor_cfg=boundary_anchor_cfg,
             ref_model=ref_model,
             anchor_alpha=anchor_alpha,
+            skeleton_filter_cfg=skeleton_filter_cfg,
         )
         val_metrics = validate(student_model, val_loader, criterion, device)
         scheduler.step()
