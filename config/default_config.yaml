@@ -91,16 +91,16 @@ boundary:
 # 推理配置
 # -----------------------------------------------------------------------------
 inference:
-  test_dir: "data/smoketest"
+  test_dir: "data/test"
   output_dir: "outputs/inference"
   threshold: 0.5
   min_instance_area: 500
   max_instance_id: 255
   boundary_threshold: 0.3
   watershed_dilate_width: 1
-  checkpoint_stage: "stage1"
+  checkpoint_stage: "stage2"
   stage1_checkpoint: "outputs/stage1/best_model.pth"
-  stage2_checkpoint: "outputs/stage2/stage2_epoch5.pth"
+  stage2_checkpoint: "outputs/stage2/stage2_epoch50.pth"
 
 # -----------------------------------------------------------------------------
 # 主动学习配置
@@ -182,6 +182,20 @@ semi_supervised:
     sharpen_temp: 0.5
     # 掩码区域权重（1.0=不降权，0=完全忽略，防止 Patch Masking 圆斑过拟合）
     mask_region_weight: 0.3
+
+  # 骨架过滤配置（教师边界伪标签形态学精炼）
+  # 在教师输出边界概率后、与 Stage-1 锚点混合前，施加骨架化+膨胀，
+  # 去除弥散噪声和拓扑毛刺，使边界伪标签更锐利、更拓扑合理。
+  # 仍属无监督范畴（形态学先验，不使用 GT 标签）。
+  skeleton_filter:
+    # 是否启用骨架过滤
+    enabled: true
+    # 二值化阈值（概率图 > threshold 视为边界）
+    threshold: 0.5
+    # 骨架膨胀宽度（最终边界宽度 = 2*width+1 px）
+    dilate_width: 1
+    # 高斯模糊 sigma（0=硬二值目标，>0=软目标，保留梯度信息）
+    blur_sigma: 1.0
 
 # -----------------------------------------------------------------------------
 # 渐进式外观增强配置（Stage 2: 学生模型输入专用）
