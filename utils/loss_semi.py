@@ -131,6 +131,8 @@ def compute_unsupervised_loss(
     ref_model: Optional[nn.Module] = None,
     anchor_alpha: float = 1.0,
     skeleton_filter_cfg: Optional[dict] = None,
+    freeze_seg: bool = False,
+    freeze_boundary: bool = False,
 ) -> Tuple[torch.Tensor, float, float]:
     """
     计算 Mean Teacher 无监督一致性损失。
@@ -164,11 +166,16 @@ def compute_unsupervised_loss(
             - threshold: float（二值化阈值）
             - dilate_width: int（骨架膨胀宽度，最终边界宽度=2*w+1 px）
             - blur_sigma: float（高斯模糊 sigma，0=硬二值，>0=软目标）
+        freeze_seg: 冻结语义分支时为 True，跳过语义一致性损失。
+        freeze_boundary: 冻结边界分支时为 True，跳过边界一致性损失。
 
     Returns:
         total_loss: 标量张量，总一致性损失
         loss_seg_val: float，语义通道一致性损失
         loss_boundary_val: float，边界通道一致性损失
+
+    注意：当 freeze_seg=True 时 loss_seg=0（无梯度），
+          当 freeze_boundary=True 时 loss_boundary=0（无梯度）。
     """
     device = next(student_model.parameters()).device
 
@@ -208,12 +215,17 @@ def compute_unsupervised_loss(
     # 语义通道权重：被遮挡区域权重加倍（语义通道保持原逻辑）
     seg_weight_map = 1.0 + pm  # 遮挡区域=2.0, 非遮挡=1.0
 
-    # ---- 语义一致性损失（MSE，保持不变）----
-    seg_mse = (student_seg_prob - teacher_seg_prob) ** 2
-    loss_seg = (seg_mse * seg_weight_map).mean()
+    # ---- 语义一致性损失（MSE）----
+    if freeze_seg:
+        loss_seg = torch.tensor(0.0, device=device, requires_grad=False)
+    else:
+        seg_mse = (student_seg_prob - teacher_seg_prob) ** 2
+        loss_seg = (seg_mse * seg_weight_map).mean()
 
     # ---- 边界一致性损失 ----
-    if boundary_anchor_cfg is not None and ref_model is not None and boundary_anchor_cfg.get("enabled", False):
+    if freeze_boundary:
+        loss_boundary = torch.tensor(0.0, device=device, requires_grad=False)
+    elif boundary_anchor_cfg is not None and ref_model is not None and boundary_anchor_cfg.get("enabled", False):
         pos_weight_val = boundary_anchor_cfg.get("pos_weight", 3.0)
         sharpen_temp = boundary_anchor_cfg.get("sharpen_temp", 0.5)
         mask_region_weight = boundary_anchor_cfg.get("mask_region_weight", 0.3)
@@ -267,6 +279,8 @@ def update_ema(teacher_model: nn.Module, student_model: nn.Module, ema_decay: fl
 
     teacher_param = ema_decay * teacher_param + (1 - ema_decay) * student_param
 
+    跳过 requires_grad=False 的参数（冻结分支的学生参数不变，教师无需 EMA 跟随）。
+
     Args:
         teacher_model: 教师模型（将被原地更新）
         student_model: 学生模型（提供新权重）
@@ -279,11 +293,15 @@ def update_ema(teacher_model: nn.Module, student_model: nn.Module, ema_decay: fl
         for name, teacher_param in teacher_params.items():
             if name in student_params:
                 student_param = student_params[name]
+                # 跳过冻结参数（requires_grad=False），学生未更新，教师也无需更新
+                if not student_param.requires_grad:
+                    continue
                 teacher_param.data.mul_(ema_decay).add_(
                     student_param.data, alpha=1.0 - ema_decay
                 )
 
         # 同步更新 buffers（如 BatchNorm 的 running_mean/var）
+        # 冻结分支的 buffers 仍需同步（GroupNorm 无可学习参数但有运行统计）
         teacher_buffers = dict(teacher_model.named_buffers())
         student_buffers = dict(student_model.named_buffers())
         for name, teacher_buffer in teacher_buffers.items():

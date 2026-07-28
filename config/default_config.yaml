@@ -183,6 +183,15 @@ semi_supervised:
     # 掩码区域权重（1.0=不降权，0=完全忽略，防止 Patch Masking 圆斑过拟合）
     mask_region_weight: 0.3
 
+  # 冻结开关（单独训练某个分支）
+  # 用于解决语义头和边界头统一参数不匹配导致的训练困难
+  # 两个都为 false 时维持联合训练（默认行为）
+  freeze:
+    # 冻结语义分支（seg_fpn + seg_branch），仅训练边界分支
+    seg_branch: false
+    # 冻结边界分支（boundary_fpn + boundary_branch），仅训练语义分支
+    boundary_branch: false
+
   # 骨架过滤配置（教师边界伪标签形态学精炼）
   # 在教师输出边界概率后、与 Stage-1 锚点混合前，施加骨架化+膨胀，
   # 去除弥散噪声和拓扑毛刺，使边界伪标签更锐利、更拓扑合理。
