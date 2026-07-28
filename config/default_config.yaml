@@ -129,10 +129,15 @@ semi_supervised:
   unlabeled_dir: "data/unlabeled"
   # 输出目录（第二阶段 checkpoints）
   output_dir: "outputs/stage2"
-  # EMA 衰减系数
+  # EMA 衰减系数（基础值，启用 adaptive_ema 时根据当前 LR 动态调整）
   ema_decay: 0.999
+  # 是否启用自适应 EMA 衰减（LR 高时降低 decay 让教师更快跟随，LR 低时提高 decay 增加稳定性）
+  adaptive_ema: true
   # 无监督损失权重
   unsup_weight: 1.0
+  # 无监督权重 sigmoid ramp-up 长度（epoch 数，前 N 个 epoch 从 0 渐进到 unsup_weight）
+  # 解决训练初期教师伪标签不可靠的问题
+  unsup_rampup_epochs: 10
   # 训练轮数
   epochs: 50
   # 学习率
@@ -141,12 +146,18 @@ semi_supervised:
   seg_lr_ratio: 0.1
   # 边界分支学习率比例（boundary lr = boundary_lr_ratio * learning_rate）
   boundary_lr_ratio: 0.1
+  # 学习率调度模式："cosine"（旧余弦退火）或 "flat_decay"（新三阶段：warmup→恒定→温和衰减）
+  lr_schedule: "flat_decay"
   # warmup 轮数
   warmup_epochs: 5
   # warmup 起始学习率比例（lr = warmup_start_factor * base_lr）
   warmup_start_factor: 0.01
-  # cosine 衰减终点学习率比例（lr = cosine_end_factor * base_lr）
+  # cosine 衰减终点学习率比例（lr = cosine_end_factor * base_lr）[仅 lr_schedule=cosine 时生效]
   cosine_end_factor: 0.0
+  # 恒定阶段长度（epoch 数，warmup 之后）[仅 lr_schedule=flat_decay 时生效]
+  flat_epochs: 30
+  # 温和衰减终点学习率比例（lr = decay_end_factor * base_lr）[仅 lr_schedule=flat_decay 时生效]
+  decay_end_factor: 0.2
   # 批量大小
   batch_size_labeled: 4
   batch_size_unlabeled: 4

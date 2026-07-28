@@ -67,6 +67,61 @@ def load_config(config_path):
         return yaml.safe_load(f)
 
 
+def sigmoid_rampup(epoch, rampup_epochs):
+    """Sigmoid ramp-up 函数：从 0 平滑渐进到 1。
+
+    用于无监督损失权重的渐进上坡，避免训练初期不可靠的伪标签产生过大影响。
+
+    Args:
+        epoch: 当前 epoch（从 0 开始）
+        rampup_epochs: ramp-up 长度（达到此 epoch 时输出 ≈ 1.0）
+
+    Returns:
+        [0, 1] 之间的权重比例
+    """
+    if rampup_epochs <= 0:
+        return 1.0
+    if epoch >= rampup_epochs:
+        return 1.0
+    # sigmoid 居中缩放：在 rampup_epochs/2 处拐点，5 倍缩放使过渡平滑
+    return float(math.exp(-5.0 * (1.0 - epoch / rampup_epochs) ** 2))
+
+
+def compute_adaptive_ema_decay(base_decay, current_lr_ratio):
+    """根据当前学习率比例计算自适应 EMA 衰减系数。
+
+    LR 高时（学生变化快）：降低 decay → 教师更快跟随
+    LR 低时（学生变化慢）：提高 decay → 教师更稳定
+
+    策略：decay_eff = 1.0 - (1.0 - base_decay) * lr_ratio
+    例: base_decay=0.999, lr_ratio=1.0 → 0.999（教师有 ~1000 步滞后）
+        base_decay=0.999, lr_ratio=0.2 → 0.9998（教师有 ~5000 步滞后）
+
+    Args:
+        base_decay: 基础 EMA 衰减系数（如 0.999）
+        current_lr_ratio: 当前 LR / 峰值 LR（[0, 1]）
+
+    Returns:
+        自适应 EMA 衰减系数
+    """
+    lr_ratio = max(0.0, min(1.0, current_lr_ratio))
+    return 1.0 - (1.0 - base_decay) * lr_ratio
+
+
+def get_current_lr_ratio(scheduler, base_lr):
+    """获取当前学习率相对于峰值学习率的比例。
+
+    Args:
+        scheduler: LambdaLR 调度器
+        base_lr: 峰值学习率
+
+    Returns:
+        [0, 1] 之间的比例
+    """
+    current_lr = scheduler.optimizer.param_groups[0]["lr"]
+    return max(0.0, min(1.0, current_lr / max(base_lr, 1e-12)))
+
+
 def build_model(config, device):
     """构建学生模型。"""
     sam2_cfg = config["sam2"]
@@ -625,25 +680,82 @@ def main():
     total_epochs = semi_cfg.get("epochs", 50)
     warmup_start_factor = semi_cfg.get("warmup_start_factor", 0.01)
     cosine_end_factor = semi_cfg.get("cosine_end_factor", 0.0)
+    lr_schedule_mode = semi_cfg.get("lr_schedule", "cosine")
 
-    def warmup_cosine_lambda(epoch):
-        """Warmup (linear start_factor→1.0) + Cosine decay (1.0→end_factor)。"""
-        if epoch < warmup_epochs:
-            return warmup_start_factor + (1.0 - warmup_start_factor) * epoch / max(1, warmup_epochs)
-        else:
-            progress = (epoch - warmup_epochs) / max(1, total_epochs - warmup_epochs)
-            return cosine_end_factor + 0.5 * (1.0 - cosine_end_factor) * (1.0 + math.cos(math.pi * progress))
+    if lr_schedule_mode == "flat_decay":
+        # 三阶段调度：Warmup → Flat（恒定）→ 温和线性衰减
+        flat_epochs = semi_cfg.get("flat_epochs", 30)
+        decay_end_factor = semi_cfg.get("decay_end_factor", 0.2)
+        flat_end_epoch = warmup_epochs + flat_epochs
+
+        def flat_decay_lambda(epoch):
+            """Warmup (linear) → Flat (恒定) → 温和线性衰减。"""
+            if epoch < warmup_epochs:
+                # Phase 1: Warmup
+                return warmup_start_factor + (1.0 - warmup_start_factor) * epoch / max(1, warmup_epochs)
+            elif epoch < flat_end_epoch:
+                # Phase 2: 恒定 LR（主训练阶段，师生关系稳定）
+                return 1.0
+            else:
+                # Phase 3: 温和线性衰减（不降到 0，避免死区）
+                if total_epochs > flat_end_epoch:
+                    progress = (epoch - flat_end_epoch) / (total_epochs - flat_end_epoch)
+                else:
+                    progress = 1.0
+                return decay_end_factor + (1.0 - decay_end_factor) * (1.0 - progress)
+
+        lr_lambda_fn = flat_decay_lambda
+        logger.info(
+            f"LR schedule: flat_decay "
+            f"(warmup={warmup_epochs}, flat={flat_epochs}, "
+            f"decay_end={decay_end_factor:.1f}, total={total_epochs})"
+        )
+    else:
+        # 旧调度：Warmup + Cosine decay
+        cosine_end_factor = semi_cfg.get("cosine_end_factor", 0.0)
+
+        def warmup_cosine_lambda(epoch):
+            """Warmup (linear start_factor→1.0) + Cosine decay (1.0→end_factor)。"""
+            if epoch < warmup_epochs:
+                return warmup_start_factor + (1.0 - warmup_start_factor) * epoch / max(1, warmup_epochs)
+            else:
+                progress = (epoch - warmup_epochs) / max(1, total_epochs - warmup_epochs)
+                return cosine_end_factor + 0.5 * (1.0 - cosine_end_factor) * (1.0 + math.cos(math.pi * progress))
+
+        lr_lambda_fn = warmup_cosine_lambda
+        logger.info(
+            f"LR schedule: cosine "
+            f"(warmup={warmup_epochs}, end_factor={cosine_end_factor:.1f}, total={total_epochs})"
+        )
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer,
-        lr_lambda=warmup_cosine_lambda,
+        lr_lambda=lr_lambda_fn,
     )
 
     use_amp = train_cfg.get("amp", False)
     scaler = GradScaler('cuda', enabled=use_amp)
 
-    ema_decay = semi_cfg.get("ema_decay", 0.999)
+    ema_decay_base = semi_cfg.get("ema_decay", 0.999)
+    adaptive_ema = semi_cfg.get("adaptive_ema", False)
     unsup_weight = semi_cfg.get("unsup_weight", 1.0)
+    unsup_rampup_epochs = semi_cfg.get("unsup_rampup_epochs", 10)
+
+    if adaptive_ema:
+        logger.info(
+            f"Adaptive EMA: ENABLED (base_decay={ema_decay_base}, "
+            f"decay scales with LR ratio)"
+        )
+    else:
+        logger.info(f"Adaptive EMA: DISABLED (fixed decay={ema_decay_base})")
+
+    if unsup_rampup_epochs > 0:
+        logger.info(
+            f"Unsup weight ramp-up: {unsup_rampup_epochs} epochs "
+            f"(sigmoid ramp-up 0→{unsup_weight})"
+        )
+    else:
+        logger.info(f"Unsup weight: fixed at {unsup_weight} (no ramp-up)")
 
     # 掩码区域损失权重配置
     seg_mask_region_weight = semi_cfg.get("seg_mask_region_weight", 2.0)
@@ -730,8 +842,8 @@ def main():
     logger.info("=" * 60)
     logger.info("Stage-2 Semi-Supervised Fine-tuning (Mean Teacher)")
     logger.info(f"  Epochs: {total_epochs}")
-    logger.info(f"  EMA decay: {ema_decay}")
-    logger.info(f"  Unsupervised weight: {unsup_weight}")
+    logger.info(f"  EMA decay: {ema_decay_base}" + (" (adaptive)" if adaptive_ema else " (fixed)"))
+    logger.info(f"  Unsupervised weight: {unsup_weight}" + (f" (ramp-up {unsup_rampup_epochs}ep)" if unsup_rampup_epochs > 0 else ""))
     logger.info(f"  LR: {semi_cfg.get('learning_rate', train_cfg['learning_rate'])}")
     logger.info("=" * 60)
 
@@ -775,10 +887,27 @@ def main():
             if (epoch + 1) % 5 == 0 or epoch == start_epoch:
                 logger.info(f"  Boundary anchor alpha: {anchor_alpha:.3f}")
 
+        # 计算无监督损失权重（sigmoid ramp-up）
+        unsup_weight_eff = unsup_weight * sigmoid_rampup(epoch, unsup_rampup_epochs)
+        if (epoch + 1) % 5 == 0 or epoch == start_epoch:
+            logger.info(f"  Unsup weight: {unsup_weight_eff:.4f} (base={unsup_weight})")
+
+        # 计算自适应 EMA 衰减系数
+        if adaptive_ema:
+            lr_ratio = get_current_lr_ratio(scheduler, base_lr)
+            ema_decay_eff = compute_adaptive_ema_decay(ema_decay_base, lr_ratio)
+            if (epoch + 1) % 5 == 0 or epoch == start_epoch:
+                logger.info(
+                    f"  EMA decay: {ema_decay_eff:.6f} "
+                    f"(base={ema_decay_base}, lr_ratio={lr_ratio:.3f})"
+                )
+        else:
+            ema_decay_eff = ema_decay_base
+
         train_metrics = train_one_epoch(
             student_model, teacher_model, labeled_loader, unlabeled_iter,
             num_steps, num_unlabeled_steps if unlabeled_loader is not None else 0,
-            criterion, unsup_weight=unsup_weight, ema_decay=ema_decay,
+            criterion, unsup_weight=unsup_weight_eff, ema_decay=ema_decay_eff,
             optimizer=optimizer, scaler=scaler, device=device,
             grad_clip=train_cfg.get("grad_clip", 1.0), use_amp=use_amp,
             augmentor=augmentor,
