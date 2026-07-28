@@ -237,7 +237,7 @@ def train_one_epoch(
     num_steps, num_unlabeled_steps, criterion, unsup_weight, ema_decay,
     optimizer, scaler, device, grad_clip=1.0, use_amp=False,
     augmentor=None, boundary_anchor_cfg=None, ref_model=None, anchor_alpha=1.0,
-    skeleton_filter_cfg=None,
+    skeleton_filter_cfg=None, freeze_seg=False, freeze_boundary=False,
 ):
     """训练一个 epoch（双流混合 Batch + EMA 更新）。
 
@@ -248,6 +248,8 @@ def train_one_epoch(
         ref_model: Stage-1 冻结参考模型，提供稳定边界伪标签。
         anchor_alpha: Stage-1 锚点权重（1.0=纯 Stage-1, 0.0=纯 EMA 教师）。
         skeleton_filter_cfg: 骨架过滤配置，传入 compute_unsupervised_loss。
+        freeze_seg: 冻结语义分支，跳过语义损失和 EMA 更新。
+        freeze_boundary: 冻结边界分支，跳过边界损失和 EMA 更新。
     """
     student_model.train()
     student_model.encoder.eval()
@@ -312,6 +314,8 @@ def train_one_epoch(
                                 ref_model=ref_model,
                                 anchor_alpha=anchor_alpha,
                                 skeleton_filter_cfg=skeleton_filter_cfg,
+                                freeze_seg=freeze_seg,
+                                freeze_boundary=freeze_boundary,
                             )
                         )
                 else:
@@ -324,6 +328,8 @@ def train_one_epoch(
                             ref_model=ref_model,
                             anchor_alpha=anchor_alpha,
                             skeleton_filter_cfg=skeleton_filter_cfg,
+                            freeze_seg=freeze_seg,
+                            freeze_boundary=freeze_boundary,
                         )
                     )
             except StopIteration:
@@ -545,10 +551,32 @@ def main():
     else:
         logger.info("Progressive appearance augmentation: DISABLED")
 
+    # 冻结开关配置
+    freeze_cfg = semi_cfg.get("freeze", {})
+    freeze_seg = freeze_cfg.get("seg_branch", False)
+    freeze_boundary = freeze_cfg.get("boundary_branch", False)
+
+    if freeze_seg and freeze_boundary:
+        logger.warning("Both freeze.seg_branch and freeze.boundary_branch are True! "
+                       "No parameters will be trained. Setting both to False.")
+        freeze_seg = False
+        freeze_boundary = False
+
+    if freeze_seg:
+        student_model.decoder.freeze_seg_branch()
+        logger.info("Freeze: SEMANTIC branch frozen (seg_fpn + seg_branch)")
+    if freeze_boundary:
+        student_model.decoder.freeze_boundary_branch()
+        logger.info("Freeze: BOUNDARY branch frozen (boundary_fpn + boundary_branch)")
+    if not freeze_seg and not freeze_boundary:
+        logger.info("Freeze: DISABLED (joint training, both branches active)")
+
     criterion = BoundaryLoss(
         gamma=train_cfg.get("focal_gamma", 2.0),
         alpha_boundary=train_cfg.get("boundary_alpha", 1.0),
         alpha_focal=train_cfg.get("focal_alpha", 0.75),
+        freeze_seg=freeze_seg,
+        freeze_boundary=freeze_boundary,
     ).to(device)
     logger.info("Supervised loss: BoundaryLoss (semantic BCE + boundary Focal x EDT)")
 
@@ -571,11 +599,15 @@ def main():
         else:
             seg_params.append(param)
 
+    # 构建优化器参数组列表（跳过空组，冻结分支的参数已被排除）
+    param_groups = []
+    if len(seg_params) > 0:
+        param_groups.append({"params": seg_params, "lr": seg_lr})
+    if len(boundary_params) > 0:
+        param_groups.append({"params": boundary_params, "lr": boundary_lr})
+
     optimizer = torch.optim.AdamW(
-        [
-            {"params": seg_params, "lr": seg_lr},
-            {"params": boundary_params, "lr": boundary_lr},
-        ],
+        param_groups,
         lr=base_lr,
         weight_decay=train_cfg["weight_decay"],
         eps=1e-4,
@@ -743,6 +775,8 @@ def main():
             ref_model=ref_model,
             anchor_alpha=anchor_alpha,
             skeleton_filter_cfg=skeleton_filter_cfg,
+            freeze_seg=freeze_seg,
+            freeze_boundary=freeze_boundary,
         )
         val_metrics = validate(student_model, val_loader, criterion, device)
         scheduler.step()

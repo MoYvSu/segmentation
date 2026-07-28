@@ -257,6 +257,30 @@ class FPNDecoder(nn.Module):
 
         return output
 
+    def freeze_seg_branch(self):
+        """冻结语义分支（seg_fpn + seg_branch），仅训练边界分支时使用。"""
+        for param in self.seg_fpn.parameters():
+            param.requires_grad = False
+        for param in self.seg_branch.parameters():
+            param.requires_grad = False
+        logger_freeze_info = (
+            f"Semantic branch FROZEN (seg_fpn + seg_branch, "
+            f"{sum(p.numel() for p in self.seg_fpn.parameters()) + sum(p.numel() for p in self.seg_branch.parameters())} params)"
+        )
+        print(logger_freeze_info)
+
+    def freeze_boundary_branch(self):
+        """冻结边界分支（boundary_fpn + boundary_branch），仅训练语义分支时使用。"""
+        for param in self.boundary_fpn.parameters():
+            param.requires_grad = False
+        for param in self.boundary_branch.parameters():
+            param.requires_grad = False
+        logger_freeze_info = (
+            f"Boundary branch FROZEN (boundary_fpn + boundary_branch, "
+            f"{sum(p.numel() for p in self.boundary_fpn.parameters()) + sum(p.numel() for p in self.boundary_branch.parameters())} params)"
+        )
+        print(logger_freeze_info)
+
     def param_count(self):
         """返回解码头的参数总量。"""
         return sum(p.numel() for p in self.parameters())
