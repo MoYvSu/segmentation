@@ -133,6 +133,8 @@ def compute_unsupervised_loss(
     skeleton_filter_cfg: Optional[dict] = None,
     freeze_seg: bool = False,
     freeze_boundary: bool = False,
+    seg_mask_region_weight: float = 2.0,
+    boundary_mask_region_weight: float = 0.3,
 ) -> Tuple[torch.Tensor, float, float]:
     """
     计算 Mean Teacher 无监督一致性损失。
@@ -158,7 +160,6 @@ def compute_unsupervised_loss(
             - enabled: bool
             - pos_weight: float（正样本重加权因子，负样本保持 1.0）
             - sharpen_temp: float（温度锐化参数，<1 锐化，1=不锐化）
-            - mask_region_weight: float（掩码区域权重，1.0=不降权，0=完全忽略）
         ref_model: Stage-1 冻结参考模型（提供稳定边界伪标签）
         anchor_alpha: Stage-1 锚点权重（1.0=纯 Stage-1, 0.0=纯 EMA 教师）
         skeleton_filter_cfg: 骨架过滤配置，包含:
@@ -168,6 +169,8 @@ def compute_unsupervised_loss(
             - blur_sigma: float（高斯模糊 sigma，0=硬二值，>0=软目标）
         freeze_seg: 冻结语义分支时为 True，跳过语义一致性损失。
         freeze_boundary: 冻结边界分支时为 True，跳过边界一致性损失。
+        seg_mask_region_weight: 语义通道掩码区域权重（1.0=不降权，2.0=加倍）。
+        boundary_mask_region_weight: 边界通道掩码区域权重（1.0=不降权，0.3=降权）。
 
     Returns:
         total_loss: 标量张量，总一致性损失
@@ -212,8 +215,8 @@ def compute_unsupervised_loss(
     # Patch Masking 掩码
     pm = patch_mask[:, 0]  # [B, H, W]
 
-    # 语义通道权重：被遮挡区域权重加倍（语义通道保持原逻辑）
-    seg_weight_map = 1.0 + pm  # 遮挡区域=2.0, 非遮挡=1.0
+    # 语义通道权重：被遮挡区域权重可配置（低频面状特征，默认加倍鼓励从上下文推断）
+    seg_weight_map = 1.0 + pm * (seg_mask_region_weight - 1.0)
 
     # ---- 语义一致性损失（MSE）----
     if freeze_seg:
@@ -228,7 +231,6 @@ def compute_unsupervised_loss(
     elif boundary_anchor_cfg is not None and ref_model is not None and boundary_anchor_cfg.get("enabled", False):
         pos_weight_val = boundary_anchor_cfg.get("pos_weight", 3.0)
         sharpen_temp = boundary_anchor_cfg.get("sharpen_temp", 0.5)
-        mask_region_weight = boundary_anchor_cfg.get("mask_region_weight", 0.3)
 
         # Stage-1 锚点：冻结参考模型提供稳定边界概率
         with torch.no_grad():
@@ -259,8 +261,8 @@ def compute_unsupervised_loss(
         weight_matrix[mixed_boundary_prob > 0.5] = pos_weight_val
 
         # 边界通道权重：掩码区域降权，防止 Patch Masking 圆斑过拟合
-        # 遮挡区域=mask_region_weight, 非遮挡=1.0
-        bnd_weight_map = 1.0 + pm * (mask_region_weight - 1.0)
+        # 遮挡区域=boundary_mask_region_weight, 非遮挡=1.0
+        bnd_weight_map = 1.0 + pm * (boundary_mask_region_weight - 1.0)
 
         loss_boundary = (weight_matrix * bce * bnd_weight_map).mean()
     else:
