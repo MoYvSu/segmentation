@@ -168,6 +168,11 @@ semi_supervised:
   patch_mask_ratio: 0.3
   patch_mask_size: 64
   num_patches: 8
+  # 掩码区域损失权重配置（控制遮挡区域在无监督损失中的贡献）
+  # 语义通道：低频面状特征，鼓励从上下文推断，默认加倍
+  seg_mask_region_weight: 2.0
+  # 边界通道：高频线状特征，防止圆斑过拟合，默认降权
+  boundary_mask_region_weight: 0.3
   # 边界锚点配置（Stage-1 冻结模型提供稳定边界伪标签，替代硬门控）
   boundary_anchor:
     # 是否启用 Stage-1 锚点 + EMA 渐进混合 + BCE 软目标（false 时回退到 MSE）
@@ -180,8 +185,6 @@ semi_supervised:
     pos_weight: 3.0
     # 温度锐化参数（<1 锐化软目标到接近二值，1.0=不锐化，防止背景概率膨胀）
     sharpen_temp: 0.5
-    # 掩码区域权重（1.0=不降权，0=完全忽略，防止 Patch Masking 圆斑过拟合）
-    mask_region_weight: 0.3
 
   # 冻结开关（单独训练某个分支）
   # 用于解决语义头和边界头统一参数不匹配导致的训练困难

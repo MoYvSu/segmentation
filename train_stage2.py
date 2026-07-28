@@ -238,6 +238,7 @@ def train_one_epoch(
     optimizer, scaler, device, grad_clip=1.0, use_amp=False,
     augmentor=None, boundary_anchor_cfg=None, ref_model=None, anchor_alpha=1.0,
     skeleton_filter_cfg=None, freeze_seg=False, freeze_boundary=False,
+    seg_mask_region_weight=2.0, boundary_mask_region_weight=0.3,
 ):
     """训练一个 epoch（双流混合 Batch + EMA 更新）。
 
@@ -316,6 +317,8 @@ def train_one_epoch(
                                 skeleton_filter_cfg=skeleton_filter_cfg,
                                 freeze_seg=freeze_seg,
                                 freeze_boundary=freeze_boundary,
+                                seg_mask_region_weight=seg_mask_region_weight,
+                                boundary_mask_region_weight=boundary_mask_region_weight,
                             )
                         )
                 else:
@@ -330,6 +333,8 @@ def train_one_epoch(
                             skeleton_filter_cfg=skeleton_filter_cfg,
                             freeze_seg=freeze_seg,
                             freeze_boundary=freeze_boundary,
+                            seg_mask_region_weight=seg_mask_region_weight,
+                            boundary_mask_region_weight=boundary_mask_region_weight,
                         )
                     )
             except StopIteration:
@@ -640,6 +645,14 @@ def main():
     ema_decay = semi_cfg.get("ema_decay", 0.999)
     unsup_weight = semi_cfg.get("unsup_weight", 1.0)
 
+    # 掩码区域损失权重配置
+    seg_mask_region_weight = semi_cfg.get("seg_mask_region_weight", 2.0)
+    boundary_mask_region_weight = semi_cfg.get("boundary_mask_region_weight", 0.3)
+    logger.info(
+        f"Mask region weights: seg={seg_mask_region_weight}, "
+        f"boundary={boundary_mask_region_weight}"
+    )
+
     # 边界锚点配置（Stage-1 冻结参考模型）
     boundary_anchor_cfg = semi_cfg.get("boundary_anchor", {})
     anchor_enabled = boundary_anchor_cfg.get("enabled", False)
@@ -667,13 +680,11 @@ def main():
         anchor_ramp_epochs = boundary_anchor_cfg.get("anchor_ramp_epochs", 20)
         pos_weight = boundary_anchor_cfg.get("pos_weight", 3.0)
         sharpen_temp = boundary_anchor_cfg.get("sharpen_temp", 0.5)
-        mask_region_weight = boundary_anchor_cfg.get("mask_region_weight", 0.3)
         logger.info(
             f"  anchor_floor={anchor_floor}, "
             f"ramp_epochs={anchor_ramp_epochs}, "
             f"pos_weight={pos_weight}, "
-            f"sharpen_temp={sharpen_temp}, "
-            f"mask_region_weight={mask_region_weight}"
+            f"sharpen_temp={sharpen_temp}"
         )
     else:
         logger.info("Boundary anchor: DISABLED (using MSE consistency)")
@@ -777,6 +788,8 @@ def main():
             skeleton_filter_cfg=skeleton_filter_cfg,
             freeze_seg=freeze_seg,
             freeze_boundary=freeze_boundary,
+            seg_mask_region_weight=seg_mask_region_weight,
+            boundary_mask_region_weight=boundary_mask_region_weight,
         )
         val_metrics = validate(student_model, val_loader, criterion, device)
         scheduler.step()
