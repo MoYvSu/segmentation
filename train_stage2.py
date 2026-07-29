@@ -560,7 +560,11 @@ def main():
         description="Stage-2 Semi-Supervised Fine-tuning (Mean Teacher + Boundary Prediction)"
     )
     parser.add_argument("--config", type=str, default="config/default_config.yaml")
-    parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--resume", type=str, default=None,
+        help="从 checkpoint 恢复训练（加载 decoder + optimizer + scheduler，继续旧 epoch）")
+    parser.add_argument("--init_from_checkpoint", type=str, default=None,
+        help="从指定 checkpoint 加载 decoder 权重，但重置 optimizer/scheduler/epoch "
+             "（用于分支切换：训练完一个分支后，从此 checkpoint 开始训练另一个分支）")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -586,9 +590,6 @@ def main():
         config["inference"].get("stage1_checkpoint", "outputs/stage1/best_model.pth"),
     )
     load_stage1_checkpoint(student_model, stage1_ckpt_path, device)
-
-    teacher_model = build_teacher_model(student_model)
-    logger.info("Teacher model created (EMA of student)")
 
     # 渐进式外观增强配置
     prog_aug_cfg = config.get("progressive_aug", {})
@@ -838,6 +839,30 @@ def main():
             "best_composite_score", checkpoint.get("best_val_iou", 0.0)
         )
         logger.info(f"Resumed from epoch {start_epoch}, best Composite Score: {best_composite_score:.4f}")
+
+    # --init_from_checkpoint: 仅加载 decoder 权重，重置训练状态（用于分支切换）
+    # 优先级高于 --resume：如果同时指定，init_from_checkpoint 覆盖 resume
+    init_ckpt_path = args.init_from_checkpoint or semi_cfg.get("init_from_checkpoint", "")
+    if init_ckpt_path:
+        if not os.path.exists(init_ckpt_path):
+            raise FileNotFoundError(f"Init checkpoint not found: {init_ckpt_path}")
+        init_checkpoint = torch.load(init_ckpt_path, map_location=device, weights_only=False)
+        student_model.decoder.load_state_dict(init_checkpoint["decoder_state_dict"])
+        start_epoch = 0
+        best_composite_score = 0.0
+        init_epoch = init_checkpoint.get("epoch", "?")
+        init_score = init_checkpoint.get(
+            "best_composite_score", init_checkpoint.get("best_val_iou", "?")
+        )
+        logger.info(
+            f"Init from checkpoint: {init_ckpt_path}\n"
+            f"  Source epoch: {init_epoch}, source best score: {init_score}\n"
+            f"  Decoder weights loaded, optimizer/scheduler/epoch RESET for branch switching"
+        )
+
+    # 创建教师模型（在所有 checkpoint 加载之后，确保教师同步最新学生权重）
+    teacher_model = build_teacher_model(student_model)
+    logger.info("Teacher model created (EMA of student)")
 
     logger.info("=" * 60)
     logger.info("Stage-2 Semi-Supervised Fine-tuning (Mean Teacher)")
