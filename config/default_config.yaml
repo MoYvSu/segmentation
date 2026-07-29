@@ -129,6 +129,11 @@ semi_supervised:
   unlabeled_dir: "data/unlabeled"
   # 输出目录（第二阶段 checkpoints）
   output_dir: "outputs/stage2"
+  # 从指定 checkpoint 初始化 decoder 权重（仅加载权重，重置 optimizer/scheduler/epoch）
+  # 用于分支切换：训练完一个分支后，从此 checkpoint 开始训练另一个分支
+  # 也可通过 CLI 参数 --init_from_checkpoint 覆盖
+  # 留空=禁用，填路径=启用（如 "outputs/stage2/best_model_stage2.pth"）
+  init_from_checkpoint: ""
   # EMA 衰减系数（基础值，启用 adaptive_ema 时根据当前 LR 动态调整）
   ema_decay: 0.999
   # 是否启用自适应 EMA 衰减（LR 高时降低 decay 让教师更快跟随，LR 低时提高 decay 增加稳定性）
