@@ -294,6 +294,8 @@ def train_one_epoch(
     augmentor=None, boundary_anchor_cfg=None, ref_model=None, anchor_alpha=1.0,
     skeleton_filter_cfg=None, freeze_seg=False, freeze_boundary=False,
     seg_mask_region_weight=2.0, boundary_mask_region_weight=0.3,
+    sobel_weight=1.0, tv_weight=0.1, tv_dilate_radius=3,
+    tv_bg_weight=1.0, tv_boundary_weight=0.1,
 ):
     """训练一个 epoch（双流混合 Batch + EMA 更新）。
 
@@ -306,6 +308,11 @@ def train_one_epoch(
         skeleton_filter_cfg: 骨架过滤配置，传入 compute_unsupervised_loss。
         freeze_seg: 冻结语义分支，跳过语义损失和 EMA 更新。
         freeze_boundary: 冻结边界分支，跳过边界损失和 EMA 更新。
+        sobel_weight: Sobel 梯度一致性损失权重。
+        tv_weight: 各向异性 TV 正则化权重。
+        tv_dilate_radius: TV 中边界区域膨胀半径（px）。
+        tv_bg_weight: 非边界区域 TV 权重。
+        tv_boundary_weight: 边界区域 TV 权重。
     """
     student_model.train()
     student_model.encoder.eval()
@@ -374,6 +381,11 @@ def train_one_epoch(
                                 freeze_boundary=freeze_boundary,
                                 seg_mask_region_weight=seg_mask_region_weight,
                                 boundary_mask_region_weight=boundary_mask_region_weight,
+                                sobel_weight=sobel_weight,
+                                tv_weight=tv_weight,
+                                tv_dilate_radius=tv_dilate_radius,
+                                tv_bg_weight=tv_bg_weight,
+                                tv_boundary_weight=tv_boundary_weight,
                             )
                         )
                 else:
@@ -390,6 +402,11 @@ def train_one_epoch(
                             freeze_boundary=freeze_boundary,
                             seg_mask_region_weight=seg_mask_region_weight,
                             boundary_mask_region_weight=boundary_mask_region_weight,
+                            sobel_weight=sobel_weight,
+                            tv_weight=tv_weight,
+                            tv_dilate_radius=tv_dilate_radius,
+                            tv_bg_weight=tv_bg_weight,
+                            tv_boundary_weight=tv_boundary_weight,
                         )
                     )
             except StopIteration:
@@ -791,16 +808,26 @@ def main():
 
         anchor_floor = boundary_anchor_cfg.get("anchor_floor", 0.3)
         anchor_ramp_epochs = boundary_anchor_cfg.get("anchor_ramp_epochs", 20)
-        pos_weight = boundary_anchor_cfg.get("pos_weight", 3.0)
-        sharpen_temp = boundary_anchor_cfg.get("sharpen_temp", 0.5)
         logger.info(
             f"  anchor_floor={anchor_floor}, "
-            f"ramp_epochs={anchor_ramp_epochs}, "
-            f"pos_weight={pos_weight}, "
-            f"sharpen_temp={sharpen_temp}"
+            f"ramp_epochs={anchor_ramp_epochs}"
         )
     else:
-        logger.info("Boundary anchor: DISABLED (using MSE consistency)")
+        logger.info("Boundary anchor: DISABLED (using teacher pseudo-labels only)")
+
+    # 边界一致性损失配置（梯度感知：MSE + Sobel + TV）
+    bnd_consist_cfg = semi_cfg.get("boundary_consistency", {})
+    sobel_weight = bnd_consist_cfg.get("sobel_weight", 1.0)
+    tv_weight = bnd_consist_cfg.get("tv_weight", 0.1)
+    tv_dilate_radius = bnd_consist_cfg.get("tv_dilate_radius", 3)
+    tv_bg_weight = bnd_consist_cfg.get("tv_bg_weight", 1.0)
+    tv_boundary_weight = bnd_consist_cfg.get("tv_boundary_weight", 0.1)
+    logger.info(
+        f"Boundary consistency (gradient): "
+        f"sobel_w={sobel_weight}, tv_w={tv_weight}, "
+        f"tv_dilate={tv_dilate_radius}, "
+        f"tv_bg={tv_bg_weight}, tv_bnd={tv_boundary_weight}"
+    )
 
     # 骨架过滤配置（教师边界伪标签形态学精炼）
     skeleton_filter_cfg = semi_cfg.get("skeleton_filter", {})
@@ -944,6 +971,11 @@ def main():
             freeze_boundary=freeze_boundary,
             seg_mask_region_weight=seg_mask_region_weight,
             boundary_mask_region_weight=boundary_mask_region_weight,
+            sobel_weight=sobel_weight,
+            tv_weight=tv_weight,
+            tv_dilate_radius=tv_dilate_radius,
+            tv_bg_weight=tv_bg_weight,
+            tv_boundary_weight=tv_boundary_weight,
         )
         val_metrics = validate(student_model, val_loader, criterion, device)
         scheduler.step()
