@@ -9,16 +9,19 @@ Mean Teacher 框架的无监督一致性损失。
 2. 学生路径（有梯度）：强增强图像 -> 学生模型 -> 预测概率图
 3. 一致性损失：
    - 语义通道：MSE（学生预测 vs 教师伪标签），Patch Masking 加权
-   - 边界通道：Stage-1 锚点 + EMA 教师渐进混合 + BCE 软目标 + pos_weight
+   - 边界通道：MSE + Sobel 梯度一致性 + 各向异性 TV 正则化
+     （Stage-1 锚点 + EMA 教师渐进混合作为伪标签）
 
-边界锚点机制（替代硬门控）：
+边界锚点机制：
   - Stage-1 模型用 GT 训练，边界预测稳定锐利，不会随训练漂移
   - 边界伪标签 = anchor_alpha * stage1_prob + (1-anchor_alpha) * teacher_prob
   - anchor_alpha 从 1.0 渐进衰减到 anchor_floor（如 0.3），始终保留锚点
-   - 使用 BCE 软目标（混合概率作为连续 target），温度锐化后接近二值
-   - pos_weight 放大正样本梯度，解决类别不平衡（边界像素仅占 2~5%）
-   - 温度锐化：将软目标推向 0/1 极端，防止背景概率膨胀
-   - 掩码区域降权：遮挡区域权重降低，防止 Patch Masking 圆斑过拟合
+
+梯度感知损失设计动机：
+  - 旧的 BCE 软目标 + 温度锐化 + pos_weight 链路像素级独立，缺乏空间结构约束
+  - 经历多轮训练后边界头展现雾状热力图（弥散低概率响应）
+  - Sobel 梯度一致性约束学生与教师在空间梯度结构上一致
+  - 各向异性 TV 在非边界区强惩罚（去雾），边界区弱惩罚（保锐）
 
 教师模型通过学生模型权重的 EMA（Exponential Moving Average）动态更新。
 """
@@ -120,6 +123,105 @@ def skeleton_filter_boundary(
     return torch.from_numpy(filtered_np).to(device=device, dtype=boundary_prob.dtype)
 
 
+def sobel_gradient_consistency(
+    pred_prob: torch.Tensor,
+    target_prob: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Sobel 梯度一致性损失。
+
+    对学生预测和教师伪标签分别施加 Sobel 算子，计算梯度幅值图的 L1 差异。
+    约束学生不仅在像素值上与教师一致，更在空间梯度结构上一致，
+    鼓励学生在边界位置产生与教师相同的锐利梯度响应。
+
+    Args:
+        pred_prob: [B, H, W] 学生边界概率（sigmoid 后）
+        target_prob: [B, H, W] 教师伪标签概率（无梯度）
+
+    Returns:
+        标量损失
+    """
+    # Sobel 卷积核
+    sobel_x = torch.tensor(
+        [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
+        dtype=pred_prob.dtype, device=pred_prob.device,
+    ).view(1, 1, 3, 3)
+    sobel_y = torch.tensor(
+        [[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
+        dtype=pred_prob.dtype, device=pred_prob.device,
+    ).view(1, 1, 3, 3)
+
+    # 添加通道维度用于 conv2d
+    pred = pred_prob.unsqueeze(1)        # [B, 1, H, W]
+    target = target_prob.unsqueeze(1)    # [B, 1, H, W]
+
+    # 计算梯度幅值
+    pred_gx = F.conv2d(pred, sobel_x, padding=1)
+    pred_gy = F.conv2d(pred, sobel_y, padding=1)
+    pred_grad = torch.sqrt(pred_gx ** 2 + pred_gy ** 2 + 1e-8)
+
+    with torch.no_grad():
+        target_gx = F.conv2d(target, sobel_x, padding=1)
+        target_gy = F.conv2d(target, sobel_y, padding=1)
+        target_grad = torch.sqrt(target_gx ** 2 + target_gy ** 2 + 1e-8)
+
+    # L1 损失
+    return (pred_grad - target_grad).abs().mean()
+
+
+def anisotropic_tv(
+    pred_prob: torch.Tensor,
+    target_prob: torch.Tensor,
+    dilate_radius: int = 3,
+    bg_weight: float = 1.0,
+    boundary_weight: float = 0.1,
+    threshold: float = 0.5,
+) -> torch.Tensor:
+    """
+    各向异性总变差正则化。
+
+    非边界区域施加强 TV 权重（抑制雾状噪声→干净归零），
+    边界区域施加弱 TV 权重（保留锐利边缘）。
+
+    边界/非边界区域通过教师伪标签的二值化+膨胀掩码区分。
+
+    Args:
+        pred_prob: [B, H, W] 学生边界概率
+        target_prob: [B, H, W] 教师伪标签概率（用于生成边界掩码）
+        dilate_radius: 边界区域膨胀半径（px）
+        bg_weight: 非边界区域 TV 权重
+        boundary_weight: 边界区域 TV 权重
+        threshold: 伪标签二值化阈值
+
+    Returns:
+        标量 TV 损失
+    """
+    # 生成边界区域掩码（二值化 + 膨胀）
+    with torch.no_grad():
+        boundary_binary = (target_prob > threshold).float().unsqueeze(1)  # [B, 1, H, W]
+        if dilate_radius > 0:
+            kernel_size = 2 * dilate_radius + 1
+            boundary_dilated = F.max_pool2d(
+                boundary_binary, kernel_size=kernel_size, stride=1, padding=dilate_radius
+            ).squeeze(1)  # [B, H, W]
+        else:
+            boundary_dilated = boundary_binary.squeeze(1)  # [B, H, W]
+
+    # 权重图：边界区域 = boundary_weight, 非边界 = bg_weight
+    weight_map = boundary_dilated * (boundary_weight - bg_weight) + bg_weight  # [B, H, W]
+
+    # TV = |dx| + |dy|
+    dx = (pred_prob[:, :, 1:] - pred_prob[:, :, :-1]).abs()  # [B, H, W-1]
+    dy = (pred_prob[:, 1:, :] - pred_prob[:, :-1, :]).abs()  # [B, H-1, W]
+
+    # 对齐权重图维度
+    wx = weight_map[:, :, :-1]  # [B, H, W-1]
+    wy = weight_map[:, :-1, :]  # [B, H-1, W]
+
+    tv = (dx * wx).mean() + (dy * wy).mean()
+    return tv
+
+
 def compute_unsupervised_loss(
     student_model: nn.Module,
     teacher_model: nn.Module,
@@ -135,6 +237,11 @@ def compute_unsupervised_loss(
     freeze_boundary: bool = False,
     seg_mask_region_weight: float = 2.0,
     boundary_mask_region_weight: float = 0.3,
+    sobel_weight: float = 1.0,
+    tv_weight: float = 0.1,
+    tv_dilate_radius: int = 3,
+    tv_bg_weight: float = 1.0,
+    tv_boundary_weight: float = 0.1,
 ) -> Tuple[torch.Tensor, float, float]:
     """
     计算 Mean Teacher 无监督一致性损失。
@@ -142,12 +249,12 @@ def compute_unsupervised_loss(
     教师模型（EMA）对干净图像生成语义伪标签，学生模型对强增强图像生成预测。
 
     语义通道：MSE 一致性损失，Patch Masking 加权。
-    边界通道：
-      - 如果 boundary_anchor_cfg 启用且有 ref_model -> Stage-1 锚点 + EMA 渐进混合 + BCE 软目标
-      - 否则 -> 回退到 MSE 一致性损失
-
-    骨架过滤（可选）：在教师边界概率输出后、混合/锐化前，施加形态学骨架过滤，
-    去除弥散噪声和拓扑毛刺，精炼边界伪标签。
+    边界通道：MSE + Sobel 梯度一致性 + 各向异性 TV 正则化
+      - 伪标签 = Stage-1 锚点混合（如果启用）或纯教师
+      - 骨架过滤在教师输出后、锚点混合前施加
+      - MSE 提供像素级一致性基础
+      - Sobel 梯度一致性约束空间梯度结构一致
+      - 各向异性 TV 抑制非边界区雾状噪声，保留边界锐利度
 
     Args:
         student_model: 学生模型（有梯度）
@@ -158,8 +265,8 @@ def compute_unsupervised_loss(
         output_size: 可选，输出尺寸 (H, W)
         boundary_anchor_cfg: 边界锚点配置，包含:
             - enabled: bool
-            - pos_weight: float（正样本重加权因子，负样本保持 1.0）
-            - sharpen_temp: float（温度锐化参数，<1 锐化，1=不锐化）
+            - anchor_floor: float（锚点权重下限）
+            - anchor_ramp_epochs: int（衰减 epoch 数）
         ref_model: Stage-1 冻结参考模型（提供稳定边界伪标签）
         anchor_alpha: Stage-1 锚点权重（1.0=纯 Stage-1, 0.0=纯 EMA 教师）
         skeleton_filter_cfg: 骨架过滤配置，包含:
@@ -171,6 +278,11 @@ def compute_unsupervised_loss(
         freeze_boundary: 冻结边界分支时为 True，跳过边界一致性损失。
         seg_mask_region_weight: 语义通道掩码区域权重（1.0=不降权，2.0=加倍）。
         boundary_mask_region_weight: 边界通道掩码区域权重（1.0=不降权，0.3=降权）。
+        sobel_weight: Sobel 梯度一致性损失权重。
+        tv_weight: 各向异性 TV 正则化权重。
+        tv_dilate_radius: TV 中边界区域膨胀半径（px）。
+        tv_bg_weight: 非边界区域 TV 权重。
+        tv_boundary_weight: 边界区域 TV 权重。
 
     Returns:
         total_loss: 标量张量，总一致性损失
@@ -228,47 +340,56 @@ def compute_unsupervised_loss(
     # ---- 边界一致性损失 ----
     if freeze_boundary:
         loss_boundary = torch.tensor(0.0, device=device, requires_grad=False)
-    elif boundary_anchor_cfg is not None and ref_model is not None and boundary_anchor_cfg.get("enabled", False):
-        pos_weight_val = boundary_anchor_cfg.get("pos_weight", 3.0)
-        sharpen_temp = boundary_anchor_cfg.get("sharpen_temp", 0.5)
+    else:
+        # 伪标签准备：Stage-1 锚点混合（如果启用）或纯教师
+        if (
+            boundary_anchor_cfg is not None
+            and ref_model is not None
+            and boundary_anchor_cfg.get("enabled", False)
+        ):
+            with torch.no_grad():
+                ref_output = ref_model(img_weak, output_size=output_size)
+                ref_boundary_prob = torch.sigmoid(ref_output[:, 1])
+            # 渐进混合：anchor_alpha * stage1 + (1-anchor_alpha) * ema_teacher
+            target_boundary_prob = (
+                anchor_alpha * ref_boundary_prob
+                + (1.0 - anchor_alpha) * teacher_boundary_prob
+            )
+        else:
+            target_boundary_prob = teacher_boundary_prob
 
-        # Stage-1 锚点：冻结参考模型提供稳定边界概率
-        with torch.no_grad():
-            ref_output = ref_model(img_weak, output_size=output_size)
-            ref_boundary_prob = torch.sigmoid(ref_output[:, 1])
-
-        # 渐进混合：anchor_alpha * stage1 + (1-anchor_alpha) * ema_teacher
-        mixed_boundary_prob = (
-            anchor_alpha * ref_boundary_prob
-            + (1.0 - anchor_alpha) * teacher_boundary_prob
-        )
-
-        # 温度锐化：将软目标推向 0/1 极端，防止背景概率膨胀
-        # p_sharp = p^(1/T) / (p^(1/T) + (1-p)^(1/T))
-        if sharpen_temp < 1.0:
-            p = mixed_boundary_prob.clamp(1e-6, 1.0 - 1e-6)
-            p_sharp = p.pow(1.0 / sharpen_temp)
-            mixed_boundary_prob = p_sharp / (p_sharp + (1.0 - p).pow(1.0 / sharpen_temp))
-
-        # BCE 软目标（锐化后的混合概率作为 target）+ pos_weight 重加权
-        student_boundary_logits = student_output[:, 1]  # [B, H, W]
-        bce = F.binary_cross_entropy_with_logits(
-            student_boundary_logits, mixed_boundary_prob, reduction="none"
-        )  # [B, H, W]
-
-        # pos_weight 矩阵：正样本（混合概率 > 0.5）放大，负样本保持 1.0
-        weight_matrix = torch.ones_like(mixed_boundary_prob)
-        weight_matrix[mixed_boundary_prob > 0.5] = pos_weight_val
-
-        # 边界通道权重：掩码区域降权，防止 Patch Masking 圆斑过拟合
-        # 遮挡区域=boundary_mask_region_weight, 非遮挡=1.0
+        # 掩码区域降权
         bnd_weight_map = 1.0 + pm * (boundary_mask_region_weight - 1.0)
 
-        loss_boundary = (weight_matrix * bce * bnd_weight_map).mean()
-    else:
-        # 回退到 MSE 一致性损失
-        boundary_mse = (student_boundary_prob - teacher_boundary_prob) ** 2
-        loss_boundary = (boundary_mse * seg_weight_map).mean()
+        # 1. MSE 像素一致性（基础项）
+        boundary_mse = (student_boundary_prob - target_boundary_prob) ** 2
+        loss_mse = (boundary_mse * bnd_weight_map).mean()
+
+        # 2. Sobel 梯度一致性
+        loss_sobel = torch.tensor(0.0, device=device)
+        if sobel_weight > 0:
+            loss_sobel = sobel_gradient_consistency(
+                student_boundary_prob, target_boundary_prob
+            )
+
+        # 3. 各向异性 TV 正则化
+        loss_tv = torch.tensor(0.0, device=device)
+        if tv_weight > 0:
+            tv_threshold = (
+                skeleton_filter_cfg.get("threshold", 0.5)
+                if skeleton_filter_cfg
+                else 0.5
+            )
+            loss_tv = anisotropic_tv(
+                student_boundary_prob,
+                target_boundary_prob,
+                dilate_radius=tv_dilate_radius,
+                bg_weight=tv_bg_weight,
+                boundary_weight=tv_boundary_weight,
+                threshold=tv_threshold,
+            )
+
+        loss_boundary = loss_mse + sobel_weight * loss_sobel + tv_weight * loss_tv
 
     total_loss = loss_seg + loss_boundary
 

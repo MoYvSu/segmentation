@@ -191,16 +191,27 @@ semi_supervised:
   boundary_mask_region_weight: 0.3
   # 边界锚点配置（Stage-1 冻结模型提供稳定边界伪标签，替代硬门控）
   boundary_anchor:
-    # 是否启用 Stage-1 锚点 + EMA 渐进混合 + BCE 软目标（false 时回退到 MSE）
+    # 是否启用 Stage-1 锚点 + EMA 渐进混合（false 时纯教师伪标签）
     enabled: true
     # Stage-1 锚点权重下限（始终保留锚点防止边界头崩塌）
     anchor_floor: 0.3
     # 从 1.0 衰减到 anchor_floor 的 epoch 数
     anchor_ramp_epochs: 20
-    # 正样本重加权因子（负样本保持 1.0 满格梯度，正样本乘以 pos_weight 放大）
-    pos_weight: 3.0
-    # 温度锐化参数（<1 锐化软目标到接近二值，1.0=不锐化，防止背景概率膨胀）
-    sharpen_temp: 0.5
+
+  # 边界一致性损失配置（梯度感知：MSE + Sobel 梯度一致性 + 各向异性 TV）
+  # 动机：旧 BCE 软目标+温度锐化+pos_weight 链路像素级独立，缺乏空间结构约束，
+  # 多轮训练后边界头展现雾状热力图。Sobel 约束空间梯度一致，TV 抑制非边界区噪声。
+  boundary_consistency:
+    # Sobel 梯度一致性损失权重（约束学生与教师在空间梯度结构上一致）
+    sobel_weight: 1.0
+    # 各向异性 TV 正则化权重（非边界区强惩罚去雾，边界区弱惩罚保锐）
+    tv_weight: 0.1
+    # TV 中边界区域膨胀半径（px），用于区分边界区/非边界区
+    tv_dilate_radius: 3
+    # 非边界区域 TV 权重（越大越强抑制雾状噪声）
+    tv_bg_weight: 1.0
+    # 边界区域 TV 权重（越小越保留锐利边缘）
+    tv_boundary_weight: 0.1
 
   # 冻结开关（单独训练某个分支）
   # 用于解决语义头和边界头统一参数不匹配导致的训练困难
