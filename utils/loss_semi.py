@@ -9,7 +9,7 @@ Mean Teacher 框架的无监督一致性损失。
 2. 学生路径（有梯度）：强增强图像 -> 学生模型 -> 预测概率图
 3. 一致性损失：
    - 语义通道：MSE（学生预测 vs 教师伪标签），Patch Masking 加权
-   - 边界通道：MSE + Sobel 梯度一致性 + 各向异性 TV 正则化
+   - 边界通道：MSE + Sobel 梯度一致性 + 各向异性 TV + 背景抑制
      （Stage-1 锚点 + EMA 教师渐进混合作为伪标签）
 
 边界锚点机制：
@@ -17,15 +17,21 @@ Mean Teacher 框架的无监督一致性损失。
   - 边界伪标签 = anchor_alpha * stage1_prob + (1-anchor_alpha) * teacher_prob
   - anchor_alpha 从 1.0 渐进衰减到 anchor_floor（如 0.3），始终保留锚点
 
+骨架过滤时序：
+  - 骨架过滤在锚点混合之后施加，对最终目标伪标签过滤
+  - 这样无论 ref_model 还是教师引入的弥散噪声都会被清除
+
 梯度感知损失设计动机：
   - 旧的 BCE 软目标 + 温度锐化 + pos_weight 链路像素级独立，缺乏空间结构约束
   - 经历多轮训练后边界头展现雾状热力图（弥散低概率响应）
   - Sobel 梯度一致性约束学生与教师在空间梯度结构上一致
   - 各向异性 TV 在非边界区强惩罚（去雾），边界区弱惩罚（保锐）
+  - 背景抑制损失直接将非边界区学生预测压向零
 
 教师模型通过学生模型权重的 EMA（Exponential Moving Average）动态更新。
 """
 
+import logging
 from typing import Optional, Tuple
 
 import cv2
@@ -33,6 +39,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+logger = logging.getLogger(__name__)
 
 
 def skeleton_filter_boundary(
@@ -42,7 +50,7 @@ def skeleton_filter_boundary(
     blur_sigma: float = 1.0,
 ) -> torch.Tensor:
     """
-    对教师边界概率图施加骨架过滤（形态学先验精炼伪标签）。
+    对边界概率图施加骨架过滤（形态学先验精炼伪标签）。
 
     流程（逐样本）：
       1. 概率图 > threshold -> 二值边界
@@ -50,10 +58,11 @@ def skeleton_filter_boundary(
       3. 膨胀 dilate_width -> 可配置宽度边界带
       4. 高斯模糊（blur_sigma > 0 时）-> 软概率 [0, 1]
 
-    边界情况：边界像素过少或骨架化为空时，返回原始概率图（跳过过滤）。
+    边界情况：边界像素过少或骨架化为空时，返回原始概率图（跳过过滤），
+    并记录 debug 日志以便监控跳过率。
 
     Args:
-        boundary_prob: [B, H, W] 教师边界概率图（sigmoid 后，值域 [0, 1]）
+        boundary_prob: [B, H, W] 边界概率图（sigmoid 后，值域 [0, 1]）
         threshold: 二值化阈值
         dilate_width: 骨架膨胀宽度（最终边界宽度 = 2*w+1 px）
         blur_sigma: 高斯模糊 sigma（0=硬二值目标，>0=软目标）
@@ -68,15 +77,20 @@ def skeleton_filter_boundary(
     prob_np = boundary_prob.detach().cpu().numpy()
     filtered_np = np.zeros_like(prob_np)
 
+    skip_count = 0
+
     for i in range(B):
         p = prob_np[i]  # [H, W]
 
         # Step 1: 二值化
         binary = (p > threshold).astype(np.uint8) * 255
 
+        nonzero_count = cv2.countNonZero(binary)
+
         # 边界像素过少 -> 跳过
-        if cv2.countNonZero(binary) < 10:
+        if nonzero_count < 10:
             filtered_np[i] = p
+            skip_count += 1
             continue
 
         # Step 2: 骨架化
@@ -88,9 +102,12 @@ def skeleton_filter_boundary(
             from skimage.morphology import skeletonize as sk_skeletonize
             skeleton = (sk_skeletonize(binary > 0) * 255).astype(np.uint8)
 
+        skel_count = cv2.countNonZero(skeleton)
+
         # 骨架化为空 -> 跳过
-        if cv2.countNonZero(skeleton) < 5:
+        if skel_count < 5:
             filtered_np[i] = p
+            skip_count += 1
             continue
 
         # Step 3: 膨胀
@@ -119,6 +136,12 @@ def skeleton_filter_boundary(
                 belt_float = belt_float / mx
 
         filtered_np[i] = belt_float
+
+    if skip_count > 0:
+        logger.debug(
+            f"skeleton_filter: {skip_count}/{B} samples skipped "
+            f"(threshold={threshold}, too few boundary pixels or empty skeleton)"
+        )
 
     return torch.from_numpy(filtered_np).to(device=device, dtype=boundary_prob.dtype)
 
@@ -222,6 +245,34 @@ def anisotropic_tv(
     return tv
 
 
+def background_suppression_loss(
+    pred_prob: torch.Tensor,
+    target_prob: torch.Tensor,
+    threshold: float = 0.1,
+) -> torch.Tensor:
+    """
+    背景抑制损失。
+
+    对非边界区域（目标伪标签 < threshold）的学生预测施加 L1 惩罚，
+    强力将背景区推向零，抑制弥散雾状响应。
+
+    与 TV 正则化互补：TV 抑制像素间变化（平滑），背景抑制直接压低绝对值。
+
+    Args:
+        pred_prob: [B, H, W] 学生边界概率
+        target_prob: [B, H, W] 教师伪标签概率（用于区分背景区）
+        threshold: 低于此值视为背景区域
+
+    Returns:
+        标量损失
+    """
+    with torch.no_grad():
+        bg_mask = (target_prob < threshold).float()  # [B, H, W], 1=背景
+
+    # 背景区域学生预测的 L1 惩罚
+    return (pred_prob * bg_mask).mean()
+
+
 def compute_unsupervised_loss(
     student_model: nn.Module,
     teacher_model: nn.Module,
@@ -242,6 +293,8 @@ def compute_unsupervised_loss(
     tv_dilate_radius: int = 3,
     tv_bg_weight: float = 1.0,
     tv_boundary_weight: float = 0.1,
+    bg_suppress_weight: float = 0.5,
+    bg_suppress_threshold: float = 0.1,
 ) -> Tuple[torch.Tensor, float, float]:
     """
     计算 Mean Teacher 无监督一致性损失。
@@ -249,12 +302,13 @@ def compute_unsupervised_loss(
     教师模型（EMA）对干净图像生成语义伪标签，学生模型对强增强图像生成预测。
 
     语义通道：MSE 一致性损失，Patch Masking 加权。
-    边界通道：MSE + Sobel 梯度一致性 + 各向异性 TV 正则化
+    边界通道：MSE + Sobel 梯度一致性 + 各向异性 TV + 背景抑制
       - 伪标签 = Stage-1 锚点混合（如果启用）或纯教师
-      - 骨架过滤在教师输出后、锚点混合前施加
+      - 骨架过滤在锚点混合之后施加（对最终目标伪标签过滤）
       - MSE 提供像素级一致性基础
       - Sobel 梯度一致性约束空间梯度结构一致
       - 各向异性 TV 抑制非边界区雾状噪声，保留边界锐利度
+      - 背景抑制直接将非边界区学生预测压向零
 
     Args:
         student_model: 学生模型（有梯度）
@@ -283,6 +337,8 @@ def compute_unsupervised_loss(
         tv_dilate_radius: TV 中边界区域膨胀半径（px）。
         tv_bg_weight: 非边界区域 TV 权重。
         tv_boundary_weight: 边界区域 TV 权重。
+        bg_suppress_weight: 背景抑制损失权重。
+        bg_suppress_threshold: 背景抑制阈值，低于此值视为背景区域。
 
     Returns:
         total_loss: 标量张量，总一致性损失
@@ -309,15 +365,6 @@ def compute_unsupervised_loss(
         teacher_output = teacher_model(img_weak, output_size=output_size)
         teacher_seg_prob = torch.sigmoid(teacher_output[:, 0])
         teacher_boundary_prob = torch.sigmoid(teacher_output[:, 1])
-
-        # 骨架过滤：精炼教师边界伪标签（去除弥散噪声和拓扑毛刺）
-        if skeleton_filter_cfg is not None and skeleton_filter_cfg.get("enabled", False):
-            teacher_boundary_prob = skeleton_filter_boundary(
-                teacher_boundary_prob,
-                threshold=skeleton_filter_cfg.get("threshold", 0.5),
-                dilate_width=skeleton_filter_cfg.get("dilate_width", 1),
-                blur_sigma=skeleton_filter_cfg.get("blur_sigma", 1.0),
-            )
 
     # ---- 学生路径（有梯度）----
     student_output = student_model(img_strong, output_size=output_size)
@@ -358,6 +405,17 @@ def compute_unsupervised_loss(
         else:
             target_boundary_prob = teacher_boundary_prob
 
+        # 骨架过滤：在锚点混合之后施加，对最终目标伪标签过滤
+        # 这样无论 ref_model 还是教师引入的弥散噪声都会被清除
+        with torch.no_grad():
+            if skeleton_filter_cfg is not None and skeleton_filter_cfg.get("enabled", False):
+                target_boundary_prob = skeleton_filter_boundary(
+                    target_boundary_prob,
+                    threshold=skeleton_filter_cfg.get("threshold", 0.5),
+                    dilate_width=skeleton_filter_cfg.get("dilate_width", 1),
+                    blur_sigma=skeleton_filter_cfg.get("blur_sigma", 1.0),
+                )
+
         # 掩码区域降权
         bnd_weight_map = 1.0 + pm * (boundary_mask_region_weight - 1.0)
 
@@ -389,7 +447,21 @@ def compute_unsupervised_loss(
                 threshold=tv_threshold,
             )
 
-        loss_boundary = loss_mse + sobel_weight * loss_sobel + tv_weight * loss_tv
+        # 4. 背景抑制损失
+        loss_bg = torch.tensor(0.0, device=device)
+        if bg_suppress_weight > 0:
+            loss_bg = background_suppression_loss(
+                student_boundary_prob,
+                target_boundary_prob,
+                threshold=bg_suppress_threshold,
+            )
+
+        loss_boundary = (
+            loss_mse
+            + sobel_weight * loss_sobel
+            + tv_weight * loss_tv
+            + bg_suppress_weight * loss_bg
+        )
 
     total_loss = loss_seg + loss_boundary
 
