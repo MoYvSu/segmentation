@@ -296,6 +296,7 @@ def train_one_epoch(
     seg_mask_region_weight=2.0, boundary_mask_region_weight=0.3,
     sobel_weight=1.0, tv_weight=0.1, tv_dilate_radius=3,
     tv_bg_weight=1.0, tv_boundary_weight=0.1,
+    bg_suppress_weight=0.5, bg_suppress_threshold=0.1,
 ):
     """训练一个 epoch（双流混合 Batch + EMA 更新）。
 
@@ -313,6 +314,8 @@ def train_one_epoch(
         tv_dilate_radius: TV 中边界区域膨胀半径（px）。
         tv_bg_weight: 非边界区域 TV 权重。
         tv_boundary_weight: 边界区域 TV 权重。
+        bg_suppress_weight: 背景抑制损失权重。
+        bg_suppress_threshold: 背景抑制阈值，低于此值视为背景区域。
     """
     student_model.train()
     student_model.encoder.eval()
@@ -386,6 +389,8 @@ def train_one_epoch(
                                 tv_dilate_radius=tv_dilate_radius,
                                 tv_bg_weight=tv_bg_weight,
                                 tv_boundary_weight=tv_boundary_weight,
+                                bg_suppress_weight=bg_suppress_weight,
+                                bg_suppress_threshold=bg_suppress_threshold,
                             )
                         )
                 else:
@@ -407,6 +412,8 @@ def train_one_epoch(
                             tv_dilate_radius=tv_dilate_radius,
                             tv_bg_weight=tv_bg_weight,
                             tv_boundary_weight=tv_boundary_weight,
+                            bg_suppress_weight=bg_suppress_weight,
+                            bg_suppress_threshold=bg_suppress_threshold,
                         )
                     )
             except StopIteration:
@@ -822,11 +829,14 @@ def main():
     tv_dilate_radius = bnd_consist_cfg.get("tv_dilate_radius", 3)
     tv_bg_weight = bnd_consist_cfg.get("tv_bg_weight", 1.0)
     tv_boundary_weight = bnd_consist_cfg.get("tv_boundary_weight", 0.1)
+    bg_suppress_weight = bnd_consist_cfg.get("bg_suppress_weight", 0.5)
+    bg_suppress_threshold = bnd_consist_cfg.get("bg_suppress_threshold", 0.1)
     logger.info(
         f"Boundary consistency (gradient): "
         f"sobel_w={sobel_weight}, tv_w={tv_weight}, "
         f"tv_dilate={tv_dilate_radius}, "
-        f"tv_bg={tv_bg_weight}, tv_bnd={tv_boundary_weight}"
+        f"tv_bg={tv_bg_weight}, tv_bnd={tv_boundary_weight}, "
+        f"bg_suppress_w={bg_suppress_weight}, bg_suppress_th={bg_suppress_threshold}"
     )
 
     # 骨架过滤配置（教师边界伪标签形态学精炼）
@@ -976,6 +986,8 @@ def main():
             tv_dilate_radius=tv_dilate_radius,
             tv_bg_weight=tv_bg_weight,
             tv_boundary_weight=tv_boundary_weight,
+            bg_suppress_weight=bg_suppress_weight,
+            bg_suppress_threshold=bg_suppress_threshold,
         )
         val_metrics = validate(student_model, val_loader, criterion, device)
         scheduler.step()
