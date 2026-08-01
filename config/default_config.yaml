@@ -68,7 +68,7 @@ train:
   amp: false
   focal_gamma: 2.0
   focal_alpha: 0.75
-  boundary_alpha: 1.5
+  boundary_alpha: 3.0
   # 复合评分权重（best_model 保存依据）
   composite_sem_weight: 0.2
   composite_boundary_weight: 0.8
@@ -91,16 +91,16 @@ boundary:
 # 推理配置
 # -----------------------------------------------------------------------------
 inference:
-  test_dir: "data/smoketest"
-  output_dir: "outputs/bdtest"
+  test_dir: "data/test"
+  output_dir: "outputs/inference"
   threshold: 0.5
   min_instance_area: 500
   max_instance_id: 255
-  boundary_threshold: 0.5
+  boundary_threshold: 0.3
   watershed_dilate_width: 1
-  checkpoint_stage: "stage2"
+  checkpoint_stage: "stage1"
   stage1_checkpoint: "outputs/stage1/best_model.pth"
-  stage2_checkpoint: "outputs/stage2/stage2_epoch30.pth"
+  stage2_checkpoint: "outputs/stage2/stage2_epoch5.pth"
 
 # -----------------------------------------------------------------------------
 # 主动学习配置
@@ -129,71 +129,87 @@ semi_supervised:
   unlabeled_dir: "data/unlabeled"
   # 输出目录（第二阶段 checkpoints）
   output_dir: "outputs/stage2"
+
   # 从指定 checkpoint 初始化 decoder 权重（仅加载权重，重置 optimizer/scheduler/epoch）
   # 用于分支切换：训练完一个分支后，从此 checkpoint 开始训练另一个分支
   # 也可通过 CLI 参数 --init_from_checkpoint 覆盖
   # 留空=禁用，填路径=启用（如 "outputs/stage2/best_model_stage2.pth"）
-  init_from_checkpoint: ""
+  init_from_checkpoint: "outputs/stage2/best_seg_model/stage2_epoch50.pth"
+  
   # EMA 衰减系数（基础值，启用 adaptive_ema 时根据当前 LR 动态调整）
-  ema_decay: 0.999
+  ema_decay: 0.996
   # 是否启用自适应 EMA 衰减（LR 高时降低 decay 让教师更快跟随，LR 低时提高 decay 增加稳定性）
-  adaptive_ema: true
+  adaptive_ema: false
   # 边界伪标签源模式（实验对比用）
   # "ema": EMA 教师伪标签 + Stage-1 锚点混合（默认，当前行为）
   # "stage1_direct": 直接使用 Stage-1 冻结模型输出作为伪标签（无 EMA 滞后）
   # "self_consistency": 学生弱增强预测（stop-gradient）作为伪标签（无 EMA 依赖）
-  boundary_teacher_mode: "ema"
+  boundary_teacher_mode: "stage1_direct"
+  # stage1_direct 离线伪标签缓存（推荐）：
+  # 先运行 tools/precompute_pseudo_labels.py 生成 Stage-1 边界目标缓存，
+  # 训练时直接从缓存读取，免去每 step 的 ref_model 前向，
+  # 并可对无边界响应的低质量无标签图做剔除（exclude.txt）。
+  use_cached_pseudo_labels: true
+  pseudo_label_cache_dir: "outputs/pseudo_labels/stage1_boundary"
+  
   # 无监督损失权重
-  unsup_weight: 1.0
+  unsup_weight: 0.1
   # 无监督权重 sigmoid ramp-up 长度（epoch 数，前 N 个 epoch 从 0 渐进到 unsup_weight）
   # 解决训练初期教师伪标签不可靠的问题
   unsup_rampup_epochs: 10
   # 训练轮数
-  epochs: 50
+  epochs: 100
   # 学习率
   learning_rate: 5.0e-5
   # 语义分支学习率比例（seg lr = seg_lr_ratio * learning_rate）
   seg_lr_ratio: 0.1
   # 边界分支学习率比例（boundary lr = boundary_lr_ratio * learning_rate）
-  boundary_lr_ratio: 0.1
+  boundary_lr_ratio: 0.02
+  
   # 学习率调度模式："cosine"（旧余弦退火）或 "flat_decay"（新三阶段：warmup→恒定→温和衰减）
   lr_schedule: "flat_decay"
   # warmup 轮数
   warmup_epochs: 5
   # warmup 起始学习率比例（lr = warmup_start_factor * base_lr）
   warmup_start_factor: 0.01
+  
   # cosine 衰减终点学习率比例（lr = cosine_end_factor * base_lr）[仅 lr_schedule=cosine 时生效]
   cosine_end_factor: 0.0
   # 恒定阶段长度（epoch 数，warmup 之后）[仅 lr_schedule=flat_decay 时生效]
   flat_epochs: 30
   # 温和衰减终点学习率比例（lr = decay_end_factor * base_lr）[仅 lr_schedule=flat_decay 时生效]
   decay_end_factor: 0.2
+  
   # 批量大小
-  batch_size_labeled: 4
-  batch_size_unlabeled: 4
+  batch_size_labeled: 5
+  batch_size_unlabeled: 5
   # 无标签采样限制（0=不限制）
-  unlabeled_samples_per_epoch: 0
+  unlabeled_samples_per_epoch: 250
+  
   # 保存 checkpoints
   save_checkpoints: true
   # checkpoint 与监控推理间隔（epoch 数）
   checkpoint_interval: 5
+  
   # 训练监控推理（保存语义+边界概率图演进）
   monitor:
     # 监控图像目录（相对 project_root）
     image_dir: "data/test"
     # 监控图像数量
-    num_images: 3
+    num_images: 10
     # 监控输出目录
     output_dir: "outputs/stage2/monitor"
+    
   # Random Patch Masking 参数
-  patch_mask_ratio: 0.3
+  patch_mask_ratio: 0.5
   patch_mask_size: 64
-  num_patches: 8
+  num_patches: 12
   # 掩码区域损失权重配置（控制遮挡区域在无监督损失中的贡献）
   # 语义通道：低频面状特征，鼓励从上下文推断，默认加倍
-  seg_mask_region_weight: 2.0
+  seg_mask_region_weight: 1.5
   # 边界通道：高频线状特征，防止圆斑过拟合，默认降权
-  boundary_mask_region_weight: 0.3
+  boundary_mask_region_weight: 1.0
+  
   # 边界锚点配置（Stage-1 冻结模型提供稳定边界伪标签，替代硬门控）
   boundary_anchor:
     # 是否启用 Stage-1 锚点 + EMA 渐进混合（false 时纯教师伪标签）
@@ -208,43 +224,53 @@ semi_supervised:
   # 多轮训练后边界头展现雾状热力图。Sobel 约束空间梯度一致，TV 抑制非边界区噪声。
   boundary_consistency:
     # Sobel 梯度一致性损失权重（约束学生与教师在空间梯度结构上一致）
-    sobel_weight: 1.0
+    # 目标在背景区梯度为 0，Sobel 会把学生输出的凸起压平；
+    # 此前权重过高是输出区间被压缩的原因之一，调低以保留边界幅度
+    sobel_weight: 0.5
     # 各向异性 TV 正则化权重（非边界区强惩罚去雾，边界区弱惩罚保锐）
-    tv_weight: 0.1
+    tv_weight: 0.05
     # TV 中边界区域膨胀半径（px），用于区分边界区/非边界区
-    tv_dilate_radius: 3
+    tv_dilate_radius: 2
     # 非边界区域 TV 权重（越大越强抑制雾状噪声）
     tv_bg_weight: 1.0
     # 边界区域 TV 权重（越小越保留锐利边缘）
     tv_boundary_weight: 0.1
     # 背景抑制损失权重（非边界区学生预测 L1 惩罚，直接压向零）
-    bg_suppress_weight: 0.5
+    # 过高会把"全零/低值输出"变成稳定吸引子（下压力 > 正样本抬升力），
+    # 这是边界输出区间被压缩的根本原因之一，务必保持低权重
+    bg_suppress_weight: 0.1
     # 背景抑制阈值（目标伪标签低于此值视为背景区域）
-    bg_suppress_threshold: 0.1
+    bg_suppress_threshold: 0.05
+    # 正样本像素加权：目标 > 0.5 的像素在一致性损失中额外放大
+    # （直接扭转稀疏正样本 vs 大面积背景的梯度平衡）
+    pos_weight: 5.0
+    # 边界-背景 margin 损失：约束"边界像素均值 − 背景像素均值 ≥ margin"，
+    # 直接拉开学生输出的边界/背景差值（当前症状为差值 < 0.4）
+    margin_loss_weight: 0.5
+    margin: 0.4
 
   # 冻结开关（单独训练某个分支）
   # 用于解决语义头和边界头统一参数不匹配导致的训练困难
   # 两个都为 false 时维持联合训练（默认行为）
   freeze:
     # 冻结语义分支（seg_fpn + seg_branch），仅训练边界分支
-    seg_branch: false
+    seg_branch: true
     # 冻结边界分支（boundary_fpn + boundary_branch），仅训练语义分支
     boundary_branch: false
 
-  # 骨架过滤配置（边界伪标签形态学精炼）
-  # 在 Stage-1 锚点混合之后施加，对最终目标伪标签过滤，
+  # 骨架过滤配置（教师边界伪标签形态学精炼）
+  # 在教师输出边界概率后、与 Stage-1 锚点混合前，施加骨架化+膨胀，
   # 去除弥散噪声和拓扑毛刺，使边界伪标签更锐利、更拓扑合理。
   # 仍属无监督范畴（形态学先验，不使用 GT 标签）。
   skeleton_filter:
     # 是否启用骨架过滤
     enabled: true
     # 二值化阈值（概率图 > threshold 视为边界）
-    # 0.3 比旧的 0.5 更低，确保教师预测较弱时仍能触发骨架化
-    threshold: 0.3
+    threshold: 0.4
     # 骨架膨胀宽度（最终边界宽度 = 2*width+1 px）
-    dilate_width: 1
+    dilate_width: 2
     # 高斯模糊 sigma（0=硬二值目标，>0=软目标，保留梯度信息）
-    blur_sigma: 1.0
+    blur_sigma: 0.01
 
 # -----------------------------------------------------------------------------
 # 渐进式外观增强配置（Stage 2: 学生模型输入专用）
@@ -256,9 +282,9 @@ progressive_aug:
   # 是否启用渐进式外观增强
   enabled: true
   # 增强起始 epoch（之前 prob=0）
-  start_epoch: 0
+  start_epoch: 5
   # 线性增长期长度（epoch 数）
-  ramp_epochs: 10
+  ramp_epochs: 20
   # 最终增强概率（达到 ramp_end 后维持）
   max_prob: 0.8
   # 亮度抖动范围（乘法因子）
