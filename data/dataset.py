@@ -212,6 +212,37 @@ def random_crop(
     return image_c, semantic_c, boundary_c, weight_c
 
 
+def split_train_val_indices(
+    n_total: int,
+    train_ratio: float = 0.8,
+    seed: int = 42,
+    split: str = "train",
+) -> np.ndarray:
+    """按固定 seed 生成与 BoundaryDataset 完全一致的 train/val 索引划分。
+
+    先用 seed 重置全局随机状态，再对 [0, n_total) 做同一置换：
+    前 train_ratio 部分作为训练索引、其余作为验证索引。
+    任何数据集只要样本列表排序方式一致、传入相同参数，即可得到相同划分，
+    避免 Stage 2 有标签流与验证流使用不同划分造成的验证集泄露。
+    """
+    np.random.seed(seed)
+    n_train = int(n_total * train_ratio)
+    if n_total >= 2:
+        n_train = max(1, min(n_train, n_total - 1))
+    else:
+        n_train = max(1, n_train)
+
+    indices = np.random.permutation(n_total)
+
+    if split == "train":
+        return indices[:n_train]
+
+    val_indices = indices[n_train:]
+    if len(val_indices) == 0:
+        val_indices = indices
+    return val_indices
+
+
 class BoundaryDataset(Dataset):
     """
     低碳钢金相图像边界预测数据集。
@@ -285,28 +316,14 @@ class BoundaryDataset(Dataset):
 
         all_samples.sort()
 
-        # 划分训练/验证集
-        np.random.seed(seed)
-        n_total = len(all_samples)
-        n_train = int(n_total * train_ratio)
-        if n_total >= 2:
-            n_train = max(1, min(n_train, n_total - 1))
-        else:
-            n_train = max(1, n_train)
-
-        indices = np.random.permutation(n_total)
-
-        if split == "train":
-            selected = indices[:n_train]
-        else:
-            val_indices = indices[n_train:]
-            if len(val_indices) == 0:
-                val_indices = indices
-            selected = val_indices
-
+        # 划分训练/验证集（与 LabeledDataset 共用同一函数，保证划分一致）
+        selected = split_train_val_indices(len(all_samples), train_ratio, seed, split)
         self.samples = [all_samples[i] for i in selected]
 
-        print(f"[{split}] BoundaryDataset: {len(self.samples)} images (total {n_total})")
+        print(
+            f"[{split}] BoundaryDataset: {len(self.samples)} images "
+            f"(total {len(all_samples)})"
+        )
 
     def __len__(self):
         return len(self.samples)

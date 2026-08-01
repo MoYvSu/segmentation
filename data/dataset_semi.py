@@ -21,7 +21,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from data.dataset import letterbox, random_crop
+from data.dataset import letterbox, random_crop, split_train_val_indices
 
 
 # =============================================================================
@@ -30,7 +30,9 @@ from data.dataset import letterbox, random_crop
 class LabeledDataset(Dataset):
     """
     有标注数据集：输出原图 + 净化 GT + EDT 权重。
-    复用 BoundaryDataset 的 .npz 加载逻辑。
+    复用 BoundaryDataset 的 .npz 加载逻辑，并使用相同的 train/val 划分
+    （同 seed、同 train_ratio），确保有标签训练流与验证流不重叠，
+    避免验证集泄露。
     """
 
     def __init__(
@@ -41,6 +43,9 @@ class LabeledDataset(Dataset):
         crop_size: int = 0,
         augment: bool = False,
         augment_config: Optional[dict] = None,
+        split: str = "train",
+        train_ratio: float = 0.8,
+        seed: int = 42,
         boundary_scale_factor: float = 10.0,
         boundary_weight_floor: float = 1.0,
         boundary_weight_ceil: float = 4.0,
@@ -52,6 +57,9 @@ class LabeledDataset(Dataset):
         self.crop_size = crop_size
         self.augment = augment
         self.augment_config = augment_config or {}
+        self.split = split
+        self.train_ratio = train_ratio
+        self.seed = seed
         self.boundary_scale_factor = boundary_scale_factor
         self.boundary_weight_floor = boundary_weight_floor
         self.boundary_weight_ceil = boundary_weight_ceil
@@ -60,12 +68,16 @@ class LabeledDataset(Dataset):
         self.samples: List[Tuple[str, str]] = []
         for ext in valid_exts:
             for img_path in glob.glob(os.path.join(data_dir, f"*{ext}")):
+                json_path = os.path.splitext(img_path)[0] + ".json"
                 basename = os.path.splitext(os.path.basename(img_path))[0]
                 gt_path = os.path.join(gt_dir, f"{basename}_gt.npz")
-                if os.path.exists(gt_path):
+                if os.path.exists(json_path) and os.path.exists(gt_path):
                     self.samples.append((img_path, gt_path))
         self.samples.sort()
-        print(f"[LabeledDataset] {len(self.samples)} samples from {data_dir}")
+        # 与 BoundaryDataset 使用同一划分函数（同 seed / train_ratio）
+        selected = split_train_val_indices(len(self.samples), train_ratio, seed, split)
+        self.samples = [self.samples[i] for i in selected]
+        print(f"[LabeledDataset] {len(self.samples)} samples ({split}) from {data_dir}")
 
     def __len__(self):
         return len(self.samples)
