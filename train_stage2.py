@@ -1,17 +1,21 @@
 # -*- coding: utf-8 -*-
 """
-第二阶段半监督微调主入口（边界预测版本 - Mean Teacher）
+第二阶段半监督微调主入口（边界预测版本 - 多模式伪标签源）
 =========================================================
-使用有标签数据（BoundaryLoss）与无标签数据（Mean Teacher 一致性）联合训练。
+使用有标签数据（BoundaryLoss）与无标签数据（一致性损失）联合训练。
 
 技术路线：
 1. 加载第一阶段最优权重到学生模型
-2. 创建教师模型（学生权重的 EMA 副本）
+2. 可选创建教师模型（学生权重的 EMA 副本，仅 ema 模式需要）
 3. 仅冻结 encoder，全量训练 decoder
 4. 双流混合 Batch：itertools.cycle(labeled_loader) + unlabeled_loader
 5. 有标签流：BoundaryLoss（语义 BCE + 边界 Focal x EDT 权重）
-6. 无标签流：Mean Teacher 一致性损失（MSE，遮挡区域加权）
-7. 每个 step 结束后更新教师模型 EMA 权重
+6. 无标签流：一致性损失（MSE + Sobel + TV + 背景抑制）
+   - boundary_teacher_mode 决定边界伪标签源：
+     "ema": EMA 教师 + Stage-1 锚点混合（默认）
+     "stage1_direct": Stage-1 冻结模型直接提供（无 EMA 滞后）
+     "self_consistency": 学生弱增强预测 stop-gradient（无 EMA 依赖）
+7. 每个 step 结束后可选更新教师模型 EMA 权重（仅 ema 模式）
 
 使用方法：
     conda activate sam2_env
@@ -288,9 +292,10 @@ def build_dataloaders(config, disable_unlabeled_appearance_aug=False):
 
 
 def train_one_epoch(
-    student_model, teacher_model, labeled_loader, unlabeled_iter,
+    student_model, labeled_loader, unlabeled_iter,
     num_steps, num_unlabeled_steps, criterion, unsup_weight, ema_decay,
     optimizer, scaler, device, grad_clip=1.0, use_amp=False,
+    teacher_model=None, boundary_teacher_mode="ema",
     augmentor=None, boundary_anchor_cfg=None, ref_model=None, anchor_alpha=1.0,
     skeleton_filter_cfg=None, freeze_seg=False, freeze_boundary=False,
     seg_mask_region_weight=2.0, boundary_mask_region_weight=0.3,
@@ -298,9 +303,12 @@ def train_one_epoch(
     tv_bg_weight=1.0, tv_boundary_weight=0.1,
     bg_suppress_weight=0.5, bg_suppress_threshold=0.1,
 ):
-    """训练一个 epoch（双流混合 Batch + EMA 更新）。
+    """训练一个 epoch（双流混合 Batch + 可选 EMA 更新）。
 
     Args:
+        teacher_model: EMA 教师模型，可为 None（当 boundary_teacher_mode != "ema"
+            且 freeze_seg=True 时）。
+        boundary_teacher_mode: 边界伪标签源模式（"ema"/"stage1_direct"/"self_consistency"）。
         augmentor: 可选的渐进式外观增强器，仅施加于学生模型输入
                    （有标签图像 + 无标签强增强图像），教师输入不触碰。
         boundary_anchor_cfg: 边界锚点配置，传入 compute_unsupervised_loss。
@@ -319,7 +327,8 @@ def train_one_epoch(
     """
     student_model.train()
     student_model.encoder.eval()
-    teacher_model.eval()
+    if teacher_model is not None:
+        teacher_model.eval()
 
     total_loss_sum = 0.0
     total_sup_loss = 0.0
@@ -373,9 +382,11 @@ def train_one_epoch(
                     with autocast('cuda'):
                         unsup_loss, seg_consist_val, boundary_consist_val = (
                             compute_unsupervised_loss(
-                                student_model, teacher_model,
+                                student_model,
                                 img_weak, img_strong, patch_mask,
                                 output_size=targets_labeled.shape[-2:],
+                                teacher_model=teacher_model,
+                                boundary_teacher_mode=boundary_teacher_mode,
                                 boundary_anchor_cfg=boundary_anchor_cfg,
                                 ref_model=ref_model,
                                 anchor_alpha=anchor_alpha,
@@ -396,9 +407,11 @@ def train_one_epoch(
                 else:
                     unsup_loss, seg_consist_val, boundary_consist_val = (
                         compute_unsupervised_loss(
-                            student_model, teacher_model,
+                            student_model,
                             img_weak, img_strong, patch_mask,
                             output_size=targets_labeled.shape[-2:],
+                            teacher_model=teacher_model,
+                            boundary_teacher_mode=boundary_teacher_mode,
                             boundary_anchor_cfg=boundary_anchor_cfg,
                             ref_model=ref_model,
                             anchor_alpha=anchor_alpha,
@@ -434,7 +447,9 @@ def train_one_epoch(
                 torch.nn.utils.clip_grad_norm_(clip_params, grad_clip)
             optimizer.step()
 
-        update_ema(teacher_model, student_model, ema_decay)
+        # EMA 更新（仅当教师模型存在时）
+        if teacher_model is not None:
+            update_ema(teacher_model, student_model, ema_decay)
 
         total_loss_sum += total_loss.item()
         total_sup_loss += sup_loss.item()
@@ -656,6 +671,21 @@ def main():
     if not freeze_seg and not freeze_boundary:
         logger.info("Freeze: DISABLED (joint training, both branches active)")
 
+    # 边界伪标签源模式配置
+    boundary_teacher_mode = semi_cfg.get("boundary_teacher_mode", "ema")
+    logger.info(f"Boundary teacher mode: {boundary_teacher_mode}")
+
+    # 判断是否需要 EMA 教师模型
+    # - 语义分支未冻结（freeze_seg=False）→ 需要 EMA 教师提供语义伪标签
+    # - 边界模式为 "ema" → 需要 EMA 教师提供边界伪标签
+    need_teacher = (not freeze_seg) or (boundary_teacher_mode == "ema")
+
+    if not need_teacher:
+        logger.info(
+            f"  EMA teacher model: NOT REQUIRED "
+            f"(freeze_seg={freeze_seg}, boundary_teacher_mode='{boundary_teacher_mode}')"
+        )
+
     criterion = BoundaryLoss(
         gamma=train_cfg.get("focal_gamma", 2.0),
         alpha_boundary=train_cfg.get("boundary_alpha", 1.0),
@@ -766,13 +796,15 @@ def main():
     unsup_weight = semi_cfg.get("unsup_weight", 1.0)
     unsup_rampup_epochs = semi_cfg.get("unsup_rampup_epochs", 10)
 
-    if adaptive_ema:
+    if adaptive_ema and need_teacher:
         logger.info(
             f"Adaptive EMA: ENABLED (base_decay={ema_decay_base}, "
             f"decay scales with LR ratio)"
         )
-    else:
+    elif need_teacher:
         logger.info(f"Adaptive EMA: DISABLED (fixed decay={ema_decay_base})")
+    else:
+        logger.info("Adaptive EMA: N/A (EMA teacher not required)")
 
     if unsup_rampup_epochs > 0:
         logger.info(
@@ -795,6 +827,14 @@ def main():
     anchor_enabled = boundary_anchor_cfg.get("enabled", False)
     ref_model = None
 
+    # stage1_direct 模式必须加载 ref_model
+    if boundary_teacher_mode == "stage1_direct" and not anchor_enabled:
+        logger.info(
+            "stage1_direct mode: force-enabling Stage-1 ref model "
+            "(required as boundary pseudo-label source)"
+        )
+        anchor_enabled = True
+
     if anchor_enabled:
         # 构建 Stage-1 冻结参考模型（共享 student 的 encoder，仅加载 Stage-1 decoder）
         ref_decoder = FPNDecoder(
@@ -811,7 +851,7 @@ def main():
             param.requires_grad = False
         ref_decoder.eval()
         ref_model = SegmentationModel(student_model.encoder, ref_decoder)
-        logger.info(f"Boundary anchor: ENABLED (Stage-1 ref model loaded, shared encoder)")
+        logger.info(f"Boundary anchor / ref model: ENABLED (Stage-1 ref model loaded, shared encoder)")
 
         anchor_floor = boundary_anchor_cfg.get("anchor_floor", 0.3)
         anchor_ramp_epochs = boundary_anchor_cfg.get("anchor_ramp_epochs", 20)
@@ -820,7 +860,7 @@ def main():
             f"ramp_epochs={anchor_ramp_epochs}"
         )
     else:
-        logger.info("Boundary anchor: DISABLED (using teacher pseudo-labels only)")
+        logger.info("Boundary anchor / ref model: DISABLED")
 
     # 边界一致性损失配置（梯度感知：MSE + Sobel + TV）
     bnd_consist_cfg = semi_cfg.get("boundary_consistency", {})
@@ -839,7 +879,7 @@ def main():
         f"bg_suppress_w={bg_suppress_weight}, bg_suppress_th={bg_suppress_threshold}"
     )
 
-    # 骨架过滤配置（教师边界伪标签形态学精炼）
+    # 骨架过滤配置（边界伪标签形态学精炼）
     skeleton_filter_cfg = semi_cfg.get("skeleton_filter", {})
     if skeleton_filter_cfg.get("enabled", False):
         logger.info(
@@ -898,13 +938,23 @@ def main():
         )
 
     # 创建教师模型（在所有 checkpoint 加载之后，确保教师同步最新学生权重）
-    teacher_model = build_teacher_model(student_model)
-    logger.info("Teacher model created (EMA of student)")
+    # 仅当需要 EMA 教师时创建（语义未冻结 或 boundary_teacher_mode="ema"）
+    teacher_model = None
+    if need_teacher:
+        teacher_model = build_teacher_model(student_model)
+        logger.info("Teacher model created (EMA of student)")
+    else:
+        logger.info(
+            "Teacher model: SKIPPED "
+            "(freeze_seg=True and boundary_teacher_mode != 'ema')"
+        )
 
     logger.info("=" * 60)
-    logger.info("Stage-2 Semi-Supervised Fine-tuning (Mean Teacher)")
+    logger.info("Stage-2 Semi-Supervised Fine-tuning")
     logger.info(f"  Epochs: {total_epochs}")
-    logger.info(f"  EMA decay: {ema_decay_base}" + (" (adaptive)" if adaptive_ema else " (fixed)"))
+    logger.info(f"  Boundary teacher mode: {boundary_teacher_mode}")
+    if need_teacher:
+        logger.info(f"  EMA decay: {ema_decay_base}" + (" (adaptive)" if adaptive_ema else " (fixed)"))
     logger.info(f"  Unsupervised weight: {unsup_weight}" + (f" (ramp-up {unsup_rampup_epochs}ep)" if unsup_rampup_epochs > 0 else ""))
     logger.info(f"  LR: {semi_cfg.get('learning_rate', train_cfg['learning_rate'])}")
     logger.info("=" * 60)
@@ -939,7 +989,7 @@ def main():
 
         # 计算 Stage-1 锚点权重（从 1.0 渐进衰减到 anchor_floor）
         anchor_alpha = 1.0
-        if anchor_enabled:
+        if anchor_enabled and boundary_teacher_mode == "ema":
             anchor_floor = boundary_anchor_cfg.get("anchor_floor", 0.3)
             anchor_ramp_epochs = boundary_anchor_cfg.get("anchor_ramp_epochs", 20)
             if anchor_ramp_epochs > 0 and epoch < anchor_ramp_epochs:
@@ -955,7 +1005,7 @@ def main():
             logger.info(f"  Unsup weight: {unsup_weight_eff:.4f} (base={unsup_weight})")
 
         # 计算自适应 EMA 衰减系数
-        if adaptive_ema:
+        if adaptive_ema and need_teacher:
             lr_ratio = get_current_lr_ratio(scheduler, base_lr)
             ema_decay_eff = compute_adaptive_ema_decay(ema_decay_base, lr_ratio)
             if (epoch + 1) % 5 == 0 or epoch == start_epoch:
@@ -967,11 +1017,13 @@ def main():
             ema_decay_eff = ema_decay_base
 
         train_metrics = train_one_epoch(
-            student_model, teacher_model, labeled_loader, unlabeled_iter,
+            student_model, labeled_loader, unlabeled_iter,
             num_steps, num_unlabeled_steps if unlabeled_loader is not None else 0,
             criterion, unsup_weight=unsup_weight_eff, ema_decay=ema_decay_eff,
             optimizer=optimizer, scaler=scaler, device=device,
             grad_clip=train_cfg.get("grad_clip", 1.0), use_amp=use_amp,
+            teacher_model=teacher_model,
+            boundary_teacher_mode=boundary_teacher_mode,
             augmentor=augmentor,
             boundary_anchor_cfg=boundary_anchor_cfg,
             ref_model=ref_model,
