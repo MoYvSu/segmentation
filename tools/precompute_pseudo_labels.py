@@ -67,7 +67,11 @@ def predict_tta(model, image_lb, device, use_tta: bool) -> np.ndarray:
     ).to(device)
 
     with torch.no_grad():
-        output = model(batch)  # [V, 2, 1024, 1024]
+        # 不带 output_size 时模型输出为 FPN 顶层分辨率（1024 输入 -> 256x256），
+        # 必须显式上采样回 letterbox 尺寸，与推理/训练一致
+        output = model(
+            batch, output_size=(image_lb.shape[0], image_lb.shape[1])
+        )  # [V, 2, 1024, 1024]
         probs = torch.sigmoid(output[:, 1]).cpu().numpy()  # [V, H, W]
 
     if use_tta:
@@ -166,11 +170,12 @@ def main():
         image = cv2.imread(img_path, cv2.IMREAD_COLOR)
         if image is None:
             logger.warning(f"  Skip unreadable: {img_path}")
-            continue
-        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        image_lb, _, _, _ = letterbox(image_rgb, image_size)
-
-        prob = predict_tta(model, image_lb, device, use_tta=not args.no_tta)
+            # 保持 memmap 行与 names.txt 严格对齐：填零并记入报告（max=0 会被剔除）
+            prob = np.zeros((image_size, image_size), dtype=np.float32)
+        else:
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            image_lb, _, _, _ = letterbox(image_rgb, image_size)
+            prob = predict_tta(model, image_lb, device, use_tta=not args.no_tta)
         mem[i] = prob.astype(np.float16)
         basenames.append(basename)
 
