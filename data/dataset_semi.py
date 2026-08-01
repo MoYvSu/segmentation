@@ -173,6 +173,7 @@ class UnlabeledDataset(Dataset):
         patch_mask_size: int = 64,
         num_patches: int = 8,
         enable_appearance_aug: bool = True,
+        boundary_cache_dir: Optional[str] = None,
     ):
         super().__init__()
         self.data_dir = data_dir
@@ -181,6 +182,10 @@ class UnlabeledDataset(Dataset):
         self.patch_mask_size = patch_mask_size
         self.num_patches = num_patches
         self.enable_appearance_aug = enable_appearance_aug
+        self.boundary_cache_dir = boundary_cache_dir
+        self._cache = None
+        self._cache_names: List[str] = []
+        self._cache_index: Dict[str, int] = {}
         self.appearance_config = appearance_aug_config or {
             "gaussian_blur_kernel": 5,
             "gaussian_blur_sigma_range": (0.5, 2.0),
@@ -194,7 +199,47 @@ class UnlabeledDataset(Dataset):
             for img_path in glob.glob(os.path.join(data_dir, f"*{ext}")):
                 self.samples.append(img_path)
         self.samples.sort()
+
+        # 离线 Stage-1 边界伪标签缓存（tools/precompute_pseudo_labels.py 生成）
+        # 仅保留缓存中存在且未被剔除的无标签图
+        if boundary_cache_dir is not None:
+            names_path = os.path.join(boundary_cache_dir, "names.txt")
+            probs_path = os.path.join(boundary_cache_dir, "boundary_probs.npy")
+            if not (os.path.exists(names_path) and os.path.exists(probs_path)):
+                raise FileNotFoundError(
+                    f"Stage-1 边界伪标签缓存缺失: {boundary_cache_dir}\n"
+                    f"请先运行: python tools/precompute_pseudo_labels.py "
+                    f"--config config/default_config.yaml"
+                )
+            with open(names_path, "r", encoding="utf-8") as f:
+                self._cache_names = [ln.strip() for ln in f if ln.strip()]
+            self._cache_index = {
+                n: i for i, n in enumerate(self._cache_names)
+            }
+            exclude = set()
+            exclude_path = os.path.join(boundary_cache_dir, "exclude.txt")
+            if os.path.exists(exclude_path):
+                with open(exclude_path, "r", encoding="utf-8") as f:
+                    exclude = {ln.strip() for ln in f if ln.strip()}
+            keep = []
+            for p in self.samples:
+                bn = os.path.splitext(os.path.basename(p))[0]
+                if bn in self._cache_index and bn not in exclude:
+                    keep.append(p)
+            self.samples = keep
+            print(
+                f"[UnlabeledDataset] boundary cache: {len(self._cache_names)} "
+                f"cached, {len(exclude)} excluded -> {len(self.samples)} samples"
+            )
+
         print(f"[UnlabeledDataset] {len(self.samples)} samples from {data_dir}")
+
+    def _load_cache(self):
+        """惰性打开边界伪标签 memmap（文件映射，不占用进程内存）。"""
+        if self._cache is None and self.boundary_cache_dir is not None:
+            probs_path = os.path.join(self.boundary_cache_dir, "boundary_probs.npy")
+            self._cache = np.load(probs_path, mmap_mode="r")
+        return self._cache
 
     def __len__(self):
         return len(self.samples)
@@ -228,13 +273,23 @@ class UnlabeledDataset(Dataset):
         img_strong_tensor = torch.from_numpy(img_strong_masked).float().permute(2, 0, 1) / 255.0
         patch_mask_tensor = torch.from_numpy(patch_mask).float().unsqueeze(0)
 
-        return {
+        item = {
             "img_weak": img_weak_tensor,
             "img_strong": img_strong_tensor,
             "patch_mask": patch_mask_tensor,
             "original_size": (h_orig, w_orig),
             "image_path": img_path,
         }
+
+        # 离线 Stage-1 边界目标（[1, H, W] 概率图，1024 letterbox 空间）
+        if self.boundary_cache_dir is not None:
+            cache = self._load_cache()
+            basename = os.path.splitext(os.path.basename(img_path))[0]
+            idx_cache = self._cache_index[basename]
+            row = np.asarray(cache[idx_cache], dtype=np.float32)  # [H, W]
+            item["boundary_target"] = torch.from_numpy(row).unsqueeze(0)
+
+        return item
 
     def _apply_spatial_aug(self, img: np.ndarray) -> np.ndarray:
         """空间增强：随机旋转/翻转。"""
@@ -323,10 +378,15 @@ def unlabeled_collate_fn(batch: List[Dict]) -> Dict:
     img_weak = torch.stack([item["img_weak"] for item in batch])
     img_strong = torch.stack([item["img_strong"] for item in batch])
     patch_masks = torch.stack([item["patch_mask"] for item in batch])
-    return {
+    out = {
         "img_weak": img_weak,
         "img_strong": img_strong,
         "patch_mask": patch_masks,
         "original_size": [item["original_size"] for item in batch],
         "image_path": [item["image_path"] for item in batch],
     }
+    if batch[0].get("boundary_target") is not None:
+        out["boundary_target"] = torch.stack(
+            [item["boundary_target"] for item in batch]
+        )
+    return out

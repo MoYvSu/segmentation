@@ -184,7 +184,8 @@ def load_stage1_checkpoint(model, checkpoint_path, device):
     )
 
 
-def build_dataloaders(config, disable_unlabeled_appearance_aug=False):
+def build_dataloaders(config, disable_unlabeled_appearance_aug=False,
+                      boundary_cache_dir=None):
     """构建有标签和无标签 DataLoader。
 
     Args:
@@ -256,6 +257,7 @@ def build_dataloaders(config, disable_unlabeled_appearance_aug=False):
             patch_mask_size=semi_cfg.get("patch_mask_size", 64),
             num_patches=semi_cfg.get("num_patches", 8),
             enable_appearance_aug=not disable_unlabeled_appearance_aug,
+            boundary_cache_dir=boundary_cache_dir,
         )
     else:
         logger.warning(f"Unlabeled dataset is empty: {unlabeled_dir}")
@@ -305,6 +307,7 @@ def train_one_epoch(
     sobel_weight=1.0, tv_weight=0.1, tv_dilate_radius=3,
     tv_bg_weight=1.0, tv_boundary_weight=0.1,
     bg_suppress_weight=0.5, bg_suppress_threshold=0.1,
+    pos_weight=5.0, margin_loss_weight=0.0, margin=0.4,
 ):
     """训练一个 epoch（双流混合 Batch + 可选 EMA 更新）。
 
@@ -340,6 +343,9 @@ def train_one_epoch(
     total_boundary = 0.0
     total_seg_consist = 0.0
     total_boundary_consist = 0.0
+    total_bnd_max = 0.0
+    total_bnd_pos = 0.0
+    total_bnd_gap = 0.0
     n_steps = 0
 
     clip_params = list(student_model.decoder.parameters())
@@ -368,6 +374,7 @@ def train_one_epoch(
         unsup_loss = torch.tensor(0.0, device=device)
         seg_consist_val = 0.0
         boundary_consist_val = 0.0
+        bnd_stats = {"bnd_max": 0.0, "bnd_pos_frac": 0.0, "bnd_gap": 0.0}
 
         if unlabeled_iter is not None and step_idx < num_unlabeled_steps:
             try:
@@ -383,7 +390,7 @@ def train_one_epoch(
 
                 if use_amp:
                     with autocast('cuda'):
-                        unsup_loss, seg_consist_val, boundary_consist_val = (
+                        unsup_loss, seg_consist_val, boundary_consist_val, bnd_stats = (
                             compute_unsupervised_loss(
                                 student_model,
                                 img_weak, img_strong, patch_mask,
@@ -405,10 +412,14 @@ def train_one_epoch(
                                 tv_boundary_weight=tv_boundary_weight,
                                 bg_suppress_weight=bg_suppress_weight,
                                 bg_suppress_threshold=bg_suppress_threshold,
+                                cached_boundary_target=unlabeled_batch.get("boundary_target"),
+                                pos_weight=pos_weight,
+                                margin_loss_weight=margin_loss_weight,
+                                margin=margin,
                             )
                         )
                 else:
-                    unsup_loss, seg_consist_val, boundary_consist_val = (
+                    unsup_loss, seg_consist_val, boundary_consist_val, bnd_stats = (
                         compute_unsupervised_loss(
                             student_model,
                             img_weak, img_strong, patch_mask,
@@ -430,6 +441,10 @@ def train_one_epoch(
                             tv_boundary_weight=tv_boundary_weight,
                             bg_suppress_weight=bg_suppress_weight,
                             bg_suppress_threshold=bg_suppress_threshold,
+                            cached_boundary_target=unlabeled_batch.get("boundary_target"),
+                            pos_weight=pos_weight,
+                            margin_loss_weight=margin_loss_weight,
+                            margin=margin,
                         )
                     )
             except StopIteration:
@@ -461,6 +476,9 @@ def train_one_epoch(
         total_boundary += boundary_val
         total_seg_consist += seg_consist_val
         total_boundary_consist += boundary_consist_val
+        total_bnd_max += bnd_stats.get("bnd_max", 0.0)
+        total_bnd_pos += bnd_stats.get("bnd_pos_frac", 0.0)
+        total_bnd_gap += bnd_stats.get("bnd_gap", 0.0)
         n_steps += 1
 
         if (step_idx + 1) % 5 == 0:
@@ -480,6 +498,9 @@ def train_one_epoch(
         "boundary": total_boundary / n,
         "seg_consist": total_seg_consist / n,
         "boundary_consist": total_boundary_consist / n,
+        "bnd_max": total_bnd_max / n,
+        "bnd_pos_frac": total_bnd_pos / n,
+        "bnd_gap": total_bnd_gap / n,
     }
 
 
@@ -638,8 +659,23 @@ def main():
     prog_aug_enabled = prog_aug_cfg.get("enabled", False)
 
     # 如果启用了渐进式外观增强，禁用 UnlabeledDataset 内置外观增强（避免双重增强）
+    use_cached_pseudo_labels = semi_cfg.get("use_cached_pseudo_labels", False)
+    boundary_cache_dir = None
+    if use_cached_pseudo_labels:
+        boundary_cache_dir = os.path.join(
+            paths_cfg["project_root"],
+            semi_cfg.get(
+                "pseudo_label_cache_dir", "outputs/pseudo_labels/stage1_boundary"
+            ),
+        )
+        logger.info(f"Stage-1 边界伪标签缓存: ENABLED ({boundary_cache_dir})")
+    else:
+        logger.info("Stage-1 边界伪标签缓存: DISABLED (每 step 实时前向 ref_model)")
+
     labeled_loader, unlabeled_loader, val_loader = build_dataloaders(
-        config, disable_unlabeled_appearance_aug=prog_aug_enabled
+        config,
+        disable_unlabeled_appearance_aug=prog_aug_enabled,
+        boundary_cache_dir=boundary_cache_dir,
     )
 
     # 实例化渐进式外观增强器
@@ -839,29 +875,42 @@ def main():
         anchor_enabled = True
 
     if anchor_enabled:
-        # 构建 Stage-1 冻结参考模型（共享 student 的 encoder，仅加载 Stage-1 decoder）
-        ref_decoder = FPNDecoder(
-            in_channels=student_model.encoder.get_stage_channels(),
-            fpn_channels=config["decoder"]["fpn_channels"],
-            num_classes=config["decoder"]["num_classes"],
-            dropout=config["decoder"]["dropout"],
-            use_bn=config["decoder"]["use_bn"],
-        )
-        ref_checkpoint = torch.load(stage1_ckpt_path, map_location=device, weights_only=False)
-        ref_decoder.load_state_dict(ref_checkpoint["decoder_state_dict"])
-        ref_decoder = ref_decoder.to(device)
-        for param in ref_decoder.parameters():
-            param.requires_grad = False
-        ref_decoder.eval()
-        ref_model = SegmentationModel(student_model.encoder, ref_decoder)
-        logger.info(f"Boundary anchor / ref model: ENABLED (Stage-1 ref model loaded, shared encoder)")
+        if boundary_teacher_mode == "stage1_direct" and use_cached_pseudo_labels:
+            # 使用离线缓存时无需在训练中保留 ref_model（目标直接来自缓存）
+            logger.info(
+                "Boundary anchor / ref model: SKIPPED "
+                "(stage1_direct + 离线伪标签缓存，训练目标来自缓存)"
+            )
+            ref_model = None
+        else:
+            # 构建 Stage-1 冻结参考模型（共享 student 的 encoder，仅加载 Stage-1 decoder）
+            ref_decoder = FPNDecoder(
+                in_channels=student_model.encoder.get_stage_channels(),
+                fpn_channels=config["decoder"]["fpn_channels"],
+                num_classes=config["decoder"]["num_classes"],
+                dropout=config["decoder"]["dropout"],
+                use_bn=config["decoder"]["use_bn"],
+            )
+            ref_checkpoint = torch.load(
+                stage1_ckpt_path, map_location=device, weights_only=False
+            )
+            ref_decoder.load_state_dict(ref_checkpoint["decoder_state_dict"])
+            ref_decoder = ref_decoder.to(device)
+            for param in ref_decoder.parameters():
+                param.requires_grad = False
+            ref_decoder.eval()
+            ref_model = SegmentationModel(student_model.encoder, ref_decoder)
+            logger.info(
+                "Boundary anchor / ref model: ENABLED "
+                "(Stage-1 ref model loaded, shared encoder)"
+            )
 
-        anchor_floor = boundary_anchor_cfg.get("anchor_floor", 0.3)
-        anchor_ramp_epochs = boundary_anchor_cfg.get("anchor_ramp_epochs", 20)
-        logger.info(
-            f"  anchor_floor={anchor_floor}, "
-            f"ramp_epochs={anchor_ramp_epochs}"
-        )
+            anchor_floor = boundary_anchor_cfg.get("anchor_floor", 0.3)
+            anchor_ramp_epochs = boundary_anchor_cfg.get("anchor_ramp_epochs", 20)
+            logger.info(
+                f"  anchor_floor={anchor_floor}, "
+                f"ramp_epochs={anchor_ramp_epochs}"
+            )
     else:
         logger.info("Boundary anchor / ref model: DISABLED")
 
@@ -874,12 +923,16 @@ def main():
     tv_boundary_weight = bnd_consist_cfg.get("tv_boundary_weight", 0.1)
     bg_suppress_weight = bnd_consist_cfg.get("bg_suppress_weight", 0.5)
     bg_suppress_threshold = bnd_consist_cfg.get("bg_suppress_threshold", 0.1)
+    pos_weight = bnd_consist_cfg.get("pos_weight", 5.0)
+    margin_loss_weight = bnd_consist_cfg.get("margin_loss_weight", 0.0)
+    margin = bnd_consist_cfg.get("margin", 0.4)
     logger.info(
         f"Boundary consistency (gradient): "
         f"sobel_w={sobel_weight}, tv_w={tv_weight}, "
         f"tv_dilate={tv_dilate_radius}, "
         f"tv_bg={tv_bg_weight}, tv_bnd={tv_boundary_weight}, "
-        f"bg_suppress_w={bg_suppress_weight}, bg_suppress_th={bg_suppress_threshold}"
+        f"bg_suppress_w={bg_suppress_weight}, bg_suppress_th={bg_suppress_threshold}, "
+        f"pos_w={pos_weight}, margin_w={margin_loss_weight}, margin={margin}"
     )
 
     # 骨架过滤配置（边界伪标签形态学精炼）
@@ -1043,6 +1096,9 @@ def main():
             tv_boundary_weight=tv_boundary_weight,
             bg_suppress_weight=bg_suppress_weight,
             bg_suppress_threshold=bg_suppress_threshold,
+            pos_weight=pos_weight,
+            margin_loss_weight=margin_loss_weight,
+            margin=margin,
         )
         val_metrics = validate(student_model, val_loader, criterion, device)
         scheduler.step()
@@ -1059,6 +1115,11 @@ def main():
         logger.info(
             f"    unsup_detail: s_c={train_metrics['seg_consist']:.4f} "
             f"b_c={train_metrics['boundary_consist']:.4f}"
+        )
+        logger.info(
+            f"    bnd_output: max={train_metrics['bnd_max']:.3f} "
+            f">0.5={train_metrics['bnd_pos_frac'] * 100:.1f}% "
+            f"gap={train_metrics['bnd_gap']:.3f}"
         )
         # 复合评分
         composite_score = (

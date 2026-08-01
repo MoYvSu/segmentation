@@ -44,6 +44,11 @@ Python 环境：`conda activate sam2_env`（或 `D:\Anaconda\envs\sam2_env\pytho
   - **骨架过滤**（`skeleton_filter`）：阈值 0.3 二值化 → Zhang-Suen 骨架 → 膨胀 1px → 高斯模糊软目标；**必须施加在锚点混合之后**。
 - 渐进式外观增强（`utils/progressive_aug.py`）：仅施加于学生输入（亮度/对比度/锐度/噪声），prob 0→0.8 线性 ramp 10 ep；启用时自动禁用 UnlabeledDataset 内置外观增强。
 - 分支冻结：`semi_supervised.freeze.seg_branch` / `freeze.boundary_branch`（默认联合训练；两个都为 true 会被强制取消）。
+- **当前 Stage 2 配置形态**：`boundary_teacher_mode=stage1_direct` + `freeze.seg_branch=true`
+  （语义低频块状信息由 EMA 形式充分训练后冻结，集中优化边界头）；
+  边界一致性损失含**正样本加权**（`pos_weight`，目标 >0.5 像素放大）与
+  **边界-背景 margin 项**（`margin_loss_weight` / `margin`，直接拉开输出差值），
+  并配合 `tools/precompute_pseudo_labels.py` 离线伪标签缓存（TTA + 质量剔除）。
 - 优化器：三分组 AdamW（seg lr / boundary lr = base×0.1）。
 - 调度：`flat_decay`（warmup 5 → flat 30 → 温和线性衰减至 0.2×base）或 cosine；无监督权重 sigmoid ramp-up；自适应 EMA。
 - 监控：每 `checkpoint_interval`(5) epoch 对 `data/test` 前 3 张输出语义/边界概率图到 `outputs/stage2/monitor/`。
@@ -58,6 +63,7 @@ Python 环境：`conda activate sam2_env`（或 `D:\Anaconda\envs\sam2_env\pytho
 | `data/dataset_semi.py` | `LabeledDataset` / `UnlabeledDataset`（弱强双路 + patch masking）|
 | `data/active_learning.py` | 不确定性采样 + mask→Labelme JSON 反向网关 |
 | `tools/preprocess_labels.py` | 离线净化 GT 生成（CLAHE + Canny + 内部掩码腐蚀）|
+| `tools/precompute_pseudo_labels.py` | Stage-1 边界伪标签离线预计算（TTA + report.csv/exclude.txt 质量剔除）|
 | `utils/loss.py` | `BoundaryLoss` |
 | `utils/loss_semi.py` | 半监督一致性损失、骨架过滤、EMA 更新 |
 | `utils/post_process.py` | 边界骨架化 + 受阻分水岭实例分割（当前推理唯一后处理路径）|
@@ -80,7 +86,7 @@ Python 环境：`conda activate sam2_env`（或 `D:\Anaconda\envs\sam2_env\pytho
 
 - `paths.project_root`：硬编码绝对路径（YAML anchor 复用），迁移目录时需同步修改。
 - `inference`：test_dir / output_dir / threshold / boundary_threshold / checkpoint_stage / stage1|stage2_checkpoint。
-- `semi_supervised`：boundary_teacher_mode / unsup_weight / unsup_rampup_epochs / ema_decay / adaptive_ema / lr_schedule（flat_decay）/ flat_epochs / freeze / boundary_anchor / boundary_consistency / skeleton_filter / patch_mask / monitor / checkpoint_interval。
+- `semi_supervised`：boundary_teacher_mode / use_cached_pseudo_labels / pseudo_label_cache_dir / unsup_weight / unsup_rampup_epochs / ema_decay / adaptive_ema / lr_schedule（flat_decay）/ flat_epochs / freeze / boundary_anchor / boundary_consistency（含 pos_weight / margin_loss_weight / margin）/ skeleton_filter / patch_mask / monitor / checkpoint_interval。
 - `progressive_aug`：学生输入外观增强参数（enabled / ramp_epochs / max_prob / 各抖动范围）。
 - `boundary`：净化 GT 目录、EDT 权重范围、净化参数。
 
@@ -99,6 +105,8 @@ python train.py --config config/default_config.yaml --resume outputs/stage1/chec
 python tools/preprocess_labels.py
 
 # Stage 2 半监督
+# 推荐先预计算 Stage-1 边界伪标签缓存（stage1_direct 模式）
+python tools/precompute_pseudo_labels.py --config config/default_config.yaml
 python train_stage2.py --config config/default_config.yaml
 python train_stage2.py --config config/default_config.yaml --resume outputs/stage2/stage2_epoch30.pth
 # 分支切换（仅加载 decoder，重置优化器/调度器/epoch）
@@ -145,6 +153,11 @@ Checkpoint 统一格式：`decoder_state_dict` + `optimizer_state_dict` + `sched
 - **雾状热力图**：像素级 BCE 软目标缺乏空间结构约束，现用 Sobel 梯度一致性 + 各向异性 TV + 背景抑制解决；若复现需先检查这三项权重。
 - **圆斑过拟合**：patch masking 区边界权重降至 0.3。
 - **背景膨胀**：温度锐化 + 背景抑制损失。
+- **边界输出区间压缩（边界/背景差值 <0.4，难以用 0.5 阈值分割）**：
+  根因是无监督损失栈中背景抑制/TV/Sobel 的下压力超过稀疏正样本的抬升力，
+  使"低值输出"成为稳定吸引子。当前缓解：调低 `bg_suppress_weight`/`tv_weight`/`sobel_weight`，
+  加正样本加权（`pos_weight`）与边界-背景 margin 损失（`margin_loss_weight`），
+  并每 epoch 观察 `bnd_output: max/>0.5占比/gap` 是否持续走高。
 - **三分类全盲预测死锁**：已改为二分类 + 边界通道，不要退回三分类。
 - **半监督初段伪标签不可靠**：unsup 权重 sigmoid ramp-up 10 ep。
 - **patch_mask 与 output_size 尺寸一致性**：曾有专门修复，改动时注意。

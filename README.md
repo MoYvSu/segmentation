@@ -75,7 +75,8 @@ segmentationv2/
 │   ├── post_process.py          # 骨架化 / 受阻分水岭 / 实例 ID
 │   └── progressive_aug.py       # 渐进式外观增强（学生输入专用）
 ├── tools/
-│   └── preprocess_labels.py     # 离线边界净化 GT 生成
+│   ├── preprocess_labels.py     # 离线边界净化 GT 生成
+│   └── precompute_pseudo_labels.py  # Stage-1 边界伪标签离线预计算（TTA + 质量报告）
 ├── weights/                     # 本地权重（sam2_hiera_base_plus.pt）
 ├── segment-anything-2/          # SAM 2 源码（本地仓库）
 ├── train.py                     # Stage 1 训练入口
@@ -105,8 +106,18 @@ python train.py --config config/default_config.yaml --resume outputs/stage1/chec
 ### Stage 2 半监督微调
 
 ```bash
+# 推荐：预计算 Stage-1 边界伪标签缓存（stage1_direct 模式使用，
+# 免去每 step 的 ref_model 前向，并剔除无边界响应的低质量图）
+python tools/precompute_pseudo_labels.py --config config/default_config.yaml
+
 python train_stage2.py --config config/default_config.yaml
 ```
+
+当前 Stage 2 采用 `boundary_teacher_mode=stage1_direct` + 冻结语义分支
+(`freeze.seg_branch: true`)：语义通道低频块状信息由 EMA 形式充分训练后冻结，
+训练集中优化边界头；边界一致性损失含正样本加权与边界-背景 margin 项，
+用于拉开边界输出区间。每 epoch 会打印 `bnd_output: max/>0.5占比/gap`，
+用于观察微调是否成功泛化。
 
 从 checkpoint 恢复：
 

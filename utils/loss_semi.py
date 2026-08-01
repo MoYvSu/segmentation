@@ -35,7 +35,7 @@ EMA 教师模型（仅 ema 模式需要）通过学生模型权重的 EMA 动态
 """
 
 import logging
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -276,6 +276,45 @@ def background_suppression_loss(
     return (pred_prob * bg_mask).mean()
 
 
+def boundary_margin_loss(
+    pred_prob: torch.Tensor,
+    target_prob: torch.Tensor,
+    margin: float = 0.4,
+    pos_threshold: float = 0.5,
+    bg_threshold: float = 0.05,
+) -> torch.Tensor:
+    """边界-背景差值 margin 损失。
+
+    对每个样本，约束学生输出中"边界像素均值 − 背景像素均值 ≥ margin"：
+      L = mean_i relu(margin - gap_i) * has_pos_i
+    直接针对"边界与背景差值过小、输出区间被压缩"的问题，
+    与像素级 MSE 互补（MSE 管逐像素对齐，margin 管对比度/区间）。
+
+    Args:
+        pred_prob: [B, H, W] 学生边界概率（sigmoid 后，有梯度）
+        target_prob: [B, H, W] 目标伪标签（划分边界/背景区域，无梯度）
+        margin: 期望的最小边界-背景差值
+        pos_threshold: 目标高于此值视为边界像素
+        bg_threshold: 目标低于此值视为背景像素
+
+    Returns:
+        标量损失（无正样本的样本不参与）
+    """
+    with torch.no_grad():
+        pos_mask = (target_prob > pos_threshold).float()
+        bg_mask = (target_prob < bg_threshold).float()
+
+    pos_cnt = pos_mask.sum(dim=(1, 2)).clamp(min=1.0)
+    bg_cnt = bg_mask.sum(dim=(1, 2)).clamp(min=1.0)
+    bnd_mean = (pred_prob * pos_mask).sum(dim=(1, 2)) / pos_cnt
+    bg_mean = (pred_prob * bg_mask).sum(dim=(1, 2)) / bg_cnt
+    gap = bnd_mean - bg_mean  # [B]
+
+    has_pos = (pos_mask.sum(dim=(1, 2)) > 0).float()
+    denom = has_pos.sum().clamp(min=1.0)
+    return (torch.relu(margin - gap) * has_pos).sum() / denom
+
+
 def compute_unsupervised_loss(
     student_model: nn.Module,
     img_weak: torch.Tensor,
@@ -299,7 +338,11 @@ def compute_unsupervised_loss(
     tv_boundary_weight: float = 0.1,
     bg_suppress_weight: float = 0.5,
     bg_suppress_threshold: float = 0.1,
-) -> Tuple[torch.Tensor, float, float]:
+    cached_boundary_target: Optional[torch.Tensor] = None,
+    pos_weight: float = 5.0,
+    margin_loss_weight: float = 0.0,
+    margin: float = 0.4,
+) -> Tuple[torch.Tensor, float, float, Dict[str, float]]:
     """
     计算无监督一致性损失（支持多种边界伪标签源模式）。
 
@@ -349,11 +392,18 @@ def compute_unsupervised_loss(
         tv_boundary_weight: 边界区域 TV 权重。
         bg_suppress_weight: 背景抑制损失权重。
         bg_suppress_threshold: 背景抑制阈值，低于此值视为背景区域。
+        cached_boundary_target: 离线预计算的 Stage-1 边界目标（[B,1,H,W] 概率图）。
+            仅 stage1_direct 模式使用；提供时跳过 ref_model 前向。
+        pos_weight: 目标 > 0.5 像素的一致性损失放大权重（稀疏正样本重平衡）。
+        margin_loss_weight: 边界-背景 margin 损失权重。
+        margin: margin 损失的目标差值。
 
     Returns:
         total_loss: 标量张量，总一致性损失
         loss_seg_val: float，语义通道一致性损失
         loss_boundary_val: float，边界通道一致性损失
+        bnd_stats: dict，边界输出统计（max / >0.5 占比 / 边界-背景差值），
+            用于训练日志观察输出区间是否被拉开
 
     注意：当 freeze_seg=True 时 loss_seg=0（无梯度），
           当 freeze_boundary=True 时 loss_boundary=0（无梯度）。
@@ -403,6 +453,7 @@ def compute_unsupervised_loss(
     # ---- 边界一致性损失 ----
     if freeze_boundary:
         loss_boundary = torch.tensor(0.0, device=device, requires_grad=False)
+        bnd_stats = {"bnd_max": 0.0, "bnd_pos_frac": 0.0, "bnd_gap": 0.0}
     else:
         # ---- 根据 boundary_teacher_mode 选择边界伪标签源 ----
         if boundary_teacher_mode == "ema":
@@ -433,14 +484,30 @@ def compute_unsupervised_loss(
 
         elif boundary_teacher_mode == "stage1_direct":
             # 模式 2: Stage-1 冻结模型直接提供伪标签（无 EMA 滞后）
-            if ref_model is None:
-                raise ValueError(
-                    "ref_model (Stage-1) is required for "
-                    "boundary_teacher_mode='stage1_direct'"
+            if cached_boundary_target is not None:
+                # 离线预计算缓存（tools/precompute_pseudo_labels.py 生成）：
+                # 免去每 step 的 ref_model 前向，目标为 1024 letterbox 概率图
+                target_boundary_prob = cached_boundary_target.to(
+                    device=device, dtype=torch.float32
                 )
-            with torch.no_grad():
-                ref_output = ref_model(img_weak, output_size=output_size)
-                target_boundary_prob = torch.sigmoid(ref_output[:, 1])
+                if target_boundary_prob.shape[-2:] != student_boundary_prob.shape[-2:]:
+                    target_boundary_prob = F.interpolate(
+                        target_boundary_prob,
+                        size=student_boundary_prob.shape[-2:],
+                        mode="bilinear",
+                        align_corners=True,
+                    )
+                # 缓存为 [B, 1, H, W]，统一为与其它模式一致的 [B, H, W]
+                target_boundary_prob = target_boundary_prob[:, 0]
+            else:
+                if ref_model is None:
+                    raise ValueError(
+                        "ref_model (Stage-1) is required for "
+                        "boundary_teacher_mode='stage1_direct'"
+                    )
+                with torch.no_grad():
+                    ref_output = ref_model(img_weak, output_size=output_size)
+                    target_boundary_prob = torch.sigmoid(ref_output[:, 1])
 
         elif boundary_teacher_mode == "self_consistency":
             # 模式 3: 学生弱增强预测 stop-gradient 作为伪标签
@@ -465,8 +532,12 @@ def compute_unsupervised_loss(
                     blur_sigma=skeleton_filter_cfg.get("blur_sigma", 1.0),
                 )
 
-        # 掩码区域降权
+        # 掩码区域降权 + 正样本加权（目标 > 0.5 像素放大，扭转稀疏正样本梯度劣势）
         bnd_weight_map = 1.0 + pm * (boundary_mask_region_weight - 1.0)
+        if pos_weight > 0:
+            with torch.no_grad():
+                pos_map = (target_boundary_prob > 0.5).float()
+            bnd_weight_map = bnd_weight_map * (1.0 + pos_weight * pos_map)
 
         # 1. MSE 像素一致性（基础项）
         boundary_mse = (student_boundary_prob - target_boundary_prob) ** 2
@@ -505,16 +576,48 @@ def compute_unsupervised_loss(
                 threshold=bg_suppress_threshold,
             )
 
+        # 5. 边界-背景 margin 损失（直接拉开学生输出差值）
+        loss_margin = torch.tensor(0.0, device=device)
+        if margin_loss_weight > 0:
+            loss_margin = boundary_margin_loss(
+                student_boundary_prob,
+                target_boundary_prob,
+                margin=margin,
+                pos_threshold=0.5,
+                bg_threshold=bg_suppress_threshold,
+            )
+
         loss_boundary = (
             loss_mse
             + sobel_weight * loss_sobel
             + tv_weight * loss_tv
             + bg_suppress_weight * loss_bg
+            + margin_loss_weight * loss_margin
         )
+
+        # 边界输出统计（训练日志用，观察输出区间是否被拉开）
+        bnd_stats = {}
+        with torch.no_grad():
+            bnd_stats["bnd_max"] = float(student_boundary_prob.max())
+            bnd_stats["bnd_pos_frac"] = float(
+                (student_boundary_prob > 0.5).float().mean()
+            )
+            pos_cnt = (target_boundary_prob > 0.5).sum(dim=(1, 2)).clamp(min=1.0)
+            bg_cnt = (target_boundary_prob < bg_suppress_threshold).sum(
+                dim=(1, 2)
+            ).clamp(min=1.0)
+            bnd_mean = (
+                student_boundary_prob * (target_boundary_prob > 0.5).float()
+            ).sum(dim=(1, 2)) / pos_cnt
+            bg_mean = (
+                student_boundary_prob
+                * (target_boundary_prob < bg_suppress_threshold).float()
+            ).sum(dim=(1, 2)) / bg_cnt
+            bnd_stats["bnd_gap"] = float((bnd_mean - bg_mean).mean())
 
     total_loss = loss_seg + loss_boundary
 
-    return total_loss, loss_seg.item(), loss_boundary.item()
+    return total_loss, loss_seg.item(), loss_boundary.item(), bnd_stats
 
 
 def update_ema(teacher_model: nn.Module, student_model: nn.Module, ema_decay: float):
