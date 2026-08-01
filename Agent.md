@@ -60,7 +60,7 @@ Python 环境：`conda activate sam2_env`（或 `D:\Anaconda\envs\sam2_env\pytho
 | `tools/preprocess_labels.py` | 离线净化 GT 生成（CLAHE + Canny + 内部掩码腐蚀）|
 | `utils/loss.py` | `BoundaryLoss` |
 | `utils/loss_semi.py` | 半监督一致性损失、骨架过滤、EMA 更新 |
-| `utils/post_process.py` | 边界分水岭实例分割、距离场补偿（旧）等 |
+| `utils/post_process.py` | 边界骨架化 + 受阻分水岭实例分割（当前推理唯一后处理路径）|
 | `utils/metrics.py` | `SegMetrics`（mIoU / mDice / Boundary IoU）|
 | `utils/progressive_aug.py` | 渐进式外观增强 |
 | `train.py` / `train_stage2.py` | 两阶段训练入口 |
@@ -112,10 +112,9 @@ Checkpoint 统一格式：`decoder_state_dict` + `optimizer_state_dict` + `sched
 
 ## 8. 调试与验证
 
-- `debug_pipeline.py`：数据管线诊断（letterbox 比例、掩码生成、分水岭）。
+- `debug_pipeline.py`：数据管线诊断（letterbox 比例、语义/边界掩码、EDT 权重、边界受阻分水岭）。
 - `debug_iou.py`：零 epoch IoU 硬审计（数据源 / 前向数值 / 二值化门限三项闭环）。
 - `test_skeleton_watershed.py`：纯图像处理的骨架 + 受阻分水岭验证。
-- `test_watershed.py`：分水岭单元测试。
 - `visualize_instances.py`：实例图着色（`_inst.png` + `_class.json`）。
 - Stage 2 训练每 5 epoch 自动产出 monitor 概率图，直接目检语义/边界头是否收敛、是否出现雾状热力图。
 

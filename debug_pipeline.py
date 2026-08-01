@@ -1,16 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Pipeline diagnostic script
+数据管线诊断脚本（边界预测版）
 ============================
-Verifies:
-1. Letterbox padding ratio
-2. Binary mask + distance field generation
-3. Distance field compensation (inverse transform vs linear)
-4. Tiled inference positions (Case A / Case B)
-5. Gaussian weight blending
-6. Watershed separation
+验证当前数据管线的三个关键环节：
+1. Letterbox 填充比例与可视化
+2. 语义/边界掩码 + EDT 边界权重图生成（与 BoundaryDataset 同路径）
+3. 边界骨架化 + 受阻分水岭实例分割（合成数据）
 
-Usage:
+用法:
     D:\\Anaconda\\envs\\sam2_env\\python.exe debug_pipeline.py
 """
 
@@ -28,18 +25,11 @@ if PROJECT_ROOT not in sys.path:
 from data.dataset import (
     letterbox,
     letterbox_mask,
-    letterbox_distance_field,
     parse_labelme_json,
     create_binary_mask,
-    create_distance_field,
+    compute_boundary_weight,
 )
-from utils.post_process import (
-    compensate_distance_field,
-    _get_dynamic_kernel_size,
-    _get_adaptive_max_filter_size,
-    watershed_separation,
-    gaussian_weight_map,
-)
+from utils.post_process import boundary_watershed_separation
 
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "outputs", "debug_pipeline")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -80,227 +70,108 @@ def test_letterbox_padding():
         print("  %s: %dx%d -> 1024x1024, pad_h=%d (%.1f%%), pad_w=%d, content=%.1f%%" % (
             basename, h, w, pad_h, pad_h / 1024 * 100, pad_w, content_ratio))
 
-    print("\n  --- Test images ---")
-    test_dir = os.path.join(PROJECT_ROOT, "data", "smoketest")
-    for img_path in sorted(glob.glob(os.path.join(test_dir, "*.jpg"))):
-        basename = os.path.splitext(os.path.basename(img_path))[0]
-        image = cv2.imread(img_path, cv2.IMREAD_COLOR)
-        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        h, w = image_rgb.shape[:2]
 
-        image_lb, scale, pad_h, pad_w = letterbox(image_rgb, 1024)
-        content_ratio = (1024 - pad_h) * (1024 - pad_w) / (1024 * 1024) * 100
-        print("  %s: %dx%d -> 1024x1024, pad_h=%d (%.1f%%), pad_w=%d, content=%.1f%%" % (
-            basename, h, w, pad_h, pad_h / 1024 * 100, pad_w, content_ratio))
-
-
-def test_mask_generation():
-    """Test 2: Binary mask and distance field generation"""
+def test_mask_and_boundary_weight():
+    """Test 2: 语义掩码 + 净化边界 + EDT 权重（与 BoundaryDataset 同路径）"""
     print("\n" + "=" * 60)
-    print("Test 2: Binary mask and distance field generation")
+    print("Test 2: Semantic mask + boundary weight")
     print("=" * 60)
 
-    data_dir = os.path.join(PROJECT_ROOT, "data", "raw")
-    json_files = sorted(glob.glob(os.path.join(data_dir, "*.json")))[:3]
+    raw_dir = os.path.join(PROJECT_ROOT, "data", "raw")
+    gt_dir = os.path.join(PROJECT_ROOT, "data", "purified_gt")
+    json_files = sorted(glob.glob(os.path.join(raw_dir, "*.json")))[:3]
 
     for json_path in json_files:
         img_path = json_path.replace(".json", ".jpg")
-        if not os.path.exists(img_path):
+        basename = os.path.splitext(os.path.basename(img_path))[0]
+        gt_path = os.path.join(gt_dir, basename + "_gt.npz")
+        if not os.path.exists(img_path) or not os.path.exists(gt_path):
             continue
 
-        basename = os.path.splitext(os.path.basename(img_path))[0]
         image = cv2.imread(img_path, cv2.IMREAD_COLOR)
         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         h, w = image_rgb.shape[:2]
 
         masks = parse_labelme_json(json_path, h, w)
-        ferrite_mask = masks["ferrite"]
-        pearlite_mask = masks["pearlite"]
+        semantic = create_binary_mask(masks["ferrite"], masks["pearlite"])
+        gt_data = np.load(gt_path)
+        boundary = gt_data["boundary"]
 
-        binary_mask = create_binary_mask(ferrite_mask, pearlite_mask)
-        dist_field = create_distance_field(ferrite_mask, pearlite_mask, scale_factor=10.0)
+        image_lb, _, _, _ = letterbox(image_rgb, 1024)
+        semantic_lb, _, _, _ = letterbox_mask(semantic, 1024)
+        boundary_lb, _, _, _ = letterbox_mask(boundary, 1024)
+        weight_lb = compute_boundary_weight(
+            boundary_lb, scale_factor=10.0, weight_floor=1.0, weight_ceil=4.0
+        )
 
-        ferrite_ratio = binary_mask.sum() / binary_mask.size * 100
-        pearlite_ratio = pearlite_mask.sum() / pearlite_mask.size * 100
-        dist_max = dist_field.max()
-        dist_mean = dist_field[ferrite_mask > 0].mean() if ferrite_mask.sum() > 0 else 0
+        ferrite_ratio = semantic_lb.sum() / semantic_lb.size * 100
+        boundary_ratio = boundary_lb.sum() / boundary_lb.size * 100
+        print("  %s: ferrite=%.1f%%, boundary=%.2f%%, weight_range=[%.2f, %.2f]" % (
+            basename, ferrite_ratio, boundary_ratio,
+            weight_lb.min(), weight_lb.max()))
 
-        print("  %s: ferrite=%.1f%%, pearlite=%.1f%%, dist_max=%.1f, dist_mean=%.1f" % (
-            basename, ferrite_ratio, pearlite_ratio, dist_max, dist_mean))
-
-        mask_vis = np.zeros((h, w, 3), dtype=np.uint8)
-        mask_vis[binary_mask == 1] = [0, 128, 0]
-        mask_vis[binary_mask == 0] = [0, 0, 128]
+        mask_vis = np.zeros((1024, 1024, 3), dtype=np.uint8)
+        mask_vis[semantic_lb == 1] = [0, 128, 0]
+        mask_vis[semantic_lb == 0] = [0, 0, 128]
         cv2.imwrite(os.path.join(OUTPUT_DIR, basename + "_mask.png"),
                     cv2.cvtColor(mask_vis, cv2.COLOR_RGB2BGR))
 
-        dist_vis = (dist_field / max(dist_max, 1) * 255).astype(np.uint8)
-        cv2.imwrite(os.path.join(OUTPUT_DIR, basename + "_dist.png"),
-                    cv2.applyColorMap(dist_vis, cv2.COLORMAP_JET))
+        weight_vis = (weight_lb / weight_lb.max() * 255).astype(np.uint8)
+        cv2.imwrite(os.path.join(OUTPUT_DIR, basename + "_boundary_weight.png"),
+                    cv2.applyColorMap(weight_vis, cv2.COLORMAP_JET))
 
 
-def test_distance_compensation():
-    """Test 3: Distance field compensation numerical verification"""
+def test_boundary_watershed():
+    """Test 3: 边界受阻分水岭（合成数据：两个被边界环封闭的晶粒）
+
+    注意：背景区域（非语义区域）本身也是一个 core 连通域，会作为种子参与
+    分水岭并成为一个珠光体实例，因此只断言分离出 2 个铁素体实例。
+    """
     print("\n" + "=" * 60)
-    print("Test 3: Distance field compensation")
-    print("=" * 60)
-
-    scale_factor = 10.0
-    spatial_scale = 2584.0 / 1024.0
-
-    print("  spatial_scale: %.4f" % spatial_scale)
-    print("  scale_factor: %.1f" % scale_factor)
-    print()
-    print("  %10s | %10s | %14s | %16s | %14s" % (
-        "raw_dist", "normalized", "linear(wrong)", "inverse(correct)", "corrected_raw"))
-    print("  %s" % ("-" * 70))
-
-    for dist_raw in [5, 10, 20, 50, 100, 200, 500]:
-        dist_norm = dist_raw / (dist_raw + scale_factor)
-        linear_compensated = min(dist_norm * spatial_scale, 1.0)
-
-        dist_compensated = compensate_distance_field(
-            np.array([[dist_norm]], dtype=np.float32),
-            spatial_scale=spatial_scale,
-            scale_factor=scale_factor,
-        )[0, 0]
-
-        dist_raw_corrected = dist_compensated * scale_factor / (1 - dist_compensated + 1e-7)
-
-        print("  %10.1f | %10.4f | %14.4f | %16.4f | %14.1f" % (
-            dist_raw, dist_norm, linear_compensated, dist_compensated, dist_raw_corrected))
-
-    print()
-    print("  Conclusion: linear compensation causes [0,1] overflow and distortion;")
-    print("  inverse transform correctly recovers distance values at different scales.")
-
-
-def test_tiled_positions():
-    """Test 4: Tiled inference position calculation"""
-    print("\n" + "=" * 60)
-    print("Test 4: Tiled inference positions")
-    print("=" * 60)
-
-    tile_size = 1024
-    stride = 512
-
-    test_cases = [
-        ("test_002 (1024x1224)", 1024, 1224),
-        ("test_001 (2048x2448)", 2048, 2448),
-    ]
-
-    for name, h, w in test_cases:
-        max_dim = max(h, w)
-        case = "A" if max_dim <= 1224 else "B"
-        print("\n  %s: Case %s" % (name, case))
-
-        if case == "A":
-            _, _, pad_h, pad_w = letterbox(np.zeros((h, w, 3)), 1024)
-            print("    Letterbox: -> 1024x1024, pad_h=%d, pad_w=%d" % (pad_h, pad_w))
-        else:
-            positions_h = list(range(0, max(1, h - tile_size + 1), stride))
-            if positions_h[-1] + tile_size < h:
-                positions_h.append(h - tile_size)
-            positions_w = list(range(0, max(1, w - tile_size + 1), stride))
-            if positions_w[-1] + tile_size < w:
-                positions_w.append(w - tile_size)
-
-            total = len(positions_h) * len(positions_w)
-            print("    H positions: %s" % positions_h)
-            print("    W positions: %s" % positions_w)
-            print("    total patches: %dx%d = %d" % (len(positions_h), len(positions_w), total))
-
-
-def test_gaussian_weight():
-    """Test 5: Gaussian weight blending visualization"""
-    print("\n" + "=" * 60)
-    print("Test 5: Gaussian weight blending")
-    print("=" * 60)
-
-    weight_map = gaussian_weight_map(1024, sigma_scale=0.25)
-
-    weight_vis = (weight_map * 255).astype(np.uint8)
-    cv2.imwrite(os.path.join(OUTPUT_DIR, "gaussian_weight.png"),
-                cv2.applyColorMap(weight_vis, cv2.COLORMAP_JET))
-
-    print("  weight map shape: %s" % str(weight_map.shape))
-    print("  center value: %.4f" % weight_map[512, 512])
-    print("  corner value: %.6f" % weight_map[0, 0])
-    print("  quarter value: %.4f" % weight_map[256, 256])
-
-    print("\n  Overlap region weight verification (50%% overlap):")
-    stride = 512
-    for pos in [stride, (stride + 1024) // 2, 1024 - 1]:
-        w1 = weight_map[pos, 512]
-        w2 = weight_map[pos - stride, 512]
-        print("    pos %d: w1=%.4f, w2=%.4f, sum=%.4f" % (pos, w1, w2, w1 + w2))
-
-
-def test_watershed():
-    """Test 6: Watershed separation verification (synthetic data)"""
-    print("\n" + "=" * 60)
-    print("Test 6: Watershed separation")
+    print("Test 3: Boundary watershed separation (synthetic)")
     print("=" * 60)
 
     h, w = 512, 512
-    mask = np.zeros((h, w), dtype=np.uint8)
-    cv2.circle(mask, (180, 256), 100, 1, -1)
-    cv2.circle(mask, (340, 256), 100, 1, -1)
+    semantic = np.zeros((h, w), dtype=np.uint8)
+    cv2.circle(semantic, (140, 256), 90, 1, -1)
+    cv2.circle(semantic, (380, 256), 90, 1, -1)
 
-    yy, xx = np.meshgrid(np.arange(w), np.arange(h))
-    dist_field = np.maximum(
-        np.exp(-((xx - 180) ** 2 + (yy - 256) ** 2) / (2 * 50 ** 2)),
-        np.exp(-((xx - 340) ** 2 + (yy - 256) ** 2) / (2 * 50 ** 2)),
-    ).astype(np.float32)
+    boundary = np.zeros((h, w), dtype=np.uint8)
+    cv2.circle(boundary, (140, 256), 90, 1, thickness=6)
+    cv2.circle(boundary, (380, 256), 90, 1, thickness=6)
 
-    num_cc, labels_cc = cv2.connectedComponents(mask, connectivity=8)
-    print("  connected components: %d (expected 1, circles overlap)" % (num_cc - 1))
+    inst_map, class_map = boundary_watershed_separation(
+        semantic, boundary, dilate_width=1, min_area=100,
+    )
 
-    max_filter_size = _get_adaptive_max_filter_size(h * w)
-    print("  adaptive max filter size: %d" % max_filter_size)
+    n_ferrite = sum(1 for v in class_map.values() if v == 1)
+    n_pearlite = sum(1 for v in class_map.values() if v == 0)
+    print("  instances: %d (ferrite=%d, pearlite=%d), expected ferrite=2" % (
+        len(class_map), n_ferrite, n_pearlite))
 
-    labels_ws, _ = watershed_separation(mask, dist_field, max_filter_size=max_filter_size)
-    num_ws = len(np.unique(labels_ws)) - 1
-    print("  watershed instances: %d (expected 2)" % num_ws)
-
-    vis_cc = np.zeros((h, w, 3), dtype=np.uint8)
-    vis_ws = np.zeros((h, w, 3), dtype=np.uint8)
+    vis = np.zeros((h, w, 3), dtype=np.uint8)
     colors = [(0, 128, 0), (128, 0, 0), (0, 0, 128), (128, 128, 0)]
+    for i in range(1, len(class_map) + 1):
+        vis[inst_map == i] = colors[i % len(colors)]
+    cv2.imwrite(os.path.join(OUTPUT_DIR, "watershed_inst.png"), vis)
 
-    for i in range(1, num_cc):
-        vis_cc[labels_cc == i] = colors[i % len(colors)]
-    for i in range(1, num_ws + 1):
-        vis_ws[labels_ws == i] = colors[i % len(colors)]
-
-    cv2.imwrite(os.path.join(OUTPUT_DIR, "watershed_input_mask.png"), mask * 255)
-    cv2.imwrite(os.path.join(OUTPUT_DIR, "watershed_input_dist.png"),
-                cv2.applyColorMap((dist_field * 255).astype(np.uint8), cv2.COLORMAP_JET))
-    cv2.imwrite(os.path.join(OUTPUT_DIR, "watershed_cc_result.png"), vis_cc)
-    cv2.imwrite(os.path.join(OUTPUT_DIR, "watershed_ws_result.png"), vis_ws)
-
-    print("\n  Adaptive max filter size vs image area:")
-    for area_name, area in [
-        ("1024x1024", 1024 * 1024),
-        ("1224x1024", 1224 * 1024),
-        ("2448x2048", 2448 * 2048),
-        ("1936x2584", 1936 * 2584),
-    ]:
-        mfs = _get_adaptive_max_filter_size(area)
-        print("    %s (area=%d): max_filter_size=%d" % (area_name, area, mfs))
+    sem_vis = np.zeros((h, w, 3), dtype=np.uint8)
+    sem_vis[semantic == 1] = [0, 128, 0]
+    sem_vis[semantic == 0] = [0, 0, 128]
+    cv2.imwrite(os.path.join(OUTPUT_DIR, "watershed_semantic.png"),
+                cv2.cvtColor(sem_vis, cv2.COLOR_RGB2BGR))
+    cv2.imwrite(os.path.join(OUTPUT_DIR, "watershed_boundary.png"), boundary * 255)
 
 
 def main():
     print("=" * 60)
-    print("Pipeline diagnostic")
+    print("Pipeline diagnostic (boundary version)")
     print("Output dir: " + OUTPUT_DIR)
     print("=" * 60)
 
     test_letterbox_padding()
-    test_mask_generation()
-    test_distance_compensation()
-    test_tiled_positions()
-    test_gaussian_weight()
-    test_watershed()
+    test_mask_and_boundary_weight()
+    test_boundary_watershed()
 
     print("\n" + "=" * 60)
     print("Diagnostic complete! Results saved to:")

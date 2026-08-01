@@ -82,10 +82,8 @@ segmentationv2/
 ├── train_stage2.py              # Stage 2 半监督训练入口
 ├── inference.py                 # 推理入口
 ├── debug_iou.py                 # 零 epoch IoU 硬审计
-├── debug_pipeline.py            # 数据管线诊断
+├── debug_pipeline.py            # 数据管线诊断（letterbox / 边界权重 / 受阻分水岭）
 ├── test_skeleton_watershed.py   # 骨架 + 分水岭纯图像验证
-├── test_watershed.py            # 分水岭单元测试
-├── test_vector_field.py         # 向量场可视化（旧架构遗留）
 └── visualize_instances.py       # 实例图着色可视化
 ```
 
