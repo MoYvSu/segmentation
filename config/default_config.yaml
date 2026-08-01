@@ -91,16 +91,16 @@ boundary:
 # 推理配置
 # -----------------------------------------------------------------------------
 inference:
-  test_dir: "data/test"
-  output_dir: "outputs/inference"
+  test_dir: "data/smoketest"
+  output_dir: "outputs/bdtest"
   threshold: 0.5
   min_instance_area: 500
   max_instance_id: 255
-  boundary_threshold: 0.3
+  boundary_threshold: 0.5
   watershed_dilate_width: 1
   checkpoint_stage: "stage2"
   stage1_checkpoint: "outputs/stage1/best_model.pth"
-  stage2_checkpoint: "outputs/stage2/stage2_epoch50.pth"
+  stage2_checkpoint: "outputs/stage2/stage2_epoch30.pth"
 
 # -----------------------------------------------------------------------------
 # 主动学习配置
@@ -138,6 +138,11 @@ semi_supervised:
   ema_decay: 0.999
   # 是否启用自适应 EMA 衰减（LR 高时降低 decay 让教师更快跟随，LR 低时提高 decay 增加稳定性）
   adaptive_ema: true
+  # 边界伪标签源模式（实验对比用）
+  # "ema": EMA 教师伪标签 + Stage-1 锚点混合（默认，当前行为）
+  # "stage1_direct": 直接使用 Stage-1 冻结模型输出作为伪标签（无 EMA 滞后）
+  # "self_consistency": 学生弱增强预测（stop-gradient）作为伪标签（无 EMA 依赖）
+  boundary_teacher_mode: "ema"
   # 无监督损失权重
   unsup_weight: 1.0
   # 无监督权重 sigmoid ramp-up 长度（epoch 数，前 N 个 epoch 从 0 渐进到 unsup_weight）

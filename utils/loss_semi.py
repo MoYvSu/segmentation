@@ -1,25 +1,28 @@
 # -*- coding: utf-8 -*-
 """
-半监督一致性损失（边界预测版本 - Mean Teacher + Stage-1 锚点）
-=============================================================
-Mean Teacher 框架的无监督一致性损失。
+半监督一致性损失（边界预测版本 - 多模式伪标签源）
+=====================================================
+支持多种边界伪标签源模式的无监督一致性损失。
 
 双路一致性：
-1. 教师路径（无梯度）：干净图像 -> 教师模型 -> 伪标签（语义+边界概率图）
+1. 伪标签路径（无梯度）：干净图像 -> 伪标签源 -> 伪标签（语义+边界概率图）
 2. 学生路径（有梯度）：强增强图像 -> 学生模型 -> 预测概率图
 3. 一致性损失：
    - 语义通道：MSE（学生预测 vs 教师伪标签），Patch Masking 加权
    - 边界通道：MSE + Sobel 梯度一致性 + 各向异性 TV + 背景抑制
-     （Stage-1 锚点 + EMA 教师渐进混合作为伪标签）
+     （伪标签源由 boundary_teacher_mode 决定）
 
-边界锚点机制：
-  - Stage-1 模型用 GT 训练，边界预测稳定锐利，不会随训练漂移
-  - 边界伪标签 = anchor_alpha * stage1_prob + (1-anchor_alpha) * teacher_prob
-  - anchor_alpha 从 1.0 渐进衰减到 anchor_floor（如 0.3），始终保留锚点
+边界伪标签源模式（boundary_teacher_mode）：
+  - "ema": EMA 教师 + Stage-1 锚点渐进混合（默认）
+    边界伪标签 = anchor_alpha * stage1_prob + (1-anchor_alpha) * teacher_prob
+  - "stage1_direct": Stage-1 冻结模型直接提供（无 EMA 滞后）
+    边界伪标签 = ref_model(img_weak) 边界通道输出
+  - "self_consistency": 学生弱增强预测 stop-gradient（无 EMA 依赖）
+    边界伪标签 = student_model(img_weak).detach() 边界通道输出
 
 骨架过滤时序：
-  - 骨架过滤在锚点混合之后施加，对最终目标伪标签过滤
-  - 这样无论 ref_model 还是教师引入的弥散噪声都会被清除
+  - 骨架过滤在伪标签生成之后施加，对最终目标伪标签过滤
+  - 这样无论 ref_model、教师还是学生引入的弥散噪声都会被清除
 
 梯度感知损失设计动机：
   - 旧的 BCE 软目标 + 温度锐化 + pos_weight 链路像素级独立，缺乏空间结构约束
@@ -28,7 +31,7 @@ Mean Teacher 框架的无监督一致性损失。
   - 各向异性 TV 在非边界区强惩罚（去雾），边界区弱惩罚（保锐）
   - 背景抑制损失直接将非边界区学生预测压向零
 
-教师模型通过学生模型权重的 EMA（Exponential Moving Average）动态更新。
+EMA 教师模型（仅 ema 模式需要）通过学生模型权重的 EMA 动态更新。
 """
 
 import logging
@@ -275,11 +278,12 @@ def background_suppression_loss(
 
 def compute_unsupervised_loss(
     student_model: nn.Module,
-    teacher_model: nn.Module,
     img_weak: torch.Tensor,
     img_strong: torch.Tensor,
     patch_mask: torch.Tensor,
     output_size: Optional[Tuple[int, int]] = None,
+    teacher_model: Optional[nn.Module] = None,
+    boundary_teacher_mode: str = "ema",
     boundary_anchor_cfg: Optional[dict] = None,
     ref_model: Optional[nn.Module] = None,
     anchor_alpha: float = 1.0,
@@ -297,14 +301,15 @@ def compute_unsupervised_loss(
     bg_suppress_threshold: float = 0.1,
 ) -> Tuple[torch.Tensor, float, float]:
     """
-    计算 Mean Teacher 无监督一致性损失。
-
-    教师模型（EMA）对干净图像生成语义伪标签，学生模型对强增强图像生成预测。
+    计算无监督一致性损失（支持多种边界伪标签源模式）。
 
     语义通道：MSE 一致性损失，Patch Masking 加权。
     边界通道：MSE + Sobel 梯度一致性 + 各向异性 TV + 背景抑制
-      - 伪标签 = Stage-1 锚点混合（如果启用）或纯教师
-      - 骨架过滤在锚点混合之后施加（对最终目标伪标签过滤）
+      - 伪标签源由 boundary_teacher_mode 决定：
+        * "ema": EMA 教师 + Stage-1 锚点混合（默认）
+        * "stage1_direct": Stage-1 冻结模型直接提供（无 EMA 滞后）
+        * "self_consistency": 学生弱增强预测 stop-gradient（无 EMA 依赖）
+      - 骨架过滤在伪标签生成之后施加（对最终目标伪标签过滤）
       - MSE 提供像素级一致性基础
       - Sobel 梯度一致性约束空间梯度结构一致
       - 各向异性 TV 抑制非边界区雾状噪声，保留边界锐利度
@@ -312,12 +317,17 @@ def compute_unsupervised_loss(
 
     Args:
         student_model: 学生模型（有梯度）
-        teacher_model: 教师模型（EMA，无梯度）
         img_weak: [B, 3, H, W] 干净无增强图像
         img_strong: [B, 3, H, W] 强增强 + Patch Masking 图像
         patch_mask: [B, 1, H, W] Patch Masking 掩码（1=遮挡, 0=保留）
         output_size: 可选，输出尺寸 (H, W)
-        boundary_anchor_cfg: 边界锚点配置，包含:
+        teacher_model: EMA 教师模型（无梯度）。当 boundary_teacher_mode != "ema"
+            且 freeze_seg=True 时可为 None。
+        boundary_teacher_mode: 边界伪标签源模式
+            "ema": EMA 教师伪标签 + Stage-1 锚点混合（默认）
+            "stage1_direct": Stage-1 冻结模型直接提供
+            "self_consistency": 学生弱增强预测 stop-gradient
+        boundary_anchor_cfg: 边界锚点配置（仅 ema 模式生效），包含:
             - enabled: bool
             - anchor_floor: float（锚点权重下限）
             - anchor_ramp_epochs: int（衰减 epoch 数）
@@ -360,11 +370,17 @@ def compute_unsupervised_loss(
             patch_mask, size=output_size, mode="nearest"
         )
 
-    # ---- 教师路径（无梯度）----
-    with torch.no_grad():
-        teacher_output = teacher_model(img_weak, output_size=output_size)
-        teacher_seg_prob = torch.sigmoid(teacher_output[:, 0])
-        teacher_boundary_prob = torch.sigmoid(teacher_output[:, 1])
+    # ---- 语义伪标签路径（仅当语义分支未冻结时需要 EMA 教师）----
+    teacher_seg_prob = None
+    if not freeze_seg:
+        if teacher_model is None:
+            raise ValueError(
+                "teacher_model is required when freeze_seg=False "
+                "(语义通道需要 EMA 教师提供伪标签)"
+            )
+        with torch.no_grad():
+            teacher_output = teacher_model(img_weak, output_size=output_size)
+            teacher_seg_prob = torch.sigmoid(teacher_output[:, 0])
 
     # ---- 学生路径（有梯度）----
     student_output = student_model(img_strong, output_size=output_size)
@@ -388,25 +404,58 @@ def compute_unsupervised_loss(
     if freeze_boundary:
         loss_boundary = torch.tensor(0.0, device=device, requires_grad=False)
     else:
-        # 伪标签准备：Stage-1 锚点混合（如果启用）或纯教师
-        if (
-            boundary_anchor_cfg is not None
-            and ref_model is not None
-            and boundary_anchor_cfg.get("enabled", False)
-        ):
+        # ---- 根据 boundary_teacher_mode 选择边界伪标签源 ----
+        if boundary_teacher_mode == "ema":
+            # 模式 1: EMA 教师 + Stage-1 锚点混合（默认行为）
+            if teacher_model is None:
+                raise ValueError(
+                    "teacher_model is required for boundary_teacher_mode='ema'"
+                )
+            with torch.no_grad():
+                teacher_output = teacher_model(img_weak, output_size=output_size)
+                teacher_boundary_prob = torch.sigmoid(teacher_output[:, 1])
+
+            # Stage-1 锚点混合（如果启用）
+            if (
+                boundary_anchor_cfg is not None
+                and ref_model is not None
+                and boundary_anchor_cfg.get("enabled", False)
+            ):
+                with torch.no_grad():
+                    ref_output = ref_model(img_weak, output_size=output_size)
+                    ref_boundary_prob = torch.sigmoid(ref_output[:, 1])
+                target_boundary_prob = (
+                    anchor_alpha * ref_boundary_prob
+                    + (1.0 - anchor_alpha) * teacher_boundary_prob
+                )
+            else:
+                target_boundary_prob = teacher_boundary_prob
+
+        elif boundary_teacher_mode == "stage1_direct":
+            # 模式 2: Stage-1 冻结模型直接提供伪标签（无 EMA 滞后）
+            if ref_model is None:
+                raise ValueError(
+                    "ref_model (Stage-1) is required for "
+                    "boundary_teacher_mode='stage1_direct'"
+                )
             with torch.no_grad():
                 ref_output = ref_model(img_weak, output_size=output_size)
-                ref_boundary_prob = torch.sigmoid(ref_output[:, 1])
-            # 渐进混合：anchor_alpha * stage1 + (1-anchor_alpha) * ema_teacher
-            target_boundary_prob = (
-                anchor_alpha * ref_boundary_prob
-                + (1.0 - anchor_alpha) * teacher_boundary_prob
-            )
-        else:
-            target_boundary_prob = teacher_boundary_prob
+                target_boundary_prob = torch.sigmoid(ref_output[:, 1])
 
-        # 骨架过滤：在锚点混合之后施加，对最终目标伪标签过滤
-        # 这样无论 ref_model 还是教师引入的弥散噪声都会被清除
+        elif boundary_teacher_mode == "self_consistency":
+            # 模式 3: 学生弱增强预测 stop-gradient 作为伪标签
+            with torch.no_grad():
+                student_weak_output = student_model(img_weak, output_size=output_size)
+                target_boundary_prob = torch.sigmoid(student_weak_output[:, 1])
+
+        else:
+            raise ValueError(
+                f"Unknown boundary_teacher_mode: '{boundary_teacher_mode}'. "
+                f"Supported modes: 'ema', 'stage1_direct', 'self_consistency'"
+            )
+
+        # 骨架过滤：在伪标签生成之后施加，对最终目标伪标签过滤
+        # 这样无论 ref_model、教师还是学生引入的弥散噪声都会被清除
         with torch.no_grad():
             if skeleton_filter_cfg is not None and skeleton_filter_cfg.get("enabled", False):
                 target_boundary_prob = skeleton_filter_boundary(
