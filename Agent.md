@@ -87,7 +87,7 @@ Python 环境：`conda activate sam2_env`（或 `D:\Anaconda\envs\sam2_env\pytho
 `config/default_config.yaml` 是唯一主配置（含 Stage 2 的 `semi_supervised` 段）；`config/stage2_config.yaml` 为早期独立配置，已被取代，不要回退使用。
 
 - `paths.project_root`：硬编码绝对路径（YAML anchor 复用），迁移目录时需同步修改。
-- `inference`：test_dir / output_dir / threshold / boundary_threshold / checkpoint_stage / stage1|stage2_checkpoint。
+- `inference`：test_dir / output_dir / threshold / boundary_threshold / boundary_threshold_high（双阈值滞后）/ boundary_logit_scale / tta / checkpoint_stage / stage1|stage2_checkpoint。
 - `semi_supervised`：boundary_teacher_mode / use_cached_pseudo_labels / pseudo_label_cache_dir / unsup_weight / unsup_rampup_epochs / ema_decay / adaptive_ema / lr_schedule（flat_decay）/ flat_epochs / freeze / boundary_anchor / boundary_consistency（含 pos_weight / margin_loss_weight / margin / rate_regularizer_weight）/ skeleton_filter / patch_mask / monitor / checkpoint_interval。
 - `progressive_aug`：学生输入外观增强参数（enabled / ramp_epochs / max_prob / 各抖动范围）。
 - `boundary`：净化 GT 目录、EDT 权重范围、净化参数。
@@ -126,6 +126,9 @@ Checkpoint 统一格式：`decoder_state_dict` + `optimizer_state_dict` + `sched
 - `debug_iou.py`：零 epoch IoU 硬审计（数据源 / 前向数值 / 二值化门限三项闭环）。
 - `test_skeleton_watershed.py`：纯图像处理的骨架 + 受阻分水岭验证。
 - `visualize_instances.py`：实例图着色（`_inst.png` + `_class.json`）。
+- 推理可选 `--tta`（hflip/vflip/rot180 logits 平均）与双阈值滞后二值化
+  （`boundary_threshold` 弱阈值 + `boundary_threshold_high` 强阈值），
+  弱真实边界若与强边界连通则保留、孤立噪声剔除。
 - Stage 2 训练每 5 epoch 自动产出 monitor 概率图，直接目检语义/边界头是否收敛、是否出现雾状热力图。
 
 改代码后的最小验证顺序：
@@ -170,6 +173,14 @@ Checkpoint 统一格式：`decoder_state_dict` + `optimizer_state_dict` + `sched
   （Stage-1 是雾状宽带，低阈值会把大片雾判成正样本）；
   打开 `rate_regularizer_weight`（预测占比上限 hinge，直接封住扩散）；
   并目检 monitor 边界图区分"宽带扩散"与"散斑错位"。
+- **雾状背景先被抑制后又复现（训练后期）**：模型输出变强后，固定阈值的
+  骨架过滤会把 Stage-1 伪标签里的噪声分支也判为骨架，学生跟着学回来。
+  处置：骨架过滤阈值随训练线性退火（`threshold 0.5 -> threshold_end 0.7`，
+  `threshold_ramp_epochs 60`）——早段保 recall，晚段剔噪声。
+- **推理欠分割（单阈值要压到 0.4 才可靠）**：用双阈值滞后
+  （`boundary_threshold: 0.4` + `boundary_threshold_high: 0.6`）保留与强边界
+  连通的弱边界、剔除孤立噪声；可再开推理 `--tta` 或调大
+  `boundary_logit_scale`（对边界 logits 乘系数增强弱响应）。
 - **三分类全盲预测死锁**：已改为二分类 + 边界通道，不要退回三分类。
 - **半监督初段伪标签不可靠**：unsup 权重 sigmoid ramp-up 10 ep。
 - **patch_mask 与 output_size 尺寸一致性**：曾有专门修复，改动时注意。

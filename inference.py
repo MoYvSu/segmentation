@@ -96,6 +96,9 @@ def predict_single_image(
     image_size=1024,
     min_instance_area=50, max_instance_id=255,
     threshold=0.5, boundary_threshold=0.5,
+    boundary_threshold_high=None,
+    boundary_logit_scale=1.0,
+    use_tta=False,
     watershed_dilate_width=2,
     output_dir=None, save_visualization=True,
 ):
@@ -113,8 +116,28 @@ def predict_single_image(
     image_tensor = torch.from_numpy(image_lb).float().permute(2, 0, 1).unsqueeze(0) / 255.0
     image_tensor = image_tensor.to(device)
 
-    with torch.no_grad():
-        output = model(image_tensor)
+    if use_tta:
+        # 4 视角 TTA：hflip / vflip / rot180，logits 平均后逆变换回原方向
+        views = torch.cat(
+            [
+                image_tensor,
+                torch.flip(image_tensor, dims=[3]),
+                torch.flip(image_tensor, dims=[2]),
+                torch.rot90(image_tensor, 2, dims=[2, 3]),
+            ],
+            dim=0,
+        )
+        with torch.no_grad():
+            outs = model(views)  # [4, 2, H, W]
+        output = (
+            outs[0:1]
+            + torch.flip(outs[1:2], dims=[3])
+            + torch.flip(outs[2:3], dims=[2])
+            + torch.rot90(outs[3:4], 2, dims=[2, 3])
+        ) / 4.0
+    else:
+        with torch.no_grad():
+            output = model(image_tensor)
 
     # Inverse Letterbox: crop padding, upsample to original size
     content_h = int(round(h_orig * scale / 4))
@@ -132,6 +155,8 @@ def predict_single_image(
             max_instance_id=max_instance_id,
             threshold=threshold,
             boundary_threshold=boundary_threshold,
+            boundary_threshold_high=boundary_threshold_high,
+            boundary_logit_scale=boundary_logit_scale,
             watershed_dilate_width=watershed_dilate_width,
             save_visualization=save_visualization,
         )
@@ -161,6 +186,8 @@ def main():
     parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--test_dir", type=str, default=None)
     parser.add_argument("--output_dir", type=str, default=None)
+    parser.add_argument("--tta", action="store_true",
+                        help="推理 TTA（hflip/vflip/rot180 平均）")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -232,6 +259,9 @@ def main():
             max_instance_id=infer_cfg["max_instance_id"],
             threshold=infer_cfg.get("threshold", 0.5),
             boundary_threshold=infer_cfg.get("boundary_threshold", 0.5),
+            boundary_threshold_high=infer_cfg.get("boundary_threshold_high"),
+            boundary_logit_scale=infer_cfg.get("boundary_logit_scale", 1.0),
+            use_tta=infer_cfg.get("tta", False) or args.tta,
             watershed_dilate_width=infer_cfg.get("watershed_dilate_width", 2),
             output_dir=output_dir,
             save_visualization=post_cfg.get("save_visualization", False),

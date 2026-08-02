@@ -96,11 +96,19 @@ inference:
   threshold: 0.5
   min_instance_area: 500
   max_instance_id: 255
-  boundary_threshold: 0.3
+  # 双阈值滞后二值化（Canny 式）：boundary_threshold 为弱阈值，
+  # boundary_threshold_high 为强阈值；弱阈值像素仅在与强阈值连通时保留。
+  # 解决"单阈值压到 0.4 才可靠"的欠分割：弱真实边界保留、孤立噪声剔除。
+  boundary_threshold: 0.4
+  boundary_threshold_high: 0.6
+  # 推理时对边界 logits 乘系数再 sigmoid（>1 增强弱响应，默认 1.0 不缩放）
+  boundary_logit_scale: 1.0
+  # 推理 TTA（hflip/vflip/rot180 平均），提升弱边界召回与稳定性
+  tta: false
   watershed_dilate_width: 1
-  checkpoint_stage: "stage1"
+  checkpoint_stage: "stage2"
   stage1_checkpoint: "outputs/stage1/best_model.pth"
-  stage2_checkpoint: "outputs/stage2/stage2_epoch5.pth"
+  stage2_checkpoint: "outputs/stage2/stage2_epoch100.pth"
 
 # -----------------------------------------------------------------------------
 # 主动学习配置
@@ -279,6 +287,11 @@ semi_supervised:
     # Stage-1 输出为"雾状宽带"（>0.3 约占 30-40%），0.4 会把大片雾判为正样本，
     # 教出宽边界；提高到 0.5 只保留结构核心，目标带更细更准。
     threshold: 0.5
+    # 阈值随训练逐步提高（threshold -> threshold_end，线性 ramp）：
+    # 早段低阈值多捕获弱边界（保 recall）；晚段模型输出变强后，高阈值
+    # 剔除 Stage-1 伪标签中的噪声分支，治"雾状背景先被抑制后又复现"。
+    threshold_end: 0.7
+    threshold_ramp_epochs: 60
     # 骨架膨胀宽度（最终边界宽度 = 2*width+1 px）
     # 在"雾状源头"下目标带越宽学生越容易学到扩散，回归到 1（更细的目标带）
     dilate_width: 1

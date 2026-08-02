@@ -955,8 +955,19 @@ def main():
             f"dilate_width={skeleton_filter_cfg.get('dilate_width', 1)}, "
             f"blur_sigma={skeleton_filter_cfg.get('blur_sigma', 1.0)})"
         )
+        sk_th_start = float(skeleton_filter_cfg.get("threshold", 0.5))
+        sk_th_end = float(skeleton_filter_cfg.get("threshold_end", 0.7))
+        sk_th_ramp = int(skeleton_filter_cfg.get("threshold_ramp_epochs", 0))
+        if sk_th_ramp > 0:
+            logger.info(
+                f"  Skeleton threshold annealing: {sk_th_start:.2f} -> "
+                f"{sk_th_end:.2f} over {sk_th_ramp} epochs"
+            )
     else:
         logger.info("Skeleton filter: DISABLED")
+        sk_th_start = 0.5
+        sk_th_end = 0.5
+        sk_th_ramp = 0
 
     # 复合评分权重
     sem_w = train_cfg.get("composite_sem_weight", 0.4)
@@ -1033,6 +1044,16 @@ def main():
     for epoch in range(start_epoch, total_epochs):
         epoch_start = time.time()
         logger.info(f"\nEpoch {epoch + 1}/{total_epochs}")
+
+        # 骨架过滤阈值逐步提高：早段低阈值保 recall，晚段高阈值剔除
+        # 伪标签噪声分支（治"雾状背景先被抑制后又复现"）
+        if skeleton_filter_cfg.get("enabled", False) and sk_th_ramp > 0:
+            thr = sk_th_start + (sk_th_end - sk_th_start) * min(
+                1.0, max(0.0, epoch / max(1, sk_th_ramp))
+            )
+            skeleton_filter_cfg["threshold"] = float(thr)
+            if (epoch + 1) % 5 == 0 or epoch == start_epoch:
+                logger.info(f"  Skeleton threshold: {thr:.3f}")
 
         # 更新渐进式外观增强的当前 epoch
         if augmentor is not None:
