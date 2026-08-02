@@ -342,6 +342,8 @@ def compute_unsupervised_loss(
     pos_weight: float = 5.0,
     margin_loss_weight: float = 0.0,
     margin: float = 0.4,
+    rate_regularizer_weight: float = 0.0,
+    rate_slack: float = 0.05,
 ) -> Tuple[torch.Tensor, float, float, Dict[str, float]]:
     """
     计算无监督一致性损失（支持多种边界伪标签源模式）。
@@ -397,6 +399,10 @@ def compute_unsupervised_loss(
         pos_weight: 目标 > 0.5 像素的一致性损失放大权重（稀疏正样本重平衡）。
         margin_loss_weight: 边界-背景 margin 损失权重。
         margin: margin 损失的目标差值。
+        rate_regularizer_weight: 预测正样本占比上限正则权重。
+            当学生预测均值超过"目标占比 + rate_slack"时产生 hinge 惩罚，
+            直接阻止边界概率空间扩散（>0.5 占比膨胀到 30%+ 的失效模式）。
+        rate_slack: 预测占比允许超出目标占比的余量。
 
     Returns:
         total_loss: 标量张量，总一致性损失
@@ -587,18 +593,29 @@ def compute_unsupervised_loss(
                 bg_threshold=bg_suppress_threshold,
             )
 
+        # 6. 预测正样本占比上限正则（阻止边界带扩散/背景膨胀）
+        loss_rate = torch.tensor(0.0, device=device)
+        if rate_regularizer_weight > 0:
+            with torch.no_grad():
+                target_rate = target_boundary_prob.mean(dim=(1, 2))
+                ceiling = target_rate + rate_slack
+            pred_rate = student_boundary_prob.mean(dim=(1, 2))
+            loss_rate = torch.relu(pred_rate - ceiling).mean()
+
         loss_boundary = (
             loss_mse
             + sobel_weight * loss_sobel
             + tv_weight * loss_tv
             + bg_suppress_weight * loss_bg
             + margin_loss_weight * loss_margin
+            + rate_regularizer_weight * loss_rate
         )
 
         # 边界输出统计（训练日志用，观察输出区间是否被拉开）
         bnd_stats = {}
         with torch.no_grad():
             bnd_stats["bnd_max"] = float(student_boundary_prob.max())
+            bnd_stats["bnd_pred_rate"] = float(student_boundary_prob.mean())
             bnd_stats["bnd_pos_frac"] = float(
                 (student_boundary_prob > 0.5).float().mean()
             )

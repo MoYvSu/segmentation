@@ -88,7 +88,7 @@ Python 环境：`conda activate sam2_env`（或 `D:\Anaconda\envs\sam2_env\pytho
 
 - `paths.project_root`：硬编码绝对路径（YAML anchor 复用），迁移目录时需同步修改。
 - `inference`：test_dir / output_dir / threshold / boundary_threshold / checkpoint_stage / stage1|stage2_checkpoint。
-- `semi_supervised`：boundary_teacher_mode / use_cached_pseudo_labels / pseudo_label_cache_dir / unsup_weight / unsup_rampup_epochs / ema_decay / adaptive_ema / lr_schedule（flat_decay）/ flat_epochs / freeze / boundary_anchor / boundary_consistency（含 pos_weight / margin_loss_weight / margin）/ skeleton_filter / patch_mask / monitor / checkpoint_interval。
+- `semi_supervised`：boundary_teacher_mode / use_cached_pseudo_labels / pseudo_label_cache_dir / unsup_weight / unsup_rampup_epochs / ema_decay / adaptive_ema / lr_schedule（flat_decay）/ flat_epochs / freeze / boundary_anchor / boundary_consistency（含 pos_weight / margin_loss_weight / margin / rate_regularizer_weight）/ skeleton_filter / patch_mask / monitor / checkpoint_interval。
 - `progressive_aug`：学生输入外观增强参数（enabled / ramp_epochs / max_prob / 各抖动范围）。
 - `boundary`：净化 GT 目录、EDT 权重范围、净化参数。
 
@@ -164,6 +164,12 @@ Checkpoint 统一格式：`decoder_state_dict` + `optimizer_state_dict` + `sched
   优先检查 `boundary_lr_ratio`——冻结语义分支后所有可训练参数都在边界组，
   ratio 过低（如 0.02）会把唯一训练组压到 1e-6，边界头"看起来在训、实际不动"；
   该场景应置为 1.0。其次检查强增强与伪标签目标的几何对齐（见 §5）。
+- **>0.5 占比持续膨胀到 30%+ 且 gap 不动（边界概率空间扩散/背景膨胀）**：
+  模型在动，但高值像素大量落在目标边界带之外（gap 小 = 与目标脱钩）。
+  处置：骨架过滤 `threshold 0.4→0.5`、`dilate_width 2→1` 给目标带瘦身
+  （Stage-1 是雾状宽带，低阈值会把大片雾判成正样本）；
+  打开 `rate_regularizer_weight`（预测占比上限 hinge，直接封住扩散）；
+  并目检 monitor 边界图区分"宽带扩散"与"散斑错位"。
 - **三分类全盲预测死锁**：已改为二分类 + 边界通道，不要退回三分类。
 - **半监督初段伪标签不可靠**：unsup 权重 sigmoid ramp-up 10 ep。
 - **patch_mask 与 output_size 尺寸一致性**：曾有专门修复，改动时注意。
