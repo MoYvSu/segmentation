@@ -308,6 +308,7 @@ def train_one_epoch(
     tv_bg_weight=1.0, tv_boundary_weight=0.1,
     bg_suppress_weight=0.5, bg_suppress_threshold=0.1,
     pos_weight=5.0, margin_loss_weight=0.0, margin=0.4,
+    rate_regularizer_weight=0.0, rate_slack=0.05,
 ):
     """训练一个 epoch（双流混合 Batch + 可选 EMA 更新）。
 
@@ -346,6 +347,7 @@ def train_one_epoch(
     total_bnd_max = 0.0
     total_bnd_pos = 0.0
     total_bnd_gap = 0.0
+    total_bnd_rate = 0.0
     n_steps = 0
 
     clip_params = list(student_model.decoder.parameters())
@@ -416,6 +418,8 @@ def train_one_epoch(
                                 pos_weight=pos_weight,
                                 margin_loss_weight=margin_loss_weight,
                                 margin=margin,
+                                rate_regularizer_weight=rate_regularizer_weight,
+                                rate_slack=rate_slack,
                             )
                         )
                 else:
@@ -445,6 +449,8 @@ def train_one_epoch(
                             pos_weight=pos_weight,
                             margin_loss_weight=margin_loss_weight,
                             margin=margin,
+                            rate_regularizer_weight=rate_regularizer_weight,
+                            rate_slack=rate_slack,
                         )
                     )
             except StopIteration:
@@ -479,6 +485,7 @@ def train_one_epoch(
         total_bnd_max += bnd_stats.get("bnd_max", 0.0)
         total_bnd_pos += bnd_stats.get("bnd_pos_frac", 0.0)
         total_bnd_gap += bnd_stats.get("bnd_gap", 0.0)
+        total_bnd_rate += bnd_stats.get("bnd_pred_rate", 0.0)
         n_steps += 1
 
         if (step_idx + 1) % 5 == 0:
@@ -501,6 +508,7 @@ def train_one_epoch(
         "bnd_max": total_bnd_max / n,
         "bnd_pos_frac": total_bnd_pos / n,
         "bnd_gap": total_bnd_gap / n,
+        "bnd_pred_rate": total_bnd_rate / n,
     }
 
 
@@ -926,13 +934,16 @@ def main():
     pos_weight = bnd_consist_cfg.get("pos_weight", 5.0)
     margin_loss_weight = bnd_consist_cfg.get("margin_loss_weight", 0.0)
     margin = bnd_consist_cfg.get("margin", 0.4)
+    rate_regularizer_weight = bnd_consist_cfg.get("rate_regularizer_weight", 0.0)
+    rate_slack = bnd_consist_cfg.get("rate_slack", 0.05)
     logger.info(
         f"Boundary consistency (gradient): "
         f"sobel_w={sobel_weight}, tv_w={tv_weight}, "
         f"tv_dilate={tv_dilate_radius}, "
         f"tv_bg={tv_bg_weight}, tv_bnd={tv_boundary_weight}, "
         f"bg_suppress_w={bg_suppress_weight}, bg_suppress_th={bg_suppress_threshold}, "
-        f"pos_w={pos_weight}, margin_w={margin_loss_weight}, margin={margin}"
+        f"pos_w={pos_weight}, margin_w={margin_loss_weight}, margin={margin}, "
+        f"rate_w={rate_regularizer_weight}, rate_slack={rate_slack}"
     )
 
     # 骨架过滤配置（边界伪标签形态学精炼）
@@ -1099,6 +1110,8 @@ def main():
             pos_weight=pos_weight,
             margin_loss_weight=margin_loss_weight,
             margin=margin,
+            rate_regularizer_weight=rate_regularizer_weight,
+            rate_slack=rate_slack,
         )
         val_metrics = validate(student_model, val_loader, criterion, device)
         scheduler.step()
@@ -1119,7 +1132,8 @@ def main():
         logger.info(
             f"    bnd_output: max={train_metrics['bnd_max']:.3f} "
             f">0.5={train_metrics['bnd_pos_frac'] * 100:.1f}% "
-            f"gap={train_metrics['bnd_gap']:.3f}"
+            f"gap={train_metrics['bnd_gap']:.3f} "
+            f"rate={train_metrics['bnd_pred_rate']:.3f}"
         )
         # 复合评分
         composite_score = (
