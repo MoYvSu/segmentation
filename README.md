@@ -144,6 +144,12 @@ python inference.py --config config/default_config.yaml --checkpoint outputs/sta
 python inference.py --config config/default_config.yaml --test_dir data/test --output_dir outputs/inference
 ```
 
+推理增强选项（配置于 `inference` 段）：
+
+- **双阈值滞后二值化**：`boundary_threshold: 0.4`（弱阈值）+ `boundary_threshold_high: 0.6`（强阈值），弱真实边界与强边界连通时保留、孤立噪声剔除，缓解欠分割；
+- **边界 logits 缩放**：`boundary_logit_scale > 1` 增强弱边界响应；
+- **推理 TTA**：`python inference.py --tta`（hflip/vflip/rot180 logits 平均），提升弱边界召回与稳定性。
+
 不指定 `--checkpoint` 时，按配置 `inference.checkpoint_stage`（stage1/stage2）选择默认权重（当前默认指向 `outputs/stage2/stage2_epoch30.pth`）。
 
 ## 输出文件
