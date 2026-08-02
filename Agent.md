@@ -76,6 +76,8 @@ Python 环境：`conda activate sam2_env`（或 `D:\Anaconda\envs\sam2_env\pytho
 
 - 有标签流：`data/raw/` 图像 + `data/purified_gt/{name}_gt.npz`（`semantic` + `boundary`）；在线 letterbox 1024、随机翻转/旋转、可选 random crop(512)；在线计算 EDT 边界权重图（范围 [1, 4]）。
 - 无标签流：`data/unlabeled/`；弱图（仅 letterbox）+ 强图（空间 + 外观增强 + patch masking）。
+  **强图翻转/旋转与缓存伪标签目标共享同一变换参数**（`_sample_spatial_params` /
+  `_apply_spatial_transform`），保证学生输入与目标几何对齐；否则一致性/margin 梯度互相抵消。
 - 训练/验证划分：`train_ratio=0.8`，`seed=42`。
 - 类别约定：语义 0=珠光体，1=铁素体；边界 1=晶界。Labelme label 支持 `ferrite` / `ferrite_core` / `铁素体` / `1` 与 `pearlite` / `珠光体` / `0`。
 - 净化 GT 生成：`python tools/preprocess_labels.py`（标注变更后必须重新执行）。
@@ -158,6 +160,10 @@ Checkpoint 统一格式：`decoder_state_dict` + `optimizer_state_dict` + `sched
   使"低值输出"成为稳定吸引子。当前缓解：调低 `bg_suppress_weight`/`tv_weight`/`sobel_weight`，
   加正样本加权（`pos_weight`）与边界-背景 margin 损失（`margin_loss_weight`），
   并每 epoch 观察 `bnd_output: max/>0.5占比/gap` 是否持续走高。
+- **max 逼近 1.0 但 gap 卡在 0.03 附近（区域没抬起，只有热点像素饱和）**：
+  优先检查 `boundary_lr_ratio`——冻结语义分支后所有可训练参数都在边界组，
+  ratio 过低（如 0.02）会把唯一训练组压到 1e-6，边界头"看起来在训、实际不动"；
+  该场景应置为 1.0。其次检查强增强与伪标签目标的几何对齐（见 §5）。
 - **三分类全盲预测死锁**：已改为二分类 + 边界通道，不要退回三分类。
 - **半监督初段伪标签不可靠**：unsup 权重 sigmoid ramp-up 10 ep。
 - **patch_mask 与 output_size 尺寸一致性**：曾有专门修复，改动时注意。

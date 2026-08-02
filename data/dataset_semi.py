@@ -257,7 +257,7 @@ class UnlabeledDataset(Dataset):
         img_weak, _, _, _ = letterbox(image, self.image_size)
 
         # img_strong: 空间增强（+ 外观增强，可被渐进式增强替代时禁用）
-        img_strong = self._apply_spatial_aug(img_weak)
+        img_strong, spatial_params = self._apply_spatial_aug(img_weak)
         if self.enable_appearance_aug:
             img_strong = self._apply_appearance_aug(img_strong)
 
@@ -287,21 +287,44 @@ class UnlabeledDataset(Dataset):
             basename = os.path.splitext(os.path.basename(img_path))[0]
             idx_cache = self._cache_index[basename]
             row = np.asarray(cache[idx_cache], dtype=np.float32)  # [H, W]
+            # 与学生输入使用同一空间变换，保证边界目标几何对齐
+            row = self._apply_spatial_transform(row, spatial_params)
             item["boundary_target"] = torch.from_numpy(row).unsqueeze(0)
 
         return item
 
-    def _apply_spatial_aug(self, img: np.ndarray) -> np.ndarray:
-        """空间增强：随机旋转/翻转。"""
-        result = img.copy()
-        if np.random.rand() < 0.5:
-            result = np.ascontiguousarray(result[:, ::-1])
-        if np.random.rand() < 0.5:
-            result = np.ascontiguousarray(result[::-1, :])
-        if np.random.rand() < 0.5:
-            k = np.random.choice([1, 2, 3])
-            result = np.ascontiguousarray(np.rot90(result, k))
-        return result
+    def _sample_spatial_params(self) -> Dict[str, object]:
+        """采样空间增强参数（翻转/旋转），图像与伪标签目标共享同一参数。"""
+        return {
+            "hflip": bool(np.random.rand() < 0.5),
+            "vflip": bool(np.random.rand() < 0.5),
+            "rot_k": int(np.random.choice([0, 1, 2, 3])),
+        }
+
+    @staticmethod
+    def _apply_spatial_transform(
+        img: np.ndarray, params: Dict[str, object]
+    ) -> np.ndarray:
+        """按参数对图像/目标施加相同的翻转/旋转（对目标为最近邻等价变换）。"""
+        result = img
+        if params["hflip"]:
+            result = result[:, ::-1]
+        if params["vflip"]:
+            result = result[::-1, :]
+        if params["rot_k"]:
+            result = np.rot90(result, params["rot_k"])
+        return np.ascontiguousarray(result)
+
+    def _apply_spatial_aug(
+        self, img: np.ndarray
+    ) -> Tuple[np.ndarray, Dict[str, object]]:
+        """空间增强：随机旋转/翻转；返回 (变换后图像, 参数)。
+
+        同一参数必须施加到缓存伪标签目标，否则学生输入与目标几何错位，
+        一致性损失与 margin 损失的梯度会互相抵消（雾状输出推不起来）。
+        """
+        params = self._sample_spatial_params()
+        return self._apply_spatial_transform(img, params), params
 
     def _apply_appearance_aug(self, img: np.ndarray) -> np.ndarray:
         """外观增强：高斯模糊 + 亮度/对比度拉伸。"""

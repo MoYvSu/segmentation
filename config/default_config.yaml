@@ -153,7 +153,7 @@ semi_supervised:
   pseudo_label_cache_dir: "outputs/pseudo_labels/stage1_boundary"
   
   # 无监督损失权重
-  unsup_weight: 0.1
+  unsup_weight: 0.3
   # 无监督权重 sigmoid ramp-up 长度（epoch 数，前 N 个 epoch 从 0 渐进到 unsup_weight）
   # 解决训练初期教师伪标签不可靠的问题
   unsup_rampup_epochs: 10
@@ -164,7 +164,10 @@ semi_supervised:
   # 语义分支学习率比例（seg lr = seg_lr_ratio * learning_rate）
   seg_lr_ratio: 0.1
   # 边界分支学习率比例（boundary lr = boundary_lr_ratio * learning_rate）
-  boundary_lr_ratio: 0.02
+  # 冻结语义分支后，所有可训练参数都在边界组，分层比例只会把唯一训练组
+  # 压到 1e-6 量级，导致边界头"看起来在训、实际不动"（max 逼近1但gap不变）。
+  # 因此置为 1.0（boundary lr = learning_rate = 5e-5）。
+  boundary_lr_ratio: 1.0
   
   # 学习率调度模式："cosine"（旧余弦退火）或 "flat_decay"（新三阶段：warmup→恒定→温和衰减）
   lr_schedule: "flat_decay"
@@ -243,10 +246,12 @@ semi_supervised:
     bg_suppress_threshold: 0.05
     # 正样本像素加权：目标 > 0.5 的像素在一致性损失中额外放大
     # （直接扭转稀疏正样本 vs 大面积背景的梯度平衡）
-    pos_weight: 5.0
+    # 5.0 会把最强的少数像素先推到饱和（max=0.999）而不是抬起整条边界带，
+    # 降到 3.0 配合 margin 的区域级拉升
+    pos_weight: 3.0
     # 边界-背景 margin 损失：约束"边界像素均值 − 背景像素均值 ≥ margin"，
     # 直接拉开学生输出的边界/背景差值（当前症状为差值 < 0.4）
-    margin_loss_weight: 0.5
+    margin_loss_weight: 1.0
     margin: 0.4
 
   # 冻结开关（单独训练某个分支）
