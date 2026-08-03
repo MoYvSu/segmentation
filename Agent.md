@@ -71,6 +71,7 @@ Python 环境：`conda activate sam2_env`（或 `D:\Anaconda\envs\sam2_env\pytho
 | `utils/post_process.py` | 边界骨架化 + 受阻分水岭实例分割（当前推理唯一后处理路径）|
 | `utils/metrics.py` | `SegMetrics`（mIoU / mDice / Boundary IoU）|
 | `utils/progressive_aug.py` | 渐进式外观增强 |
+| `utils/run_recorder.py` | 训练运行记录器（配置快照 / git / 环境 / metrics.csv / 权重归档）|
 | `train.py` / `train_stage2.py` | 两阶段训练入口 |
 | `inference.py` | Letterbox 推理 + 后处理管线 |
 
@@ -90,7 +91,8 @@ Python 环境：`conda activate sam2_env`（或 `D:\Anaconda\envs\sam2_env\pytho
 
 - `paths.project_root`：硬编码绝对路径（YAML anchor 复用），迁移目录时需同步修改。
 - `inference`：test_dir / output_dir / threshold / boundary_threshold / boundary_threshold_high（双阈值滞后）/ boundary_logit_scale / tta / checkpoint_stage / stage1|stage2_checkpoint。
-- `semi_supervised`：boundary_teacher_mode（ema / stage1_direct / self_consistency / anchor_self）/ use_cached_pseudo_labels / pseudo_label_cache_dir / unsup_weight / unsup_rampup_epochs / ema_decay / adaptive_ema / lr_schedule（flat_decay）/ flat_epochs / freeze / boundary_anchor / boundary_consistency（含 pos_weight / margin_loss_weight / margin / rate_regularizer_weight 及退火）/ skeleton_filter（threshold / threshold_end / threshold_ramp_epochs）/ patch_mask / monitor / checkpoint_interval。
+- `semi_supervised`：boundary_teacher_mode（ema / stage1_direct / self_consistency / anchor_self）/ use_cached_pseudo_labels / pseudo_label_cache_dir / unsup_weight / unsup_rampup_epochs / ema_decay / adaptive_ema / lr_schedule（flat_decay）/ flat_epochs / freeze / sem_boundary_align_weight / boundary_anchor / boundary_consistency（含 pos_weight / margin_loss_weight / margin / rate_regularizer_weight 及退火）/ skeleton_filter（threshold / threshold_end / threshold_ramp_epochs）/ patch_mask / monitor / checkpoint_interval。
+- `train`：`seg_dice_weight`（语义监督 Dice，语义阶段建议 0.2~0.5）。
 - `progressive_aug`：学生输入外观增强参数（enabled / ramp_epochs / max_prob / 各抖动范围）。
 - `boundary`：净化 GT 目录、EDT 权重范围、净化参数。
 
@@ -111,10 +113,12 @@ python tools/preprocess_labels.py
 # Stage 2 半监督
 # 推荐先预计算 Stage-1 边界伪标签缓存（stage1_direct 模式）
 python tools/precompute_pseudo_labels.py --config config/default_config.yaml
-python train_stage2.py --config config/default_config.yaml
-python train_stage2.py --config config/default_config.yaml --resume outputs/stage2/stage2_epoch30.pth
+python train_stage2.py --config config/default_config.yaml --phase boundary --tag exp01
+python train_stage2.py --config config/default_config.yaml --resume outputs/stage2/stage2_epoch30.pth --tag resume01
 # 分支切换（仅加载 decoder，重置优化器/调度器/epoch）
 python train_stage2.py --config config/default_config.yaml --init_from_checkpoint outputs/stage2/best_model_stage2.pth
+# 每次运行自动记录到 outputs/runs/<时间戳>_<phase>_<tag>/：
+#   run_info.json（命令/git/环境）、config_snapshot.yaml、metrics.csv、best_model.pth
 
 # 推理
 python inference.py --config config/default_config.yaml --checkpoint outputs/stage2/best_model_stage2.pth

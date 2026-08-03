@@ -126,6 +126,21 @@ python train_stage2.py --config config/default_config.yaml
 （`rate_regularizer_weight`）默认随训练从 0.1 退火到 0.4，既压雾复现
 又不会像骨架阈值退火那样把弱边界从目标中剔除。
 
+**两阶段协议**（语义从 Stage-1 重新开始，再边界优化）：
+
+1. Phase S（语义）：`freeze.seg_branch=false` + `freeze.boundary_branch=true`，
+   `init_from_checkpoint` 指向 Stage-1 最优权重，`seg_lr_ratio=1.0`，
+   开启 `seg_dice_weight`（监督 Dice）与 `sem_boundary_align_weight`
+   （边界-语义对齐，语义边缘向预测边界靠拢）；
+2. Phase B（边界，当前默认配置）：`freeze.seg_branch=true` +
+   `stage1_direct` 缓存 + margin/占比正则，`init_from_checkpoint` 指向
+   Phase S 最优输出。
+
+每次训练自动记录到 `outputs/runs/<时间戳>_<phase>_<tag>/`（`--tag`/`--phase`
+可指定）：`run_info.json`（命令、git 提交、环境版本）、`config_snapshot.yaml`
+（生效配置）、`metrics.csv`（逐 epoch 指标）、`best_model.pth`（权重副本），
+按运行目录即可完整复现。
+
 从 checkpoint 恢复：
 
 ```bash

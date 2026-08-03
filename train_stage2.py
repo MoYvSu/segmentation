@@ -57,6 +57,7 @@ from utils.loss import BoundaryLoss
 from utils.loss_semi import compute_unsupervised_loss, update_ema
 from utils.metrics import SegMetrics
 from utils.progressive_aug import ProgressiveAppearanceAug
+from utils.run_recorder import RunRecorder
 
 logging.basicConfig(
     level=logging.INFO,
@@ -309,6 +310,7 @@ def train_one_epoch(
     bg_suppress_weight=0.5, bg_suppress_threshold=0.1,
     pos_weight=5.0, margin_loss_weight=0.0, margin=0.4,
     rate_regularizer_weight=0.0, rate_slack=0.05,
+    sem_boundary_align_weight=0.0,
 ):
     """训练一个 epoch（双流混合 Batch + 可选 EMA 更新）。
 
@@ -420,6 +422,7 @@ def train_one_epoch(
                                 margin=margin,
                                 rate_regularizer_weight=rate_regularizer_weight,
                                 rate_slack=rate_slack,
+                                sem_boundary_align_weight=sem_boundary_align_weight,
                             )
                         )
                 else:
@@ -451,6 +454,7 @@ def train_one_epoch(
                             margin=margin,
                             rate_regularizer_weight=rate_regularizer_weight,
                             rate_slack=rate_slack,
+                            sem_boundary_align_weight=sem_boundary_align_weight,
                         )
                     )
             except StopIteration:
@@ -636,6 +640,12 @@ def main():
     parser.add_argument("--init_from_checkpoint", type=str, default=None,
         help="从指定 checkpoint 加载 decoder 权重，但重置 optimizer/scheduler/epoch "
              "（用于分支切换：训练完一个分支后，从此 checkpoint 开始训练另一个分支）")
+    parser.add_argument("--tag", type=str, default="",
+                        help="运行标签（用于 outputs/runs/<时间戳>_<phase>_<tag> 命名）")
+    parser.add_argument("--phase", type=str, default="",
+                        help="阶段标签（如 semantic / boundary），仅用于运行目录命名与记录")
+    parser.add_argument("--run_dir", type=str, default=None,
+                        help="覆盖运行记录目录（默认 outputs/runs/<时间戳>_<phase>_<tag>）")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -650,6 +660,21 @@ def main():
         device = "cpu"
 
     logger.info(f"Device: {device}")
+
+    # 运行记录器：配置快照 / git / 环境 / 逐 epoch 指标
+    recorder = RunRecorder(
+        project_root=paths_cfg["project_root"],
+        phase=args.phase,
+        tag=args.tag,
+    )
+    if args.run_dir:
+        recorder.run_dir = args.run_dir
+        os.makedirs(recorder.run_dir, exist_ok=True)
+        recorder._metrics_path = os.path.join(recorder.run_dir, "metrics.csv")
+        recorder._metrics_written = os.path.exists(recorder._metrics_path)
+    recorder.save_config(config)
+    recorder.save_manifest()
+    logger.info(f"Run dir: {recorder.run_dir}")
 
     output_dir = os.path.join(paths_cfg["project_root"], semi_cfg.get("output_dir", "outputs/stage2"))
     os.makedirs(output_dir, exist_ok=True)
@@ -737,6 +762,7 @@ def main():
         gamma=train_cfg.get("focal_gamma", 2.0),
         alpha_boundary=train_cfg.get("boundary_alpha", 1.0),
         alpha_focal=train_cfg.get("focal_alpha", 0.75),
+        seg_dice_weight=train_cfg.get("seg_dice_weight", 0.0),
         freeze_seg=freeze_seg,
         freeze_boundary=freeze_boundary,
     ).to(device)
@@ -941,6 +967,7 @@ def main():
     )
     rate_w_ramp = int(bnd_consist_cfg.get("rate_regularizer_ramp_epochs", 0))
     rate_slack = bnd_consist_cfg.get("rate_slack", 0.05)
+    sem_boundary_align_weight = semi_cfg.get("sem_boundary_align_weight", 0.0)
     logger.info(
         f"Boundary consistency (gradient): "
         f"sobel_w={sobel_weight}, tv_w={tv_weight}, "
@@ -950,6 +977,13 @@ def main():
         f"pos_w={pos_weight}, margin_w={margin_loss_weight}, margin={margin}, "
         f"rate_w={rate_regularizer_weight}, rate_slack={rate_slack}"
     )
+    if sem_boundary_align_weight > 0:
+        logger.info(
+            f"  Semantic-boundary alignment: ENABLED "
+            f"(weight={sem_boundary_align_weight})"
+        )
+    else:
+        logger.info("Semantic-boundary alignment: DISABLED")
     if rate_w_ramp > 0 and rate_w_end != rate_w_start:
         logger.info(
             f"  Rate regularizer annealing: {rate_w_start:.2f} -> "
@@ -1152,6 +1186,7 @@ def main():
             margin=margin,
             rate_regularizer_weight=rate_regularizer_weight,
             rate_slack=rate_slack,
+            sem_boundary_align_weight=sem_boundary_align_weight,
         )
         val_metrics = validate(student_model, val_loader, criterion, device)
         scheduler.step()
@@ -1192,6 +1227,27 @@ def main():
             f"ferrite_iou={val_metrics['ferrite_iou']:.4f}"
         )
 
+        # 逐 epoch 指标落盘（与配置快照同目录，便于复现/对比）
+        recorder.append_metrics({
+            "epoch": epoch + 1,
+            "train_loss": train_metrics["loss"],
+            "sup_loss": train_metrics["sup_loss"],
+            "unsup_loss": train_metrics["unsup_loss"],
+            "seg": train_metrics["seg"],
+            "boundary": train_metrics["boundary"],
+            "seg_consist": train_metrics["seg_consist"],
+            "boundary_consist": train_metrics["boundary_consist"],
+            "bnd_max": train_metrics["bnd_max"],
+            "bnd_pos_frac": train_metrics["bnd_pos_frac"],
+            "bnd_gap": train_metrics["bnd_gap"],
+            "bnd_pred_rate": train_metrics["bnd_pred_rate"],
+            "val_loss": val_metrics["loss"],
+            "mIoU": val_metrics["mean_iou"],
+            "boundary_iou": val_metrics["boundary_iou"],
+            "mean_dice": val_metrics["mean_dice"],
+            "composite": composite_score,
+        })
+
         if composite_score > best_composite_score:
             best_composite_score = composite_score
             best_path = os.path.join(output_dir, "best_model_stage2.pth")
@@ -1209,6 +1265,7 @@ def main():
                 f"mIoU={val_metrics['mean_iou']:.4f}, "
                 f"bndIoU={val_metrics['boundary_iou']:.4f})"
             )
+            recorder.copy_checkpoint(best_path)
 
         if (epoch + 1) % checkpoint_interval == 0 and semi_cfg.get("save_checkpoints", True):
             ckpt_path = os.path.join(output_dir, f"stage2_epoch{epoch + 1}.pth")
@@ -1233,8 +1290,10 @@ def main():
         "best_composite_score": best_composite_score,
         "config": config,
     }, final_path)
+    recorder.copy_checkpoint(final_path, "final_model_stage2.pth")
     logger.info(f"Stage-2 training complete! Final model: {final_path}")
     logger.info(f"Best Composite Score: {best_composite_score:.4f}")
+    logger.info(f"Run artifacts: {recorder.run_dir}")
 
 
 if __name__ == "__main__":

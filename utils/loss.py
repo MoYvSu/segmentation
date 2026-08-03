@@ -40,6 +40,7 @@ class BoundaryLoss(nn.Module):
         gamma: float = 2.0,
         alpha_boundary: float = 0.1,
         alpha_focal: float = 0.75,
+        seg_dice_weight: float = 0.0,
         weight_clamp_min: float = 1.0,
         weight_clamp_max: float = 4.0,
         eps: float = 1e-6,
@@ -61,6 +62,7 @@ class BoundaryLoss(nn.Module):
         self.gamma = gamma
         self.alpha_boundary = alpha_boundary
         self.alpha_focal = alpha_focal
+        self.seg_dice_weight = seg_dice_weight
         self.weight_clamp_min = weight_clamp_min
         self.weight_clamp_max = weight_clamp_max
         self.eps = eps
@@ -97,6 +99,15 @@ class BoundaryLoss(nn.Module):
             loss_seg = F.binary_cross_entropy_with_logits(
                 seg_logits, seg_target, reduction="mean"
             )
+            if self.seg_dice_weight > 0:
+                # 语义 Dice：块状低频结构，BCE 在类不平衡下易钝；
+                # Dice 对稀疏类别更敏感，缓解珠光体/铁素体面积失衡
+                seg_prob = torch.sigmoid(seg_logits)
+                dice_denom = seg_prob.sum() + seg_target.sum() + self.eps
+                dice = 1.0 - (
+                    2.0 * (seg_prob * seg_target).sum() + self.eps
+                ) / dice_denom
+                loss_seg = loss_seg + self.seg_dice_weight * dice
 
         # ---- 边界 Focal Loss × EDT 权重 ----
         if self.freeze_boundary:

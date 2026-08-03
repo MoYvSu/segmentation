@@ -149,6 +149,23 @@ def skeleton_filter_boundary(
     return torch.from_numpy(filtered_np).to(device=device, dtype=boundary_prob.dtype)
 
 
+def sobel_magnitude(x: torch.Tensor) -> torch.Tensor:
+    """计算 [B, H, W] 概率图的 Sobel 梯度幅值。"""
+    sobel_x = torch.tensor(
+        [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
+        dtype=x.dtype, device=x.device,
+    ).view(1, 1, 3, 3)
+    sobel_y = torch.tensor(
+        [[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
+        dtype=x.dtype, device=x.device,
+    ).view(1, 1, 3, 3)
+
+    x4 = x.unsqueeze(1)  # [B, 1, H, W]
+    gx = F.conv2d(x4, sobel_x, padding=1)
+    gy = F.conv2d(x4, sobel_y, padding=1)
+    return torch.sqrt(gx ** 2 + gy ** 2 + 1e-8).squeeze(1)  # [B, H, W]
+
+
 def sobel_gradient_consistency(
     pred_prob: torch.Tensor,
     target_prob: torch.Tensor,
@@ -167,29 +184,10 @@ def sobel_gradient_consistency(
     Returns:
         标量损失
     """
-    # Sobel 卷积核
-    sobel_x = torch.tensor(
-        [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
-        dtype=pred_prob.dtype, device=pred_prob.device,
-    ).view(1, 1, 3, 3)
-    sobel_y = torch.tensor(
-        [[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
-        dtype=pred_prob.dtype, device=pred_prob.device,
-    ).view(1, 1, 3, 3)
-
-    # 添加通道维度用于 conv2d
-    pred = pred_prob.unsqueeze(1)        # [B, 1, H, W]
-    target = target_prob.unsqueeze(1)    # [B, 1, H, W]
-
-    # 计算梯度幅值
-    pred_gx = F.conv2d(pred, sobel_x, padding=1)
-    pred_gy = F.conv2d(pred, sobel_y, padding=1)
-    pred_grad = torch.sqrt(pred_gx ** 2 + pred_gy ** 2 + 1e-8)
+    pred_grad = sobel_magnitude(pred_prob)
 
     with torch.no_grad():
-        target_gx = F.conv2d(target, sobel_x, padding=1)
-        target_gy = F.conv2d(target, sobel_y, padding=1)
-        target_grad = torch.sqrt(target_gx ** 2 + target_gy ** 2 + 1e-8)
+        target_grad = sobel_magnitude(target_prob)
 
     # L1 损失
     return (pred_grad - target_grad).abs().mean()
@@ -344,6 +342,7 @@ def compute_unsupervised_loss(
     margin: float = 0.4,
     rate_regularizer_weight: float = 0.0,
     rate_slack: float = 0.05,
+    sem_boundary_align_weight: float = 0.0,
 ) -> Tuple[torch.Tensor, float, float, Dict[str, float]]:
     """
     计算无监督一致性损失（支持多种边界伪标签源模式）。
@@ -403,6 +402,9 @@ def compute_unsupervised_loss(
             当学生预测均值超过"目标占比 + rate_slack"时产生 hinge 惩罚，
             直接阻止边界概率空间扩散（>0.5 占比膨胀到 30%+ 的失效模式）。
         rate_slack: 预测占比允许超出目标占比的余量。
+        sem_boundary_align_weight: 边界-语义对齐权重。惩罚语义梯度出现在
+            预测边界之外（|∇semantic| × (1 − boundary_prob)），让语义边缘
+            向预测边界靠拢，解决"语义头跟不上边界头"的适配问题。
 
     Returns:
         total_loss: 标量张量，总一致性损失
@@ -455,6 +457,13 @@ def compute_unsupervised_loss(
     else:
         seg_mse = (student_seg_prob - teacher_seg_prob) ** 2
         loss_seg = (seg_mse * seg_weight_map).mean()
+        if sem_boundary_align_weight > 0:
+            # 边界-语义对齐：语义梯度应集中在预测边界处，
+            # 边界外区域保持平滑（惩罚 |∇semantic| × (1 - boundary_prob)）
+            bnd_ref = student_boundary_prob.detach()
+            loss_seg = loss_seg + sem_boundary_align_weight * (
+                sobel_magnitude(student_seg_prob) * (1.0 - bnd_ref)
+            ).mean()
 
     # ---- 边界一致性损失 ----
     if freeze_boundary:
