@@ -71,7 +71,7 @@ train:
   boundary_alpha: 3.0
   # 语义监督 Dice 权重（0=关闭）：块状低频结构，BCE 在类不平衡下易钝，
   # Dice 对稀疏类别更敏感；语义阶段（freeze.seg_branch=false）建议 0.2~0.5
-  seg_dice_weight: 0.2
+  seg_dice_weight: 0.1
   # 复合评分权重（best_model 保存依据）
   composite_sem_weight: 0.2
   composite_boundary_weight: 0.8
@@ -176,6 +176,8 @@ semi_supervised:
   # 学习率
   learning_rate: 5.0e-5
   # 语义分支学习率比例（seg lr = seg_lr_ratio * learning_rate）
+  # 语义阶段（freeze.seg_branch=false）建议 0.1~0.3：语义从 Stage-1 出发
+  # 起点已较好，只需温和精修；不要用 1.0（会破坏已有语义，造成均值退化）
   seg_lr_ratio: 0.1
   # 边界分支学习率比例（boundary lr = boundary_lr_ratio * learning_rate）
   # 冻结语义分支后，所有可训练参数都在边界组，分层比例只会把唯一训练组
@@ -284,8 +286,8 @@ semi_supervised:
   # ---- 两阶段协议（语义从 Stage-1 重新开始，再边界优化）----
   # Phase S（语义，冻结边界）：
   #   freeze.seg_branch=false, freeze.boundary_branch=true,
-  #   init_from_checkpoint 指向 Stage-1 最优权重, seg_lr_ratio=1.0,
-  #   sem_boundary_align_weight=0.2（语义边缘向预测边界靠拢）
+  #   init_from_checkpoint 指向 Stage-1 最优权重, seg_lr_ratio=0.1~0.3,
+  #   sem_boundary_align_weight=0.0（边界参考仍是雾状时对齐项会抹平语义边缘）
   # Phase B（边界，冻结语义，当前默认）：
   #   freeze.seg_branch=true, freeze.boundary_branch=false,
   #   init_from_checkpoint 指向 Phase S 最优输出, boundary_lr_ratio=1.0,
@@ -297,9 +299,14 @@ semi_supervised:
     seg_branch: true
     # 冻结边界分支（boundary_fpn + boundary_branch），仅训练语义分支
     boundary_branch: false
-  # 边界-语义对齐权重（语义阶段使用）：惩罚语义梯度出现在预测边界之外，
-  # 让语义边缘向预测边界靠拢，解决"语义头跟不上边界头"的适配问题
-  sem_boundary_align_weight: 0.2
+  # 边界-语义对齐权重：默认关闭（0.0）。
+  # 注意：边界参考若是雾状宽带（Stage-1 级别 >0.3 占 30-40%），
+  # "惩罚语义梯度出现在边界外"会抹平合法语义边缘，导致语义向均值退化
+  # （铁素体退化为珠光体）。等边界头足够锐利后再考虑开启（如 0.1 起步）。
+  sem_boundary_align_weight: 0.0
+  # 语义退化预警：验证 mIoU 低于历史最优的该比例时打印 WARNING，
+  # 用于尽早发现语义崩塌（只预警，不自动停止）
+  sem_degrade_warn_factor: 0.9
 
   # 骨架过滤配置（教师边界伪标签形态学精炼）
   # 在教师输出边界概率后、与 Stage-1 锚点混合前，施加骨架化+膨胀，

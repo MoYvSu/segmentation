@@ -129,9 +129,10 @@ python train_stage2.py --config config/default_config.yaml
 **两阶段协议**（语义从 Stage-1 重新开始，再边界优化）：
 
 1. Phase S（语义）：`freeze.seg_branch=false` + `freeze.boundary_branch=true`，
-   `init_from_checkpoint` 指向 Stage-1 最优权重，`seg_lr_ratio=1.0`，
-   开启 `seg_dice_weight`（监督 Dice）与 `sem_boundary_align_weight`
-   （边界-语义对齐，语义边缘向预测边界靠拢）；
+   `init_from_checkpoint` 指向 Stage-1 最优权重，`seg_lr_ratio=0.1~0.3`
+   （语义起点已好，温和精修即可，1.0 会破坏已有语义），
+   `seg_dice_weight=0.1`（监督 Dice）；`sem_boundary_align_weight` 默认关闭
+   （边界参考是雾状宽带时，对齐项会抹平合法语义边缘导致均值退化）。
 2. Phase B（边界，当前默认配置）：`freeze.seg_branch=true` +
    `stage1_direct` 缓存 + margin/占比正则，`init_from_checkpoint` 指向
    Phase S 最优输出。

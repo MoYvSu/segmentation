@@ -1021,6 +1021,7 @@ def main():
 
     start_epoch = 0
     best_composite_score = 0.0
+    best_val_miou = 0.0
     if args.resume and os.path.exists(args.resume):
         checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
         student_model.decoder.load_state_dict(checkpoint["decoder_state_dict"])
@@ -1226,6 +1227,22 @@ def main():
             f"  pearlite_iou={val_metrics['pearlite_iou']:.4f} "
             f"ferrite_iou={val_metrics['ferrite_iou']:.4f}"
         )
+
+        # 语义退化预警：验证 mIoU 明显低于历史最优时提示（语义崩塌的早期信号）
+        sem_warn_factor = semi_cfg.get("sem_degrade_warn_factor", 0.9)
+        if sem_warn_factor > 0:
+            if val_metrics["mean_iou"] > best_val_miou:
+                best_val_miou = val_metrics["mean_iou"]
+            elif (
+                epoch >= 10
+                and best_val_miou > 0.1
+                and val_metrics["mean_iou"] < best_val_miou * sem_warn_factor
+            ):
+                logger.warning(
+                    f"Semantic degradation detected: val mIoU={val_metrics['mean_iou']:.4f} "
+                    f"< {sem_warn_factor} x best={best_val_miou:.4f}. "
+                    f"建议检查语义头是否被对齐项/过高 lr 破坏"
+                )
 
         # 逐 epoch 指标落盘（与配置快照同目录，便于复现/对比）
         recorder.append_metrics({
