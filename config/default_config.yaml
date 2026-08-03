@@ -69,6 +69,9 @@ train:
   focal_gamma: 2.0
   focal_alpha: 0.75
   boundary_alpha: 3.0
+  # 语义监督 Dice 权重（0=关闭）：块状低频结构，BCE 在类不平衡下易钝，
+  # Dice 对稀疏类别更敏感；语义阶段（freeze.seg_branch=false）建议 0.2~0.5
+  seg_dice_weight: 0.2
   # 复合评分权重（best_model 保存依据）
   composite_sem_weight: 0.2
   composite_boundary_weight: 0.8
@@ -100,7 +103,7 @@ inference:
   # boundary_threshold_high 为强阈值；弱阈值像素仅在与强阈值连通时保留。
   # 解决"单阈值压到 0.4 才可靠"的欠分割：弱真实边界保留、孤立噪声剔除。
   boundary_threshold: 0.4
-  boundary_threshold_high: 0.6
+  boundary_threshold_high: 0.5
   # 推理时对边界 logits 乘系数再 sigmoid（>1 增强弱响应，默认 1.0 不缩放）
   boundary_logit_scale: 1.0
   # 推理 TTA（hflip/vflip/rot180 平均），提升弱边界召回与稳定性
@@ -108,7 +111,7 @@ inference:
   watershed_dilate_width: 1
   checkpoint_stage: "stage2"
   stage1_checkpoint: "outputs/stage1/best_model.pth"
-  stage2_checkpoint: "outputs/stage2/stage2_epoch100.pth"
+  stage2_checkpoint: "outputs/stage2/stage2_epoch100stage1_direct.pth"
 
 # -----------------------------------------------------------------------------
 # 主动学习配置
@@ -229,7 +232,7 @@ semi_supervised:
     # 是否启用 Stage-1 锚点 + EMA 渐进混合（false 时纯教师伪标签）
     enabled: true
     # Stage-1 锚点权重下限（始终保留锚点防止边界头崩塌）
-    anchor_floor: 0.3
+    anchor_floor: 0.5
     # 从 1.0 衰减到 anchor_floor 的 epoch 数
     anchor_ramp_epochs: 20
 
@@ -278,11 +281,25 @@ semi_supervised:
   # 冻结开关（单独训练某个分支）
   # 用于解决语义头和边界头统一参数不匹配导致的训练困难
   # 两个都为 false 时维持联合训练（默认行为）
+  # ---- 两阶段协议（语义从 Stage-1 重新开始，再边界优化）----
+  # Phase S（语义，冻结边界）：
+  #   freeze.seg_branch=false, freeze.boundary_branch=true,
+  #   init_from_checkpoint 指向 Stage-1 最优权重, seg_lr_ratio=1.0,
+  #   sem_boundary_align_weight=0.2（语义边缘向预测边界靠拢）
+  # Phase B（边界，冻结语义，当前默认）：
+  #   freeze.seg_branch=true, freeze.boundary_branch=false,
+  #   init_from_checkpoint 指向 Phase S 最优输出, boundary_lr_ratio=1.0,
+  #   boundary_teacher_mode="stage1_direct" + 离线缓存 + margin/占比正则
+  # 每阶段运行都会由 RunRecorder 把生效配置与逐 epoch 指标落盘到
+  # outputs/runs/<时间戳>_<phase>_<tag>/，便于复现与对比。
   freeze:
     # 冻结语义分支（seg_fpn + seg_branch），仅训练边界分支
     seg_branch: true
     # 冻结边界分支（boundary_fpn + boundary_branch），仅训练语义分支
     boundary_branch: false
+  # 边界-语义对齐权重（语义阶段使用）：惩罚语义梯度出现在预测边界之外，
+  # 让语义边缘向预测边界靠拢，解决"语义头跟不上边界头"的适配问题
+  sem_boundary_align_weight: 0.2
 
   # 骨架过滤配置（教师边界伪标签形态学精炼）
   # 在教师输出边界概率后、与 Stage-1 锚点混合前，施加骨架化+膨胀，
