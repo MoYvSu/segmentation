@@ -188,6 +188,12 @@ Checkpoint 统一格式：`decoder_state_dict` + `optimizer_state_dict` + `sched
 - **只学会强边界、弱边界被遗忘（>0.5 占比 1.8%、gap 高但边界大量缺失）**：
   阈值退火到 0.6+ 的典型症状。若需要超过 Stage-1 的 recall 天花板，
   切 `boundary_teacher_mode: "anchor_self"`（自一致性 + 锚点混合）。
+- **语义往均值退化（铁素体退化为珠光体，边缘被抹平）**：`sem_boundary_align_weight`
+  开启且边界参考是雾状宽带时的典型症状——"惩罚语义梯度出现在边界外"会
+  抹平合法语义边缘，EMA 教师跟随学生形成自我强化。修复：默认关闭该对齐项
+  （=0.0），等边界头锐利后再以 0.1 起步试验；语义阶段 `seg_lr_ratio` 用
+  0.1~0.3（不要 1.0）。`sem_degrade_warn_factor` 会在验证 mIoU 明显低于
+  历史最优时打 WARNING，用于尽早发现语义崩塌。
 - **推理欠分割（单阈值要压到 0.4 才可靠）**：用双阈值滞后
   （`boundary_threshold: 0.4` + `boundary_threshold_high: 0.6`）保留与强边界
   连通的弱边界、剔除孤立噪声；可再开推理 `--tta` 或调大
