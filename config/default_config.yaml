@@ -8,7 +8,7 @@
 # 路径配置
 # -----------------------------------------------------------------------------
 paths:
-  project_root: &project_root "/root/autodl-tmp/segmentationv2"
+  project_root: &project_root "d:/MY_PROGRAMME/segmentationv2"
   raw_data_dir: "data/raw"
   weights_dir: "weights"
   sam2_ckpt: "sam2_hiera_base_plus.pt"
@@ -148,9 +148,9 @@ semi_supervised:
   init_from_checkpoint: "outputs/stage2/best_seg_model/stage2_epoch50.pth"
   
   # EMA 衰减系数（基础值，启用 adaptive_ema 时根据当前 LR 动态调整）
-  ema_decay: 0.99
+  ema_decay: 0.996
   # 是否启用自适应 EMA 衰减（LR 高时降低 decay 让教师更快跟随，LR 低时提高 decay 增加稳定性）
-  adaptive_ema: true
+  adaptive_ema: false
   # 边界伪标签源模式（实验对比用）
   # "ema": EMA 教师伪标签 + Stage-1 锚点混合（默认，当前行为）
   # "stage1_direct": 直接使用 Stage-1 冻结模型输出作为伪标签（无 EMA 滞后）
@@ -220,12 +220,12 @@ semi_supervised:
     output_dir: "outputs/stage2/monitor"
     
   # Random Patch Masking 参数
-  patch_mask_ratio: 0.3
+  patch_mask_ratio: 0.5
   patch_mask_size: 64
   num_patches: 12
   # 掩码区域损失权重配置（控制遮挡区域在无监督损失中的贡献）
   # 语义通道：低频面状特征，鼓励从上下文推断，默认加倍
-  seg_mask_region_weight: 1.0
+  seg_mask_region_weight: 1.5
   # 边界通道：高频线状特征，防止圆斑过拟合，默认降权
   boundary_mask_region_weight: 1.0
   
@@ -296,9 +296,9 @@ semi_supervised:
   # outputs/runs/<时间戳>_<phase>_<tag>/，便于复现与对比。
   freeze:
     # 冻结语义分支（seg_fpn + seg_branch），仅训练边界分支
-    seg_branch: false
+    seg_branch: true
     # 冻结边界分支（boundary_fpn + boundary_branch），仅训练语义分支
-    boundary_branch: true
+    boundary_branch: false
   # 边界-语义对齐权重：默认关闭（0.0）。
   # 注意：边界参考若是雾状宽带（Stage-1 级别 >0.3 占 30-40%），
   # "惩罚语义梯度出现在边界外"会抹平合法语义边缘，导致语义向均值退化
