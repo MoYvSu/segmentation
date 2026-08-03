@@ -1,0 +1,102 @@
+# =============================================================================
+# 第二阶段半监督微调配置（双任务距离场版本）
+# =============================================================================
+# 技术路线：冻结 SAM2 Encoder + 冻结 FPN Decoder 主体，仅微调 cls_branch + reg_branch
+# 使用有标签数据（Focal+MSE）与无标签数据（双路一致性）联合训练
+# python 环境: conda activate sam2_env
+# 启动命令: python train_stage2.py --config config/stage2_config.yaml
+
+# -----------------------------------------------------------------------------
+# 路径配置（复用第一阶段结构）
+# -----------------------------------------------------------------------------
+paths:
+  project_root: &project_root "d:/MY_PROGRAMME/segmentationv2"
+  weights_dir: "weights"
+  sam2_ckpt: "sam2_hiera_base_plus.pt"
+  output_dir: "outputs/stage2"
+
+# -----------------------------------------------------------------------------
+# SAM 2 Encoder 配置（与第一阶段一致）
+# -----------------------------------------------------------------------------
+sam2:
+  model_version: "sam2_hiera_base_plus"
+  config_file: "configs/sam2/sam2_hiera_b+.yaml"
+  device: "cuda"
+  freeze: true
+  sam2_repo_path: "segment-anything-2"
+
+# -----------------------------------------------------------------------------
+# FPN 解码头配置（与第一阶段一致，加载 Stage-1 权重后冻结主体）
+# -----------------------------------------------------------------------------
+decoder:
+  fpn_channels: 256
+  num_classes: 2
+  dropout: 0.1
+  use_bn: true
+
+# -----------------------------------------------------------------------------
+# 数据管道配置
+# -----------------------------------------------------------------------------
+data:
+  image_size: 1024
+  dist_scale_factor: 10.0
+  num_workers: 4
+  train_ratio: 0.8
+  seed: 42
+  augmentation:
+    horizontal_flip: true
+    vertical_flip: true
+    rotation: true
+
+# -----------------------------------------------------------------------------
+# 第二阶段半监督微调专属配置
+# -----------------------------------------------------------------------------
+stage2:
+  # 第一阶段最优权重路径（相对 project_root）
+  STAGE1_CHECKPOINT: "outputs/stage1/best_model.pth"
+
+  # 有标注数据目录（相对 project_root）
+  LABELED_DATA_DIR: "data/raw"
+
+  # 无标注数据目录（相对 project_root）—— 半监督训练专用，与测试集分离
+  UNLABELED_DATA_DIR: "data/unlabeled"
+
+  # 可配有标签样本 Batch Size
+  BATCH_SIZE_LABELED: 4
+
+  # 可配无标签样本 Batch Size
+  BATCH_SIZE_UNLABELED: 8
+
+  # 无监督损失整体权重
+  UNSUPERVISED_WEIGHT: 0.5
+
+  # 伪标签置信度阈值（分类一致性）
+  PSEUDO_LABEL_CONFIDENCE: 0.90
+
+  # 距离场回归损失权重（与第一阶段一致）
+  DIST_WEIGHT: 10.0
+
+  # 每 epoch 最多采样的无标签图像数（全量数据集约 900 张无标签图时限制采样数量以控制计算量）
+  # 设为 0 表示不限制（使用全部无标签数据）
+  UNLABELED_SAMPLES_PER_EPOCH: 32
+
+  # 训练轮数
+  EPOCHS: 100
+
+  # 初始学习率（比第一阶段更低，仅微调两个分支头）
+  LEARNING_RATE: 5.0e-5
+
+  # 权重衰减
+  WEIGHT_DECAY: 1.0e-4
+
+  # Warmup 轮数
+  WARMUP_EPOCHS: 5
+
+  # 梯度裁剪
+  GRAD_CLIP: 1.0
+
+  # 混合精度训练（暂时关闭）
+  AMP: false
+
+  # 保留 checkpoints
+  SAVE_CHECKPOINTS: true
