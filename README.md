@@ -119,6 +119,13 @@ python train_stage2.py --config config/default_config.yaml
 用于拉开边界输出区间。每 epoch 会打印 `bnd_output: max/>0.5占比/gap`，
 用于观察微调是否成功泛化。
 
+`boundary_teacher_mode` 可选四种：`ema`（EMA 教师+锚点混合）、
+`stage1_direct`（Stage-1 直接输出，当前默认）、`self_consistency`
+（学生自一致性）、`anchor_self`（学生自一致性 + Stage-1 锚点混合，
+用于突破 Stage-1 的 recall 天花板）。预测占比上限正则
+（`rate_regularizer_weight`）默认随训练从 0.1 退火到 0.4，既压雾复现
+又不会像骨架阈值退火那样把弱边界从目标中剔除。
+
 从 checkpoint 恢复：
 
 ```bash

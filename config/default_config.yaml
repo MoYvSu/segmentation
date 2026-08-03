@@ -152,6 +152,9 @@ semi_supervised:
   # "ema": EMA 教师伪标签 + Stage-1 锚点混合（默认，当前行为）
   # "stage1_direct": 直接使用 Stage-1 冻结模型输出作为伪标签（无 EMA 滞后）
   # "self_consistency": 学生弱增强预测（stop-gradient）作为伪标签（无 EMA 依赖）
+  # "anchor_self": 学生弱增强预测 + Stage-1 锚点混合（anchor_alpha 从 1.0
+  #   退火到 anchor_floor）。自一致性恢复弱边界 recall（学生微调后弱边界
+  #   比 Stage-1 更强），锚点锚定几何防漂移；recall 天花板高于 stage1_direct。
   boundary_teacher_mode: "stage1_direct"
   # stage1_direct 离线伪标签缓存（推荐）：
   # 先运行 tools/precompute_pseudo_labels.py 生成 Stage-1 边界目标缓存，
@@ -264,7 +267,12 @@ semi_supervised:
     # 预测正样本占比上限正则：学生预测均值超过"目标占比 + rate_slack"时
     # 产生 hinge 惩罚，直接阻止边界概率空间扩散（>0.5 占比膨胀到 30%+ 的失效模式）。
     # 与 margin（往上拉）互补：margin 拉开对比，该正则封住扩散。
-    rate_regularizer_weight: 0.2
+    # 权重随训练退火（start -> end）：早期松让边界学起来，晚期紧压"雾复现"。
+    # 相比"骨架阈值退火"，退火占比上限不会砍掉弱边界 recall（不会出现
+    # "只学会最强边界、弱边界被遗忘"——见 >0.5 占比骤降到 1.8% 的失效模式）。
+    rate_regularizer_weight: 0.1
+    rate_regularizer_weight_end: 0.4
+    rate_regularizer_ramp_epochs: 60
     rate_slack: 0.05
 
   # 冻结开关（单独训练某个分支）
@@ -290,7 +298,10 @@ semi_supervised:
     # 阈值随训练逐步提高（threshold -> threshold_end，线性 ramp）：
     # 早段低阈值多捕获弱边界（保 recall）；晚段模型输出变强后，高阈值
     # 剔除 Stage-1 伪标签中的噪声分支，治"雾状背景先被抑制后又复现"。
-    threshold_end: 0.7
+    # 注意：Stage-1 弱边界本身到不了 0.7，阈值退火会把弱边界从目标中剔除，
+    # 导致模型只学会强边界（>0.5 占比骤降到 ~2% 的失效模式）。
+    # 默认与 threshold 相同（不做退火）；如需试验可自行调高。
+    threshold_end: 0.5
     threshold_ramp_epochs: 60
     # 骨架膨胀宽度（最终边界宽度 = 2*width+1 px）
     # 在"雾状源头"下目标带越宽学生越容易学到扩散，回归到 1（更细的目标带）

@@ -874,20 +874,20 @@ def main():
     anchor_enabled = boundary_anchor_cfg.get("enabled", False)
     ref_model = None
 
-    # stage1_direct 模式必须加载 ref_model
-    if boundary_teacher_mode == "stage1_direct" and not anchor_enabled:
+    # stage1_direct / anchor_self 模式必须加载 ref_model（或使用缓存）
+    if boundary_teacher_mode in ("stage1_direct", "anchor_self") and not anchor_enabled:
         logger.info(
-            "stage1_direct mode: force-enabling Stage-1 ref model "
+            f"{boundary_teacher_mode} mode: force-enabling Stage-1 ref model "
             "(required as boundary pseudo-label source)"
         )
         anchor_enabled = True
 
     if anchor_enabled:
-        if boundary_teacher_mode == "stage1_direct" and use_cached_pseudo_labels:
+        if boundary_teacher_mode in ("stage1_direct", "anchor_self") and use_cached_pseudo_labels:
             # 使用离线缓存时无需在训练中保留 ref_model（目标直接来自缓存）
             logger.info(
                 "Boundary anchor / ref model: SKIPPED "
-                "(stage1_direct + 离线伪标签缓存，训练目标来自缓存)"
+                f"({boundary_teacher_mode} + 离线伪标签缓存，训练目标来自缓存)"
             )
             ref_model = None
         else:
@@ -934,7 +934,12 @@ def main():
     pos_weight = bnd_consist_cfg.get("pos_weight", 5.0)
     margin_loss_weight = bnd_consist_cfg.get("margin_loss_weight", 0.0)
     margin = bnd_consist_cfg.get("margin", 0.4)
-    rate_regularizer_weight = bnd_consist_cfg.get("rate_regularizer_weight", 0.0)
+    rate_w_start = float(bnd_consist_cfg.get("rate_regularizer_weight", 0.0))
+    rate_regularizer_weight = rate_w_start
+    rate_w_end = float(
+        bnd_consist_cfg.get("rate_regularizer_weight_end", rate_w_start)
+    )
+    rate_w_ramp = int(bnd_consist_cfg.get("rate_regularizer_ramp_epochs", 0))
     rate_slack = bnd_consist_cfg.get("rate_slack", 0.05)
     logger.info(
         f"Boundary consistency (gradient): "
@@ -945,6 +950,12 @@ def main():
         f"pos_w={pos_weight}, margin_w={margin_loss_weight}, margin={margin}, "
         f"rate_w={rate_regularizer_weight}, rate_slack={rate_slack}"
     )
+    if rate_w_ramp > 0 and rate_w_end != rate_w_start:
+        logger.info(
+            f"  Rate regularizer annealing: {rate_w_start:.2f} -> "
+            f"{rate_w_end:.2f} over {rate_w_ramp} epochs "
+            "(早期松让边界学起来，晚期紧压雾复现)"
+        )
 
     # 骨架过滤配置（边界伪标签形态学精炼）
     skeleton_filter_cfg = semi_cfg.get("skeleton_filter", {})
@@ -1077,7 +1088,7 @@ def main():
 
         # 计算 Stage-1 锚点权重（从 1.0 渐进衰减到 anchor_floor）
         anchor_alpha = 1.0
-        if anchor_enabled and boundary_teacher_mode == "ema":
+        if anchor_enabled and boundary_teacher_mode in ("ema", "anchor_self"):
             anchor_floor = boundary_anchor_cfg.get("anchor_floor", 0.3)
             anchor_ramp_epochs = boundary_anchor_cfg.get("anchor_ramp_epochs", 20)
             if anchor_ramp_epochs > 0 and epoch < anchor_ramp_epochs:
@@ -1086,6 +1097,14 @@ def main():
                 anchor_alpha = anchor_floor
             if (epoch + 1) % 5 == 0 or epoch == start_epoch:
                 logger.info(f"  Boundary anchor alpha: {anchor_alpha:.3f}")
+
+        # 预测占比上限正则权重退火：早期松（让边界学起来），晚期紧（压雾复现）
+        if rate_w_ramp > 0 and rate_w_end != rate_w_start:
+            rate_regularizer_weight = rate_w_start + (
+                rate_w_end - rate_w_start
+            ) * min(1.0, max(0.0, epoch / max(1, rate_w_ramp)))
+            if (epoch + 1) % 5 == 0 or epoch == start_epoch:
+                logger.info(f"  Rate reg weight: {rate_regularizer_weight:.3f}")
 
         # 计算无监督损失权重（sigmoid ramp-up）
         unsup_weight_eff = unsup_weight * sigmoid_rampup(epoch, unsup_rampup_epochs)
