@@ -9,3 +9,4 @@ data/test/
 data/unlabeled/
 **/__pycache__/
 data/smoketest/
+.ipynb_checkpoints/

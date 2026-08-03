@@ -26,8 +26,12 @@ tqdm>=4.66.0
 
 # ---- Scientific / Image Processing ----
 numpy>=1.26.0
-opencv-python>=4.10.0
+# 注意：必须用 opencv-contrib-python（含 cv2.ximgproc.thinning，骨架过滤/分水岭依赖）
+opencv-contrib-python>=4.10.0
 Pillow>=10.0.0
+scipy>=1.11.0
+scikit-image>=0.22.0
+PyYAML>=6.0
 
 # ---- Machine Learning (Stage 2 classifier) ----
 scikit-learn>=1.4.0

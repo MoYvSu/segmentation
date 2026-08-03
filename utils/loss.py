@@ -40,9 +40,12 @@ class BoundaryLoss(nn.Module):
         gamma: float = 2.0,
         alpha_boundary: float = 0.1,
         alpha_focal: float = 0.75,
+        seg_dice_weight: float = 0.0,
         weight_clamp_min: float = 1.0,
         weight_clamp_max: float = 4.0,
         eps: float = 1e-6,
+        freeze_seg: bool = False,
+        freeze_boundary: bool = False,
     ):
         """
         Args:
@@ -52,14 +55,19 @@ class BoundaryLoss(nn.Module):
             weight_clamp_min: EDT 权重截断下限。
             weight_clamp_max: EDT 权重截断上限。
             eps: 数值稳定常数。
+            freeze_seg: 冻结语义分支时为 True，跳过语义损失项。
+            freeze_boundary: 冻结边界分支时为 True，跳过边界损失项。
         """
         super(BoundaryLoss, self).__init__()
         self.gamma = gamma
         self.alpha_boundary = alpha_boundary
         self.alpha_focal = alpha_focal
+        self.seg_dice_weight = seg_dice_weight
         self.weight_clamp_min = weight_clamp_min
         self.weight_clamp_max = weight_clamp_max
         self.eps = eps
+        self.freeze_seg = freeze_seg
+        self.freeze_boundary = freeze_boundary
 
     def forward(self, pred, target, weight=None):
         """
@@ -74,6 +82,10 @@ class BoundaryLoss(nn.Module):
 
         Returns:
             tuple: (total_loss, loss_seg_value, loss_boundary_value)
+
+        注意：当 freeze_seg=True 时 loss_seg=0（无梯度），
+              当 freeze_boundary=True 时 loss_boundary=0（无梯度）。
+              冻结分支返回的 loss 值仍为 0.0 以保持接口一致。
         """
         seg_logits = pred[:, 0]           # [B, H, W] 语义 logits
         seg_target = target[:, 0]         # [B, H, W] 二值语义掩码
@@ -81,33 +93,48 @@ class BoundaryLoss(nn.Module):
         boundary_target = target[:, 1]    # [B, H, W] 二值边界掩码
 
         # ---- 语义 BCE Loss ----
-        loss_seg = F.binary_cross_entropy_with_logits(
-            seg_logits, seg_target, reduction="mean"
-        )
+        if self.freeze_seg:
+            loss_seg = torch.tensor(0.0, device=pred.device, requires_grad=False)
+        else:
+            loss_seg = F.binary_cross_entropy_with_logits(
+                seg_logits, seg_target, reduction="mean"
+            )
+            if self.seg_dice_weight > 0:
+                # 语义 Dice：块状低频结构，BCE 在类不平衡下易钝；
+                # Dice 对稀疏类别更敏感，缓解珠光体/铁素体面积失衡
+                seg_prob = torch.sigmoid(seg_logits)
+                dice_denom = seg_prob.sum() + seg_target.sum() + self.eps
+                dice = 1.0 - (
+                    2.0 * (seg_prob * seg_target).sum() + self.eps
+                ) / dice_denom
+                loss_seg = loss_seg + self.seg_dice_weight * dice
 
         # ---- 边界 Focal Loss × EDT 权重 ----
-        bce_boundary = F.binary_cross_entropy_with_logits(
-            boundary_logits, boundary_target, reduction="none"
-        )  # [B, H, W]
-
-        p_t = torch.exp(-bce_boundary)
-        focal_weight = (1.0 - p_t) ** self.gamma
-        alpha_t = (
-            self.alpha_focal * boundary_target
-            + (1.0 - self.alpha_focal) * (1.0 - boundary_target)
-        )
-
-        if weight is not None:
-            # 权重图可能是 [B, 1, H, W] 或 [B, H, W]
-            if weight.dim() == 4 and weight.shape[1] == 1:
-                w = weight[:, 0]  # [B, H, W]
-            else:
-                w = weight  # [B, H, W]
-            # 梯度过载保护：截断 EDT 权重到 [1.0, 4.0]
-            w = torch.clamp(w, min=self.weight_clamp_min, max=self.weight_clamp_max)
-            loss_boundary = (alpha_t * focal_weight * w * bce_boundary).mean()
+        if self.freeze_boundary:
+            loss_boundary = torch.tensor(0.0, device=pred.device, requires_grad=False)
         else:
-            loss_boundary = (alpha_t * focal_weight * bce_boundary).mean()
+            bce_boundary = F.binary_cross_entropy_with_logits(
+                boundary_logits, boundary_target, reduction="none"
+            )  # [B, H, W]
+
+            p_t = torch.exp(-bce_boundary)
+            focal_weight = (1.0 - p_t) ** self.gamma
+            alpha_t = (
+                self.alpha_focal * boundary_target
+                + (1.0 - self.alpha_focal) * (1.0 - boundary_target)
+            )
+
+            if weight is not None:
+                # 权重图可能是 [B, 1, H, W] 或 [B, H, W]
+                if weight.dim() == 4 and weight.shape[1] == 1:
+                    w = weight[:, 0]  # [B, H, W]
+                else:
+                    w = weight  # [B, H, W]
+                # 梯度过载保护：截断 EDT 权重到 [1.0, 4.0]
+                w = torch.clamp(w, min=self.weight_clamp_min, max=self.weight_clamp_max)
+                loss_boundary = (alpha_t * focal_weight * w * bce_boundary).mean()
+            else:
+                loss_boundary = (alpha_t * focal_weight * bce_boundary).mean()
 
         # ---- 总损失 ----
         total_loss = loss_seg + self.alpha_boundary * loss_boundary
