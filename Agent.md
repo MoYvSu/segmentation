@@ -38,6 +38,8 @@ Python 环境：`conda activate sam2_env`（或 `D:\Anaconda\envs\sam2_env\pytho
   - `ema`（默认）：EMA 教师 + Stage-1 锚点渐进混合（`anchor_alpha` 从 1.0 线性衰减至 `anchor_floor=0.3`，20 ep）；
   - `stage1_direct`：Stage-1 冻结模型直接输出（无 EMA 滞后）；
   - `self_consistency`：学生弱增强预测 stop-gradient（无 EMA 依赖）。
+  - `anchor_self`：学生弱增强预测 + Stage-1 锚点混合（`anchor_alpha` 从 1.0
+    退火到 `anchor_floor`）——自一致性恢复弱边界 recall，锚点锚定几何防漂移。
 - 无监督损失（`utils/loss_semi.py`）：
   - 语义：弱图伪标签 vs 强图学生预测 MSE，Random Patch Masking 加权（掩码区 seg 权重 2.0、boundary 权重 0.3）；
   - 边界：MSE + `sobel_weight`×Sobel 梯度一致性 + `tv_weight`×各向异性 TV + `bg_suppress_weight`×背景抑制；
@@ -88,7 +90,7 @@ Python 环境：`conda activate sam2_env`（或 `D:\Anaconda\envs\sam2_env\pytho
 
 - `paths.project_root`：硬编码绝对路径（YAML anchor 复用），迁移目录时需同步修改。
 - `inference`：test_dir / output_dir / threshold / boundary_threshold / boundary_threshold_high（双阈值滞后）/ boundary_logit_scale / tta / checkpoint_stage / stage1|stage2_checkpoint。
-- `semi_supervised`：boundary_teacher_mode / use_cached_pseudo_labels / pseudo_label_cache_dir / unsup_weight / unsup_rampup_epochs / ema_decay / adaptive_ema / lr_schedule（flat_decay）/ flat_epochs / freeze / boundary_anchor / boundary_consistency（含 pos_weight / margin_loss_weight / margin / rate_regularizer_weight）/ skeleton_filter / patch_mask / monitor / checkpoint_interval。
+- `semi_supervised`：boundary_teacher_mode（ema / stage1_direct / self_consistency / anchor_self）/ use_cached_pseudo_labels / pseudo_label_cache_dir / unsup_weight / unsup_rampup_epochs / ema_decay / adaptive_ema / lr_schedule（flat_decay）/ flat_epochs / freeze / boundary_anchor / boundary_consistency（含 pos_weight / margin_loss_weight / margin / rate_regularizer_weight 及退火）/ skeleton_filter（threshold / threshold_end / threshold_ramp_epochs）/ patch_mask / monitor / checkpoint_interval。
 - `progressive_aug`：学生输入外观增强参数（enabled / ramp_epochs / max_prob / 各抖动范围）。
 - `boundary`：净化 GT 目录、EDT 权重范围、净化参数。
 
@@ -175,8 +177,13 @@ Checkpoint 统一格式：`decoder_state_dict` + `optimizer_state_dict` + `sched
   并目检 monitor 边界图区分"宽带扩散"与"散斑错位"。
 - **雾状背景先被抑制后又复现（训练后期）**：模型输出变强后，固定阈值的
   骨架过滤会把 Stage-1 伪标签里的噪声分支也判为骨架，学生跟着学回来。
-  处置：骨架过滤阈值随训练线性退火（`threshold 0.5 -> threshold_end 0.7`，
-  `threshold_ramp_epochs 60`）——早段保 recall，晚段剔噪声。
+  处置：**不要用骨架阈值退火**（Stage-1 弱边界到不了 0.7，阈值抬高会把
+  弱边界从目标里剔除，导致 >0.5 占比骤降到 ~2% 的稀疏失效模式）；
+  改为退火 `rate_regularizer_weight`（0.1 -> 0.4，`rate_regularizer_ramp_epochs 60`）：
+  早期松让边界学起来，晚期紧压雾复现，且不损失 recall。
+- **只学会强边界、弱边界被遗忘（>0.5 占比 1.8%、gap 高但边界大量缺失）**：
+  阈值退火到 0.6+ 的典型症状。若需要超过 Stage-1 的 recall 天花板，
+  切 `boundary_teacher_mode: "anchor_self"`（自一致性 + 锚点混合）。
 - **推理欠分割（单阈值要压到 0.4 才可靠）**：用双阈值滞后
   （`boundary_threshold: 0.4` + `boundary_threshold_high: 0.6`）保留与强边界
   连通的弱边界、剔除孤立噪声；可再开推理 `--tta` 或调大

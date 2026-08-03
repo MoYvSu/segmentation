@@ -521,6 +521,42 @@ def compute_unsupervised_loss(
                 student_weak_output = student_model(img_weak, output_size=output_size)
                 target_boundary_prob = torch.sigmoid(student_weak_output[:, 1])
 
+        elif boundary_teacher_mode == "anchor_self":
+            # 模式 4: 学生弱增强预测(stop-grad)与 Stage-1 锚点混合
+            # 自一致性恢复弱边界 recall（学生经微调后弱边界比 Stage-1 更强），
+            # 锚点锚定几何结构防漂移；anchor_alpha 从 1.0 退火到 anchor_floor，
+            # 训练中逐步把主导权交给学生。
+            with torch.no_grad():
+                student_weak_output = student_model(img_weak, output_size=output_size)
+                student_weak_boundary = torch.sigmoid(student_weak_output[:, 1])
+
+            if cached_boundary_target is not None:
+                anchor_boundary = cached_boundary_target.to(
+                    device=device, dtype=torch.float32
+                )
+                if anchor_boundary.shape[-2:] != student_boundary_prob.shape[-2:]:
+                    anchor_boundary = F.interpolate(
+                        anchor_boundary,
+                        size=student_boundary_prob.shape[-2:],
+                        mode="bilinear",
+                        align_corners=True,
+                    )
+                anchor_boundary = anchor_boundary[:, 0]
+            else:
+                if ref_model is None:
+                    raise ValueError(
+                        "ref_model (Stage-1) is required for "
+                        "boundary_teacher_mode='anchor_self'"
+                    )
+                with torch.no_grad():
+                    ref_output = ref_model(img_weak, output_size=output_size)
+                    anchor_boundary = torch.sigmoid(ref_output[:, 1])
+
+            target_boundary_prob = (
+                anchor_alpha * anchor_boundary
+                + (1.0 - anchor_alpha) * student_weak_boundary
+            )
+
         else:
             raise ValueError(
                 f"Unknown boundary_teacher_mode: '{boundary_teacher_mode}'. "
