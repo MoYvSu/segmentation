@@ -103,10 +103,10 @@ inference:
   # 双阈值滞后二值化（Canny 式）：boundary_threshold 为弱阈值，
   # boundary_threshold_high 为强阈值；弱阈值像素仅在与强阈值连通时保留。
   # 解决"单阈值压到 0.4 才可靠"的欠分割：弱真实边界保留、孤立噪声剔除。
-  # 为降低欠分割风险，弱阈值降到 0.3、强阈值降到 0.45（test 域边界响应
-  # 弱于训练域，过低阈值由滞后连通性兜住噪声）
-  boundary_threshold: 0.3
-  boundary_threshold_high: 0.45
+  # 0.3/0.45 实测出现过分割（部分噪声弱响应被连通性放行），
+  # 回调到 0.35/0.5：弱阈值仍低于原 0.4 保 recall，强阈值 0.5 收紧噪声
+  boundary_threshold: 0.35
+  boundary_threshold_high: 0.5
   # 推理时对边界 logits 乘系数再 sigmoid（>1 增强弱响应，默认 1.0 不缩放）
   boundary_logit_scale: 1.0
   # 推理 TTA（hflip/vflip/rot180 平均），提升弱边界召回与稳定性
