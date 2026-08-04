@@ -115,6 +115,24 @@ inference:
   stage2_checkpoint: "outputs/stage2/stage2_epoch100stage1_direct.pth"
 
 # -----------------------------------------------------------------------------
+# 实例级分类器推理配置（对照实验证实优于语义投票，见 README）
+# -----------------------------------------------------------------------------
+# 流程：best_bnd 边界模型分水岭 -> 冻结 SAM2/FPN 特征按实例掩码池化 ->
+#       tools/instance_classifier.py 训练的实例分类器判类。
+# 训练产物在 outputs/instance_clf/（classifier.joblib + meta.json），
+# 需先运行 tools/instance_classifier.py 生成，再运行 inference_instance.py。
+instance_classifier:
+  # 边界模型检查点（实例掩码来源；默认使用最佳边界模型）
+  checkpoint: "outputs/stage2/best_bnd_model/stage2_epoch100.pth"
+  # 实例分类器产物（tools/instance_classifier.py 训练）
+  classifier: "outputs/instance_clf/classifier.joblib"
+  # 推理输入/输出
+  test_dir: "data/test"
+  output_dir: "outputs/inference_instance"
+  # 特征目标分辨率（与训练一致，勿改）
+  target_size: 1024
+
+# -----------------------------------------------------------------------------
 # 主动学习配置
 # -----------------------------------------------------------------------------
 active_learning:
@@ -173,7 +191,7 @@ semi_supervised:
   # 且 patch mask 遮挡推断对语义有害；语义阶段建议 0.05~0.1
   # （0.3 会在 ramp-up 完成后把学生从有标签分布拉偏——见 20260803 运行的
   #  最佳 mIoU 出现在 epoch 4、之后持续下滑的现象）
-  unsup_seg_weight: 0.1
+  unsup_seg_weight: 0.0
   # 语义一致性目标温度锐化（方案 A）：对教师语义概率做 p^(1/T) 锐化，
   # T<1 推向 0/1，对抗 MSE 软目标把学生输出拉向 0.5（test 集"涌动"根因：
   # >0.8 高置信从 Stage-1 的 63.5% 掉到 ep60 的 52%、0.4-0.6 模糊带
@@ -365,12 +383,15 @@ progressive_aug:
   # 最终增强概率（达到 ramp_end 后维持）
   max_prob: 0.8
   # 亮度抖动范围（乘法因子）
-  # 收窄到 0.85~1.15：金相相区主要靠灰度/纹理区分，±40% 抖动会抹掉判别
-  # 线索（尤其稀释仅有 26 张的有标签监督信号）；边界阶段如需更强可放宽
-  brightness_range: [0.85, 1.15]
-  # 对比度抖动范围（乘法因子）
-  contrast_range: [0.85, 1.15]
-  # 锐度抖动范围（负=模糊, 正=锐化, 基于 unsharp mask）：同步收窄
-  sharpness_range: [-0.2, 0.3]
-  # 高斯噪声标准差（0=禁用）
-  gaussian_noise_std: 0.01
+  # 放宽到 0.55~1.45 以覆盖 test 域：实测 test 灰度均值 132.7 ≈ raw 的 0.68×、
+  # 对比度 34.5 ≈ raw 的 0.6×（20260804 统计），收窄的 0.85~1.15 够不到
+  # 暗域，导致语义/边界在 test 上无训练覆盖而出现"涌动/翻转"；
+  # 该增强为师生共享输入，对后续边界阶段同样有效
+  brightness_range: [0.55, 1.45]
+  # 对比度抖动范围（乘法因子）：下限 0.45 覆盖 test 的低对比度
+  contrast_range: [0.45, 1.45]
+  # 锐度抖动范围（负=模糊, 正=锐化, 基于 unsharp mask）：放宽模糊端，
+  # 增强对低清晰度/低对比度输入的鲁棒性
+  sharpness_range: [-0.5, 1.0]
+  # 高斯噪声标准差（0=禁用）：略增噪声，提升暗域/低对比度输入的鲁棒性
+  gaussian_noise_std: 0.015
