@@ -126,6 +126,88 @@ def masked_l1_loss(pred, target, mask):
     return err.sum() / denom
 
 
+@torch.no_grad()
+def save_reconstruction_monitor(encoder, head, dataset, outdir, epoch, device, num=3):
+    """保存 掩码输入 / 重建 / 目标 三联图，用于目检重建是否恢复纹理而非糊色块。"""
+    enc_trainable = encoder.trainable_lora
+    encoder.trainable_lora = True
+    encoder.trunk.eval()
+    head.eval()
+    monitor_dir = os.path.join(outdir, "monitor")
+    os.makedirs(monitor_dir, exist_ok=True)
+    tiles = []
+    for i in range(num):
+        masked, target, mask = dataset[i]
+        masked = masked.unsqueeze(0).to(device)
+        target = target.unsqueeze(0).to(device)
+        feats = encoder(masked)
+        pred = head(feats[0])
+        pred = F.interpolate(pred, size=target.shape[-2:],
+                             mode="bilinear", align_corners=True)
+        # 拼 [掩码输入, 重建, 目标]（RGB -> BGR 存盘）
+        show = torch.cat([masked.cpu(), pred.cpu(), target.cpu()], dim=-1)
+        show = (show.clamp(0, 1).permute(0, 2, 3, 1).numpy()[0] * 255).astype(np.uint8)
+        tiles.append(cv2.cvtColor(show, cv2.COLOR_RGB2BGR))
+    canvas = np.vstack(tiles)
+    path = os.path.join(monitor_dir, f"epoch_{epoch + 1:04d}.png")
+    cv2.imwrite(path, canvas)
+    encoder.trainable_lora = enc_trainable
+    logger.info(f"  重建监控图已保存: {path}")
+
+
+@torch.no_grad()
+def downstream_probe(encoder, device, config, decoder_path):
+    """下游探针：冻结 LoRA，用指定解码头在 val 集上评估特征质量。
+
+    返回 (mIoU, mDice, bndIoU)。若 LoRA 预训练有效，mIoU 应随 epoch 上升
+    （解码器未重训的情况下也能反映特征可分性变化）。
+    """
+    if not decoder_path or not os.path.exists(decoder_path):
+        logger.warning(f"downstream probe: 解码器不存在 {decoder_path}，跳过")
+        return None
+    from data.dataset import BoundaryDataset, collate_fn
+    from models.fpn_decoder import FPNDecoder, SegmentationModel
+    from utils.metrics import SegMetrics
+    from torch.utils.data import DataLoader
+
+    root = config["paths"]["project_root"]
+    dec = FPNDecoder(in_channels=[112, 224, 448, 896], fpn_channels=256,
+                     num_classes=2, dropout=0.1, use_bn=True)
+    ck = torch.load(decoder_path, map_location=device, weights_only=False)
+    dec.load_state_dict(ck["decoder_state_dict"])
+    dec = dec.to(device)
+    dec.eval()
+
+    val_ds = BoundaryDataset(
+        data_dir=os.path.join(root, config["paths"]["raw_data_dir"]),
+        gt_dir=os.path.join(root, config["boundary"]["gt_dir"]),
+        image_size=config["data"]["image_size"], crop_size=0, augment=False,
+        split="val", train_ratio=config["data"]["train_ratio"],
+        seed=config["data"]["seed"])
+    loader = DataLoader(val_ds, batch_size=4, shuffle=False, num_workers=0,
+                        collate_fn=collate_fn)
+    model = SegmentationModel(encoder, dec)
+    model.eval()
+    metrics = SegMetrics(num_classes=2)
+    tp = fp = fn = 0
+    for b in loader:
+        img = b["image"].to(device)
+        tgt = b["target"].to(device)
+        out = model(img, output_size=tgt.shape[-2:])
+        pred = (torch.sigmoid(out[:, 0]) > 0.5).long()
+        metrics.update_tensor(pred, tgt[:, 0].long())
+        bp = (torch.sigmoid(out[:, 1]) > 0.5).long()
+        bg = tgt[:, 1].long()
+        tp += ((bp == 1) & (bg == 1)).sum().item()
+        fp += ((bp == 1) & (bg == 0)).sum().item()
+        fn += ((bp == 0) & (bg == 1)).sum().item()
+    mm = metrics.get_metrics()
+    bi = tp / (tp + fp + fn + 1e-7)
+    logger.info(f"  downstream probe: mIoU={mm['mean_iou']:.4f} "
+                f"mDice={mm['mean_dice']:.4f} bndIoU={bi:.4f}")
+    return mm["mean_iou"], mm["mean_dice"], bi
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="config/default_config.yaml")
@@ -139,6 +221,12 @@ def main():
     ap.add_argument("--num_workers", type=int, default=4)
     ap.add_argument("--checkpoint_interval", type=int, default=5)
     ap.add_argument("--resume", default=None)
+    ap.add_argument("--monitor_every", type=int, default=5,
+                    help="每隔 N epoch 保存重建监控图（0=关闭）")
+    ap.add_argument("--eval_every", type=int, default=5,
+                    help="每隔 N epoch 跑下游探针（0=关闭）")
+    ap.add_argument("--eval_decoder", default="outputs/stage1/best_model.pth",
+                    help="下游探针使用的解码头检查点（默认 v4.0 Stage-1）")
     args = ap.parse_args()
 
     config = yaml.safe_load(open(args.config))
@@ -219,6 +307,20 @@ def main():
         avg = epoch_loss / max(n_steps, 1)
         logger.info(f"Epoch {epoch + 1}/{total_epochs} done ({time.time() - t0:.0f}s): "
                     f"loss={avg:.4f}")
+
+        # 重建监控图（目检纹理恢复）
+        if args.monitor_every > 0 and ((epoch + 1) % args.monitor_every == 0 or epoch == total_epochs - 1):
+            save_reconstruction_monitor(encoder, head, dataset, args.outdir, epoch, device)
+
+        # 下游探针（特征可分性：解码头未重训，反映 LoRA 特征质量）
+        if args.eval_every > 0 and ((epoch + 1) % args.eval_every == 0 or epoch == total_epochs - 1):
+            probe = downstream_probe(encoder, device, config, args.eval_decoder)
+            if probe is not None:
+                with open(os.path.join(args.outdir, "probe_metrics.csv"), "a",
+                          encoding="utf-8") as f:
+                    if f.tell() == 0:
+                        f.write("epoch,mIoU,mDice,bndIoU\n")
+                    f.write(f"{epoch + 1},{probe[0]:.4f},{probe[1]:.4f},{probe[2]:.4f}\n")
 
         # 保存
         save_lora = {
