@@ -174,8 +174,8 @@ def load_lora_state_dict(model: nn.Module, state: dict) -> int:
 def load_lora_from_checkpoint(model: nn.Module, checkpoint: dict) -> bool:
     """推理用：若 checkpoint 含 lora_state_dict，按状态推断 rank 注入并加载。
 
-    返回是否加载了 LoRA。用于 inference.py / inference_instance.py 加载
-    含 LoRA 的检查点（rank/alpha 从 lora_state_dict 与 checkpoint.config 恢复）。
+    返回是否加载了 LoRA。用于 inference.py 加载含 LoRA 的检查点
+    （rank/alpha 从 lora_state_dict 与 checkpoint.config 恢复）。
     """
     state = checkpoint.get("lora_state_dict")
     if not state:
