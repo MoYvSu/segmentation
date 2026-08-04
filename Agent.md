@@ -63,7 +63,6 @@ Python 环境：`conda activate sam2_env`（或 `D:\Anaconda\envs\sam2_env\pytho
 | `models/fpn_decoder.py` | 独立双 FPN + 输出头；`SegmentationModel`；`freeze_seg_branch` / `freeze_boundary_branch` |
 | `data/dataset.py` | `letterbox`（BORDER_REFLECT）、Labelme 解析、边界权重、`BoundaryDataset` |
 | `data/dataset_semi.py` | `LabeledDataset` / `UnlabeledDataset`（弱强双路 + patch masking）|
-| `data/active_learning.py` | 不确定性采样 + mask→Labelme JSON 反向网关 |
 | `tools/preprocess_labels.py` | 离线净化 GT 生成（CLAHE + Canny + 内部掩码腐蚀）|
 | `tools/precompute_pseudo_labels.py` | Stage-1 边界伪标签离线预计算（TTA + report.csv/exclude.txt 质量剔除）|
 | `utils/loss.py` | `BoundaryLoss` |
@@ -90,7 +89,7 @@ Python 环境：`conda activate sam2_env`（或 `D:\Anaconda\envs\sam2_env\pytho
 
 ## 6. 配置参考（`config/default_config.yaml`）
 
-`config/default_config.yaml` 是唯一主配置（含 Stage 2 的 `semi_supervised` 段）；`config/stage2_config.yaml` 为早期独立配置，已被取代，不要回退使用。
+`config/default_config.yaml` 是唯一主配置（含 Stage 2 的 `semi_supervised` 段）。
 
 - `paths.project_root`：硬编码绝对路径（YAML anchor 复用），迁移目录时需同步修改。
 - `inference`：test_dir / output_dir / threshold / boundary_threshold / boundary_threshold_high（双阈值滞后）/ boundary_logit_scale / tta / checkpoint_stage / stage1|stage2_checkpoint。
@@ -135,10 +134,6 @@ Checkpoint 统一格式：`decoder_state_dict` + `optimizer_state_dict` + `sched
 
 ## 8. 调试与验证
 
-- `debug_pipeline.py`：数据管线诊断（letterbox 比例、语义/边界掩码、EDT 权重、边界受阻分水岭）。
-- `debug_iou.py`：零 epoch IoU 硬审计（数据源 / 前向数值 / 二值化门限三项闭环）。
-- `test_skeleton_watershed.py`：纯图像处理的骨架 + 受阻分水岭验证。
-- `visualize_instances.py`：实例图着色（`_inst.png` + `_class.json`）。
 - `tools/eval_instance_pipelines.py`：两臂实例分类对照评估（labelme 多边形 GT）。
 - 推理可选 `--tta`（hflip/vflip/rot180 logits 平均）与双阈值滞后二值化
   （`boundary_threshold` 弱阈值 + `boundary_threshold_high` 强阈值），
@@ -147,9 +142,9 @@ Checkpoint 统一格式：`decoder_state_dict` + `optimizer_state_dict` + `sched
 
 改代码后的最小验证顺序：
 
-1. 改数据管线 → 跑 `debug_pipeline.py`；
+1. 改数据管线 → 小步数训练并盯数据集打印/监控输出；
 2. 改损失 → 小步数训练并盯 sup/unsup 各项数值与 monitor 图；
-3. 改后处理 → 跑 `test_skeleton_watershed.py` + `inference.py` 单图目检。
+3. 改后处理 → 跑 `inference.py` 单图目检。
 
 ## 9. 开发规范
 
@@ -162,7 +157,7 @@ Checkpoint 统一格式：`decoder_state_dict` + `optimizer_state_dict` + `sched
 ## 10. Git 工作流
 
 - 分支前缀 `codex/`。
-- `.gitignore` 忽略：`outputs/`、`weights/`、`segment-anything-2/`、`data/raw|test|unlabeled|smoketest/`、`config/*`（但保留 `default_config.yaml` 与 `stage2_config.yaml`）。
+- `.gitignore` 忽略：`outputs/`、`weights/`、`segment-anything-2/`、`data/raw|test|unlabeled|smoketest/`、`config/*`（但保留 `default_config.yaml`）。
 - 提交前先 `git status` 确认工作区；工作区可能存在未提交 WIP（当前为 `default_config.yaml` / `train_stage2.py` / `utils/loss_semi.py` 的背景抑制与多模式伪标签改动），属于正常迭代，不要随意丢弃或 `git checkout --` 还原。
 - 每次有意义的实验/修复单独提交，便于回溯（本项目历史即按此组织）。
 

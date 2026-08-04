@@ -1,5 +1,4 @@
 config/*
-!config/stage2_config.yaml
 !config/default_config.yaml
 weights
 segment-anything-2
@@ -9,3 +8,5 @@ data/test/
 data/unlabeled/
 **/__pycache__/
 data/smoketest/
+# 本地环境依赖（本机 skimage 等，非项目代码）
+.pylibs/

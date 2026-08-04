@@ -56,15 +56,13 @@ python tools/preprocess_labels.py --visualize  # 可视化净化结果
 segmentationv2/
 ├── config/
 │   ├── default_config.yaml      # 主配置（含 Stage 1 + Stage 2 半监督全量参数）
-│   └── stage2_config.yaml       # Stage 2 早期独立配置（已被 default_config.yaml 取代）
 ├── data/
 │   ├── raw/                     # 有标注图像 + Labelme .json
 │   ├── purified_gt/             # 离线净化 GT（_gt.npz）
 │   ├── unlabeled/               # 无标注图像（半监督）
 │   ├── test/  smoketest/        # 测试 / 冒烟测试图像
 │   ├── dataset.py               # 在线数据管道（letterbox / 边界权重 / BoundaryDataset）
-│   ├── dataset_semi.py          # 半监督双流数据集（Labeled / Unlabeled）
-│   └── active_learning.py       # 不确定性采样 + mask→Labelme JSON 反向网关
+│   └── dataset_semi.py          # 半监督双流数据集（Labeled / Unlabeled）
 ├── models/
 │   ├── sam2_encoder.py          # 冻结 SAM 2 Hiera trunk（4 尺度特征）
 │   └── fpn_decoder.py           # 独立双 FPN 解码头（seg_fpn + boundary_fpn）
@@ -83,10 +81,6 @@ segmentationv2/
 ├── train_stage2.py              # Stage 2 半监督训练入口
 ├── inference.py                 # 推理入口（语义投票实例分类，对照臂）
 ├── inference_instance.py        # 推理入口（实例级分类器判类，主流程）
-├── debug_iou.py                 # 零 epoch IoU 硬审计
-├── debug_pipeline.py            # 数据管线诊断（letterbox / 边界权重 / 受阻分水岭）
-├── test_skeleton_watershed.py   # 骨架 + 分水岭纯图像验证
-└── visualize_instances.py       # 实例图着色可视化
 ```
 
 ## 训练

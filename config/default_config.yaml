@@ -8,13 +8,12 @@
 # 路径配置
 # -----------------------------------------------------------------------------
 paths:
-  project_root: &project_root "/root/autodl-tmp/segmentationv2"
+  project_root: &project_root "d:/MY_PROGRAMME/segmentationv2"
   raw_data_dir: "data/raw"
   weights_dir: "weights"
   sam2_ckpt: "sam2_hiera_base_plus.pt"
   output_dir: "outputs/stage1"
   pseudo_label_dir: "outputs/pseudo_labels"
-  active_learning_log: "outputs/active_learning_log.csv"
 
 # -----------------------------------------------------------------------------
 # SAM 2 Encoder 配置
@@ -98,13 +97,16 @@ inference:
   test_dir: "data/test"
   output_dir: "outputs/inference"
   threshold: 0.5
-  min_instance_area: 500
+  # 最小实例面积：500 -> 300，保留更小的晶粒，减少小晶粒级欠分割
+  min_instance_area: 300
   max_instance_id: 255
   # 双阈值滞后二值化（Canny 式）：boundary_threshold 为弱阈值，
   # boundary_threshold_high 为强阈值；弱阈值像素仅在与强阈值连通时保留。
   # 解决"单阈值压到 0.4 才可靠"的欠分割：弱真实边界保留、孤立噪声剔除。
-  boundary_threshold: 0.4
-  boundary_threshold_high: 0.5
+  # 为降低欠分割风险，弱阈值降到 0.3、强阈值降到 0.45（test 域边界响应
+  # 弱于训练域，过低阈值由滞后连通性兜住噪声）
+  boundary_threshold: 0.3
+  boundary_threshold_high: 0.45
   # 推理时对边界 logits 乘系数再 sigmoid（>1 增强弱响应，默认 1.0 不缩放）
   boundary_logit_scale: 1.0
   # 推理 TTA（hflip/vflip/rot180 平均），提升弱边界召回与稳定性
@@ -133,15 +135,6 @@ instance_classifier:
   target_size: 1024
 
 # -----------------------------------------------------------------------------
-# 主动学习配置
-# -----------------------------------------------------------------------------
-active_learning:
-  strategy: "entropy"
-  sample_size: 10
-  entropy_threshold: 0.5
-  boundary_variance_threshold: 0.1
-
-# -----------------------------------------------------------------------------
 # 后处理配置
 # -----------------------------------------------------------------------------
 post_process:
@@ -149,7 +142,7 @@ post_process:
   align_corners: true
   connectivity: 8
   min_noise_area: 50
-  save_visualization: false
+  save_visualization: true
 
 # -----------------------------------------------------------------------------
 # 半监督配置（Stage 2: Mean Teacher）
