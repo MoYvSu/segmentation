@@ -58,11 +58,38 @@ class LoRALinear(nn.Module):
         return out
 
 
+def enable_trunk_gradient_checkpointing(trunk: nn.Module) -> None:
+    """用梯度检查点替换 Hiera trunk 的块循环 forward。
+
+    训练（LoRA 反向传播）时逐 block 重计算激活，把 trunk 激活内存从
+    O(num_blocks × activation) 降到 O(1 × activation)，从而可以开大 batch。
+    仅对 forward 做替换，不影响 state_dict。推理（无梯度）不启用。
+    """
+    import torch.utils.checkpoint as ckpt
+
+    def forward_with_ckpt(x: torch.Tensor):
+        x = trunk.patch_embed(x)
+        x = x + trunk._get_pos_embed(x.shape[1:3])
+        outputs = []
+        for i, blk in enumerate(trunk.blocks):
+            x = ckpt.checkpoint(blk, x, use_reentrant=False)
+            if (i == trunk.stage_ends[-1]) or (
+                i in trunk.stage_ends and trunk.return_interm_layers
+            ):
+                feats = x.permute(0, 3, 1, 2)
+                outputs.append(feats)
+        return outputs
+
+    trunk.forward = forward_with_ckpt
+    logger.info("LoRA: trunk 梯度检查点已启用（可开大 batch）")
+
+
 def inject_trunk_lora(
     encoder: nn.Module,
     rank: int = 16,
     alpha: float = 32.0,
     target_layers=None,
+    use_grad_checkpoint: bool = True,
 ) -> int:
     """向 encoder.trunk 注入 LoRA，返回注入层数。
 
@@ -94,6 +121,8 @@ def inject_trunk_lora(
         logger.info(f"LoRA injected: {name} (in={module.in_features}, out={module.out_features})")
 
     encoder.trainable_lora = True
+    if use_grad_checkpoint:
+        enable_trunk_gradient_checkpointing(trunk)
     logger.info(f"LoRA injected {len(targets)} layers (rank={rank}, alpha={alpha}, "
                 f"scaling={alpha / max(rank, 1):.3f})")
     return len(targets)
@@ -162,7 +191,7 @@ def load_lora_from_checkpoint(model: nn.Module, checkpoint: dict) -> bool:
     alpha = float(cfg.get("alpha", 32.0)) if cfg else 32.0
     target_layers = cfg.get("target_layers") if cfg else None
     inject_trunk_lora(model.encoder, rank=rank, alpha=alpha,
-                      target_layers=target_layers)
+                      target_layers=target_layers, use_grad_checkpoint=False)
     n = load_lora_state_dict(model, state)
     logger.info(f"LoRA loaded from checkpoint: rank={rank}, alpha={alpha}, params={n}")
     return True
