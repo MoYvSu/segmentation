@@ -20,9 +20,15 @@ Python 环境：`conda activate sam2_env`（或 `D:\Anaconda\envs\sam2_env\pytho
 4. 长宽比保真：一律 Letterbox（等比缩放 + BORDER_REFLECT 镜像填充），禁止挤压变形。
 5. 禁止离线改图：所有变换/增强必须在线完成。
 
-## 3. 当前架构（两阶段）
+## 3. 当前架构（协议 C：LoRA 全链路）
 
-### Stage 1（`train.py`，全监督，已完成）
+> **当前主线**：自监督 LoRA 预训练（`tools/pretrain_lora_ssl.py`，1000 无标签 MAE
+> 掩码重建）→ Stage-1 监督（`train.py` + `config/stage1_lora.yaml`，LoRA 开）→
+> Stage-2 联合微调（`train_stage2.py` + `config/stage2_lora.yaml`，双分支联合 + LoRA）。
+> 当前最优 `outputs/stage2_lora/best_model_stage2.pth`：val mIoU 0.8315 / bndIoU 0.5009。
+> 已废弃：v4.0 两阶段分支冻结协议与实例分类器管线（git 标签 `v4.0-instance-clf` 可回溯）。
+
+### Stage 1（`train.py`，全监督，协议 C 第二步）
 
 - 冻结 SAM 2 Hiera trunk（base+），输出 4 尺度特征：112 / 224 / 448 / 896 ch，分辨率 256→32。
 - **独立双 FPN 解码头**（`models/fpn_decoder.py`）：`seg_fpn` + `boundary_fpn` 各自拥有独立的 lateral_convs + ResidualBlocks + top-down 融合（256ch），再各接独立输出头（GroupNorm + ReLU + Dropout + 1×1 Conv）。
@@ -30,16 +36,15 @@ Python 环境：`conda activate sam2_env`（或 `D:\Anaconda\envs\sam2_env\pytho
 - 损失：`BoundaryLoss` = 语义 BCE + `alpha_boundary` × FocalLoss(边界) × EDT 权重（权重 clamp [1, 4]）。
 - 优化：AdamW(1.5e-4) + warmup(25) → cosine；梯度裁剪 1.0；best 模型按复合评分 `0.2×mIoU + 0.8×BndIoU` 保存。
 
-### Stage 2（`train_stage2.py`，半监督 Mean Teacher，进行中）
+### Stage 2（`train_stage2.py`，半监督联合微调，协议 C 第三步）
 
-- 从 Stage-1 checkpoint 初始化 decoder；维护 EMA 教师（decay 0.999，可自适应）。
-- 可选 LoRA（`config.lora`，默认关闭）：冻结 trunk 的注意力 qkv/proj 注入低秩
-  适配器（rank 16 ≈ 1M 参数），语义/边界共享域适配特征；启用后 trunk 前向保留
-  梯度（显存上升），checkpoint 保存 `lora_state_dict`，推理端自动加载。
-- **协议 C（LoRA 完整链路）**：自监督 LoRA 预训练（`tools/pretrain_lora_ssl.py`，
-  1000 无标签 MAE 掩码重建）→ Stage-1 监督（`train.py`，LoRA 开）→ Stage-2 联合
-  微调（`train_stage2.py`，双分支联合 + LoRA）。要点：特征层随训练变动时，
-  被冻结的头必须阶段末重拟合，或干脆联合训练——避免"特征动了、头冻结"的漂移。
+- 从 Stage-1 LoRA checkpoint 初始化 decoder + LoRA；双分支联合训练（freeze 全关），
+  LoRA 随训练继续适配；维护 EMA 教师（decay 0.999，可自适应）。
+- LoRA（`config.lora`）：冻结 trunk 的注意力 qkv/proj 注入低秩适配器
+  （rank 16 ≈ 1M 参数），语义/边界共享域适配特征；trunk 梯度检查点已启用
+  （batch 可开大）；checkpoint 保存 `lora_state_dict`，推理端自动加载。
+- 关键原则：特征层随训练变动时，被冻结的头必须阶段末重拟合，或干脆联合训练
+  ——避免"特征动了、头冻结"的漂移（协议 C 采用联合训练）。
 - 双流 batch：有标签流（BoundaryLoss）+ 无标签流（一致性损失，权重 `unsup_weight` × sigmoid ramp-up 10 ep）。
 - 边界伪标签源 `boundary_teacher_mode`：
   - `ema`（默认）：EMA 教师 + Stage-1 锚点渐进混合（`anchor_alpha` 从 1.0 线性衰减至 `anchor_floor=0.3`，20 ep）；

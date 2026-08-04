@@ -4,9 +4,16 @@
 
 ## 当前进度
 
-- **Stage 1（全监督）已跑通**：双 FPN 解码头、语义 BCE + 边界 Focal×EDT 权重损失，checkpoint 位于 `outputs/stage1/`（`best_model.pth` 等）。
-- **Stage 2（半监督微调）进行中**：Mean Teacher（EMA）+ 多模式边界伪标签源 + 梯度感知一致性损失（Sobel + TV + 背景抑制）+ 骨架过滤 + Random Patch Masking + 渐进式外观增强 + 分支冻结 + 三分组优化器 + flat_decay 三阶段调度。checkpoint 位于 `outputs/stage2/`（`stage2_epoch30/50/100.pth`、`语义优化版模型/` 等）。
-- **推理后处理已跑通**：边界骨架化 → 核心剥离 → 受阻分水岭 → 语义投票，已在 `data/test`、`data/smoketest` 批量输出实例图与类别映射。
+- **协议 C（LoRA 全链路）已跑通**：自监督 LoRA 预训练（1000 无标签，MAE 掩码重建）→
+  Stage-1 监督（LoRA）→ Stage-2 联合微调（LoRA）。当前最优
+  `outputs/stage2_lora/best_model_stage2.pth`：**val mIoU 0.8315 / bndIoU 0.5009**
+  （对比 v4.0 基线的 0.7811 / 0.4082，语义 +0.050、边界 +0.093）。
+- **语义头已接近直接可用**：test 域 `>0.8` 高置信 72%、`0.4-0.6` 模糊带 2.9%、
+  掩码碎片化约 35 个连通域（v4.0 时代 86~112）；实例类别由分水岭 + 语义投票产生。
+- **边界头**：bndIoU 0.5009 为历史最高，但 test 目检仍有欠分割（边界高概率平台窄，
+  `>0.7` 仅 ~1%），推理端调参中（`boundary_logit_scale` 1.3~1.8、阈值 0.35 等）。
+- **v4.0 实例分类器已废弃**：语义头已足够，不再需要实例级分类器
+  （git 标签 `v4.0-instance-clf` 可回溯历史实现）。
 
 ## 环境配置
 
@@ -88,81 +95,63 @@ segmentationv2/
 └── visualize_instances.py       # 实例图着色可视化
 ```
 
-## 训练
+## 训练（协议 C：LoRA 全链路，当前主线）
 
-### Stage 1 全监督
+> 架构：**自监督 LoRA 预训练 → Stage-1 监督（LoRA）→ Stage-2 联合微调（LoRA）**。
+> 文献：LoRA (2021) / Conv-LoRA (2024) / TopoLoRA-SAM (2026)。trunk 梯度检查点已启用。
+
+**① 自监督 LoRA 预训练**（1000 张无标签，MAE 掩码重建，只训 LoRA + 重建头）：
 
 ```bash
-conda activate sam2_env
-python train.py --config config/default_config.yaml
+python tools/pretrain_lora_ssl.py --config config/default_config.yaml --epochs 30 --batch_size 8
 ```
+
+产物：`outputs/lora_pretrain/lora_state_dict.pth`（Stage-1 的 LoRA 初始化）。
+
+**② Stage-1 监督**（冻结 trunk + LoRA，双 FPN 随机初始化，语义/边界一起学）：
+
+```bash
+python train.py --config config/stage1_lora.yaml
+```
+
+要点：`lora.enabled: true` + `lora.init_from` 加载预训练状态；`lora.lr_ratio: 0.5`
+（26 张有标签图不宜过大）；batch 8（trunk 梯度检查点控显存）。
+
+**③ Stage-2 联合微调**（双分支联合 + LoRA，有标签监督 + 无标签边界一致性）：
+
+```bash
+python tools/precompute_pseudo_labels.py --config config/default_config.yaml   # 边界伪标签缓存（一次性）
+python train_stage2.py --config config/stage2_lora.yaml \
+    --init_from_checkpoint outputs/stage1_lora/best_model.pth --phase joint --tag lora
+```
+
+要点：`freeze.seg_branch / boundary_branch` 均 false（联合）；`unsup_seg_weight=0`
+（语义只走监督）、`unsup_weight=0.3`（边界一致性，stage1_direct 缓存伪标签）；
+LoRA 随训练继续适配，两个头与特征共同收敛，避免"特征动了、头冻结"的漂移。
+
+**当前最优**：`outputs/stage2_lora/best_model_stage2.pth`（val mIoU 0.8315 / bndIoU 0.5009）。
+
+### 半监督机制速览（Stage-2 可选项）
+
+- `boundary_teacher_mode`：`stage1_direct`（当前，Stage-1 伪标签缓存）/ `ema`
+  （EMA 教师+锚点混合）/ `self_consistency`（学生自一致性）/ `anchor_self`
+  （自一致性 + Stage-1 锚点，可突破 recall 天花板）。
+- 边界一致性损失：MSE + Sobel 梯度 + 各向异性 TV + 背景抑制 + margin + 占比上限正则
+  （`rate_regularizer_weight` 0.1→0.4 退火）。
+- 每 epoch 打印 `bnd_output: max/>0.5占比/gap`；每 5 epoch 输出 test 语义置信度
+  （`>0.8` 占比 / `0.4-0.6` 模糊带）与监控图。
+- 运行记录：`outputs/runs/<时间戳>_<phase>_<tag>/`
+  （run_info.json / config_snapshot.yaml / metrics.csv / best_model.pth）。
 
 恢复训练：
 
 ```bash
-python train.py --config config/default_config.yaml --resume outputs/stage1/checkpoint_epoch50.pth
+python train.py --config config/stage1_lora.yaml --resume outputs/stage1_lora/checkpoint_epoch50.pth
+python train_stage2.py --config config/stage2_lora.yaml --resume outputs/stage2_lora/stage2_epoch30.pth
 ```
 
-### Stage 2 半监督微调
-
-> **协议 C（LoRA 完整链路，当前主线）**：
-> 1. `python tools/pretrain_lora_ssl.py`：1000 张无标签上自监督 LoRA 预训练
->    （MAE 风格掩码重建，只训 LoRA+重建头）→ `outputs/lora_pretrain/lora_state_dict.pth`；
-> 2. `python train.py --config ...`（`lora.enabled: true`）：Stage-1 监督，
->    语义/边界头建立在域适配特征上（建议 `lora.lr_ratio: 0.5` 起步）；
-> 3. `python train_stage2.py --config ...`（`lora.enabled: true`、双分支联合）：
->    联合微调，两个头与 LoRA 一起适应，避免"特征动了、头冻结"的漂移。
-> 文献：LoRA / Conv-LoRA / TopoLoRA-SAM。启用后 trunk 前向保留梯度，显存上升，
-> 建议 `batch_size` 调小；检查点自动保存 `lora_state_dict`，推理端自动加载。
-
-```bash
-# 推荐：预计算 Stage-1 边界伪标签缓存（stage1_direct 模式使用，
-# 免去每 step 的 ref_model 前向，并剔除无边界响应的低质量图）
-python tools/precompute_pseudo_labels.py --config config/default_config.yaml
-
-python train_stage2.py --config config/default_config.yaml
-```
-
-当前 Stage 2 采用 `boundary_teacher_mode=stage1_direct` + 冻结语义分支
-(`freeze.seg_branch: true`)：语义通道低频块状信息由 EMA 形式充分训练后冻结，
-训练集中优化边界头；边界一致性损失含正样本加权与边界-背景 margin 项，
-用于拉开边界输出区间。每 epoch 会打印 `bnd_output: max/>0.5占比/gap`，
-用于观察微调是否成功泛化。
-
-`boundary_teacher_mode` 可选四种：`ema`（EMA 教师+锚点混合）、
-`stage1_direct`（Stage-1 直接输出，当前默认）、`self_consistency`
-（学生自一致性）、`anchor_self`（学生自一致性 + Stage-1 锚点混合，
-用于突破 Stage-1 的 recall 天花板）。预测占比上限正则
-（`rate_regularizer_weight`）默认随训练从 0.1 退火到 0.4，既压雾复现
-又不会像骨架阈值退火那样把弱边界从目标中剔除。
-
-**两阶段协议**（语义从 Stage-1 重新开始，再边界优化）：
-
-1. Phase S（语义）：`freeze.seg_branch=false` + `freeze.boundary_branch=true`，
-   `init_from_checkpoint` 指向 Stage-1 最优权重，`seg_lr_ratio=0.1~0.3`
-   （语义起点已好，温和精修即可，1.0 会破坏已有语义），
-   `seg_dice_weight=0.1`（监督 Dice）；`sem_boundary_align_weight` 默认关闭
-   （边界参考是雾状宽带时，对齐项会抹平合法语义边缘导致均值退化）。
-2. Phase B（边界，当前默认配置）：`freeze.seg_branch=true` +
-   `stage1_direct` 缓存 + margin/占比正则，`init_from_checkpoint` 指向
-   Phase S 最优输出。
-
-每次训练自动记录到 `outputs/runs/<时间戳>_<phase>_<tag>/`（`--tag`/`--phase`
-可指定）：`run_info.json`（命令、git 提交、环境版本）、`config_snapshot.yaml`
-（生效配置）、`metrics.csv`（逐 epoch 指标）、`best_model.pth`（权重副本），
-按运行目录即可完整复现。
-
-从 checkpoint 恢复：
-
-```bash
-python train_stage2.py --config config/default_config.yaml --resume outputs/stage2/stage2_epoch30.pth
-```
-
-分支切换（仅加载 decoder 权重，重置优化器/调度器/epoch，用于单独训练语义/边界头后切换）：
-
-```bash
-python train_stage2.py --config config/default_config.yaml --init_from_checkpoint outputs/stage2/best_model_stage2.pth
-```
+> 历史：v4.0 时代的"两阶段协议（Phase S 冻结边界 / Phase B 冻结语义）"与实例分类器
+> 管线已废弃（见 git 标签 `v4.0-instance-clf`）；当前统一为协议 C 联合训练。
 
 ## 推理
 
