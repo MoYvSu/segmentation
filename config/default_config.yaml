@@ -8,7 +8,7 @@
 # 路径配置
 # -----------------------------------------------------------------------------
 paths:
-  project_root: &project_root "d:/MY_PROGRAMME/segmentationv2"
+  project_root: &project_root "/root/autodl-tmp/segmentationv2"
   raw_data_dir: "data/raw"
   weights_dir: "weights"
   sam2_ckpt: "sam2_hiera_base_plus.pt"
@@ -69,9 +69,10 @@ train:
   focal_gamma: 2.0
   focal_alpha: 0.75
   boundary_alpha: 3.0
-  # 语义监督 Dice 权重（0=关闭）：块状低频结构，BCE 在类不平衡下易钝，
-  # Dice 对稀疏类别更敏感；语义阶段（freeze.seg_branch=false）建议 0.2~0.5
-  seg_dice_weight: 0.1
+  # 语义监督 Dice 权重（0=关闭）：块状低频结构，BCE 对掩码边界易钝；
+  # 已改为两类平均 Dice（对珠光体/铁素体对称，见 utils/loss.py）；
+  # 语义阶段（freeze.seg_branch=false）建议 0.3~0.5
+  seg_dice_weight: 0.3
   # 复合评分权重（best_model 保存依据）
   composite_sem_weight: 0.2
   composite_boundary_weight: 0.8
@@ -145,12 +146,12 @@ semi_supervised:
   # 用于分支切换：训练完一个分支后，从此 checkpoint 开始训练另一个分支
   # 也可通过 CLI 参数 --init_from_checkpoint 覆盖
   # 留空=禁用，填路径=启用（如 "outputs/stage2/best_model_stage2.pth"）
-  init_from_checkpoint: "outputs/stage2/best_seg_model/stage2_epoch50.pth"
+  init_from_checkpoint: ""
   
   # EMA 衰减系数（基础值，启用 adaptive_ema 时根据当前 LR 动态调整）
-  ema_decay: 0.996
+  ema_decay: 0.999
   # 是否启用自适应 EMA 衰减（LR 高时降低 decay 让教师更快跟随，LR 低时提高 decay 增加稳定性）
-  adaptive_ema: false
+  adaptive_ema: true
   # 边界伪标签源模式（实验对比用）
   # "ema": EMA 教师伪标签 + Stage-1 锚点混合（默认，当前行为）
   # "stage1_direct": 直接使用 Stage-1 冻结模型输出作为伪标签（无 EMA 滞后）
@@ -166,9 +167,19 @@ semi_supervised:
   use_cached_pseudo_labels: true
   pseudo_label_cache_dir: "outputs/pseudo_labels/stage1_boundary"
   
-  # 无监督损失权重
+  # 无监督损失权重（边界一致性；语义一致性见 unsup_seg_weight，独立控制）
   unsup_weight: 0.3
-  # 无监督权重 sigmoid ramp-up 长度（epoch 数，前 N 个 epoch 从 0 渐进到 unsup_weight）
+  # 语义一致性损失权重：无标签上的语义伪标签可靠度低于边界，
+  # 且 patch mask 遮挡推断对语义有害；语义阶段建议 0.05~0.1
+  # （0.3 会在 ramp-up 完成后把学生从有标签分布拉偏——见 20260803 运行的
+  #  最佳 mIoU 出现在 epoch 4、之后持续下滑的现象）
+  unsup_seg_weight: 0.1
+  # 语义一致性目标温度锐化（方案 A）：对教师语义概率做 p^(1/T) 锐化，
+  # T<1 推向 0/1，对抗 MSE 软目标把学生输出拉向 0.5（test 集"涌动"根因：
+  # >0.8 高置信从 Stage-1 的 63.5% 掉到 ep60 的 52%、0.4-0.6 模糊带
+  # 从 7.5% 扩到 9.3%）。T=1.0 等价关闭。
+  unsup_seg_sharpen_temperature: 0.5
+  # 无监督权重 sigmoid ramp-up 长度（epoch 数，前 N 个 epoch 从 0 渐进到目标值）
   # 解决训练初期教师伪标签不可靠的问题
   unsup_rampup_epochs: 10
   # 训练轮数
@@ -176,9 +187,11 @@ semi_supervised:
   # 学习率
   learning_rate: 5.0e-5
   # 语义分支学习率比例（seg lr = seg_lr_ratio * learning_rate）
-  # 语义阶段（freeze.seg_branch=false）建议 0.1~0.3：语义从 Stage-1 出发
-  # 起点已较好，只需温和精修；不要用 1.0（会破坏已有语义，造成均值退化）
-  seg_lr_ratio: 0.1
+  # 语义阶段（freeze.seg_branch=false）建议 0.3~0.5：语义从 Stage-1 出发
+  # 起点较好，但 0.1 过小（seg lr≈5e-6），在无标签一致性压力下会被伪标签
+  # 拖着走（"看起来在训、实际不动/被拉偏"）；0.3 保持温和但有效，
+  # 不要用 1.0（会破坏已有语义，造成均值退化）
+  seg_lr_ratio: 0.3
   # 边界分支学习率比例（boundary lr = boundary_lr_ratio * learning_rate）
   # 冻结语义分支后，所有可训练参数都在边界组，分层比例只会把唯一训练组
   # 压到 1e-6 量级，导致边界头"看起来在训、实际不动"（max 逼近1但gap不变）。
@@ -195,9 +208,11 @@ semi_supervised:
   # cosine 衰减终点学习率比例（lr = cosine_end_factor * base_lr）[仅 lr_schedule=cosine 时生效]
   cosine_end_factor: 0.0
   # 恒定阶段长度（epoch 数，warmup 之后）[仅 lr_schedule=flat_decay 时生效]
-  flat_epochs: 30
+  # 语义精修放宽到 50：给主学习阶段更长时间，避免过早进入衰减死区
+  flat_epochs: 50
   # 温和衰减终点学习率比例（lr = decay_end_factor * base_lr）[仅 lr_schedule=flat_decay 时生效]
-  decay_end_factor: 0.2
+  # 终点从 0.2 放宽到 0.4：语义阶段后期 LR 不应磨到 ~1e-6 量级
+  decay_end_factor: 0.4
   
   # 批量大小
   batch_size_labeled: 5
@@ -220,12 +235,13 @@ semi_supervised:
     output_dir: "outputs/stage2/monitor"
     
   # Random Patch Masking 参数
-  patch_mask_ratio: 0.5
+  patch_mask_ratio: 0.3
   patch_mask_size: 64
   num_patches: 12
   # 掩码区域损失权重配置（控制遮挡区域在无监督损失中的贡献）
-  # 语义通道：低频面状特征，鼓励从上下文推断，默认加倍
-  seg_mask_region_weight: 1.5
+  # 语义通道：金相语义是外观/灰度驱动的块状结构，遮挡处上下文推断易填错，
+  # 语义阶段不做遮挡推断（=1.0，不加倍也不降权）
+  seg_mask_region_weight: 1.0
   # 边界通道：高频线状特征，防止圆斑过拟合，默认降权
   boundary_mask_region_weight: 1.0
   
@@ -296,9 +312,9 @@ semi_supervised:
   # outputs/runs/<时间戳>_<phase>_<tag>/，便于复现与对比。
   freeze:
     # 冻结语义分支（seg_fpn + seg_branch），仅训练边界分支
-    seg_branch: true
+    seg_branch: false
     # 冻结边界分支（boundary_fpn + boundary_branch），仅训练语义分支
-    boundary_branch: false
+    boundary_branch: true
   # 边界-语义对齐权重：默认关闭（0.0）。
   # 注意：边界参考若是雾状宽带（Stage-1 级别 >0.3 占 30-40%），
   # "惩罚语义梯度出现在边界外"会抹平合法语义边缘，导致语义向均值退化
@@ -349,10 +365,12 @@ progressive_aug:
   # 最终增强概率（达到 ramp_end 后维持）
   max_prob: 0.8
   # 亮度抖动范围（乘法因子）
-  brightness_range: [0.6, 1.4]
+  # 收窄到 0.85~1.15：金相相区主要靠灰度/纹理区分，±40% 抖动会抹掉判别
+  # 线索（尤其稀释仅有 26 张的有标签监督信号）；边界阶段如需更强可放宽
+  brightness_range: [0.85, 1.15]
   # 对比度抖动范围（乘法因子）
-  contrast_range: [0.6, 1.4]
-  # 锐度抖动范围（负=模糊, 正=锐化, 基于 unsharp mask）
-  sharpness_range: [-0.5, 1.0]
+  contrast_range: [0.85, 1.15]
+  # 锐度抖动范围（负=模糊, 正=锐化, 基于 unsharp mask）：同步收窄
+  sharpness_range: [-0.2, 0.3]
   # 高斯噪声标准差（0=禁用）
   gaussian_noise_std: 0.01

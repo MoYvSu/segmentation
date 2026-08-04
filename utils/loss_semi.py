@@ -329,6 +329,7 @@ def compute_unsupervised_loss(
     freeze_boundary: bool = False,
     seg_mask_region_weight: float = 2.0,
     boundary_mask_region_weight: float = 0.3,
+    seg_sharpen_temperature: float = 1.0,
     sobel_weight: float = 1.0,
     tv_weight: float = 0.1,
     tv_dilate_radius: int = 3,
@@ -343,7 +344,7 @@ def compute_unsupervised_loss(
     rate_regularizer_weight: float = 0.0,
     rate_slack: float = 0.05,
     sem_boundary_align_weight: float = 0.0,
-) -> Tuple[torch.Tensor, float, float, Dict[str, float]]:
+) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, float]]:
     """
     计算无监督一致性损失（支持多种边界伪标签源模式）。
 
@@ -386,6 +387,9 @@ def compute_unsupervised_loss(
         freeze_boundary: 冻结边界分支时为 True，跳过边界一致性损失。
         seg_mask_region_weight: 语义通道掩码区域权重（1.0=不降权，2.0=加倍）。
         boundary_mask_region_weight: 边界通道掩码区域权重（1.0=不降权，0.3=降权）。
+        seg_sharpen_temperature: 语义一致性目标温度锐化系数（1.0=关闭）。
+            T<1 时对教师语义概率做 p^(1/T) 锐化推向 0/1，对抗 MSE 软目标
+            把学生输出拉向 0.5 的"语义变糊/涌动"。
         sobel_weight: Sobel 梯度一致性损失权重。
         tv_weight: 各向异性 TV 正则化权重。
         tv_dilate_radius: TV 中边界区域膨胀半径（px）。
@@ -407,9 +411,8 @@ def compute_unsupervised_loss(
             向预测边界靠拢，解决"语义头跟不上边界头"的适配问题。
 
     Returns:
-        total_loss: 标量张量，总一致性损失
-        loss_seg_val: float，语义通道一致性损失
-        loss_boundary_val: float，边界通道一致性损失
+        loss_seg: 标量张量，语义通道一致性损失（未乘任何权重）
+        loss_boundary: 标量张量，边界通道一致性损失（未乘任何权重）
         bnd_stats: dict，边界输出统计（max / >0.5 占比 / 边界-背景差值），
             用于训练日志观察输出区间是否被拉开
 
@@ -439,6 +442,15 @@ def compute_unsupervised_loss(
         with torch.no_grad():
             teacher_output = teacher_model(img_weak, output_size=output_size)
             teacher_seg_prob = torch.sigmoid(teacher_output[:, 0])
+            # 方案 A：温度锐化软目标（T<1 推向 0/1）
+            # 动机：MSE 软目标 + 移动 EMA 教师会把语义输出拉向 0.5
+            # （test 集 >0.8 高置信从 Stage-1 的 63.5% 掉到 ep60 的 52%、
+            #  0.4-0.6 模糊带从 7.5% 扩到 9.3%，阈值一卡就出现"涌动"）
+            if 0 < seg_sharpen_temperature < 1.0:
+                inv_t = 1.0 / seg_sharpen_temperature
+                p_t = teacher_seg_prob
+                denom = p_t ** inv_t + (1.0 - p_t) ** inv_t
+                teacher_seg_prob = (p_t ** inv_t) / denom
 
     # ---- 学生路径（有梯度）----
     student_output = student_model(img_strong, output_size=output_size)
@@ -677,9 +689,10 @@ def compute_unsupervised_loss(
             ).sum(dim=(1, 2)) / bg_cnt
             bnd_stats["bnd_gap"] = float((bnd_mean - bg_mean).mean())
 
-    total_loss = loss_seg + loss_boundary
-
-    return total_loss, loss_seg.item(), loss_boundary.item(), bnd_stats
+    # 语义/边界一致性损失分别返回，由调用方按各自权重组合
+    # （语义通道可靠度低于边界，需要独立权重控制，见 train_stage2.py
+    # 的 unsup_seg_weight / unsup_weight）
+    return loss_seg, loss_boundary, bnd_stats
 
 
 def update_ema(teacher_model: nn.Module, student_model: nn.Module, ema_decay: float):
