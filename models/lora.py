@@ -99,10 +99,19 @@ def inject_trunk_lora(
     return len(targets)
 
 
+def _get_trunk(model: nn.Module) -> nn.Module:
+    """兼容 SegmentationModel（.encoder.trunk）与 SAM2Encoder（.trunk）。"""
+    if hasattr(model, "encoder") and hasattr(model.encoder, "trunk"):
+        return model.encoder.trunk
+    if hasattr(model, "trunk"):
+        return model.trunk
+    raise AttributeError("模型既没有 .encoder.trunk 也没有 .trunk，无法定位 trunk")
+
+
 def count_lora_params(encoder: nn.Module) -> int:
     """统计 trunk 中 LoRA 参数数量（lora_A + lora_B）。"""
     n = 0
-    for name, p in encoder.trunk.named_parameters():
+    for name, p in _get_trunk(encoder).named_parameters():
         if "lora_A" in name or "lora_B" in name:
             n += p.numel()
     return n
@@ -112,7 +121,7 @@ def extract_lora_state_dict(model: nn.Module) -> dict:
     """提取 trunk 的 LoRA 参数字典（供 checkpoint 保存）。"""
     return {
         k: v.detach().clone()
-        for k, v in model.encoder.trunk.state_dict().items()
+        for k, v in _get_trunk(model).state_dict().items()
         if "lora_A" in k or "lora_B" in k
     }
 
@@ -121,7 +130,7 @@ def load_lora_state_dict(model: nn.Module, state: dict) -> int:
     """把 lora_state_dict 载入 trunk（严格模式，返回载入参数个数）。"""
     if not state:
         return 0
-    cur = model.encoder.trunk.state_dict()
+    cur = _get_trunk(model).state_dict()
     keys = [k for k in state if k in cur]
     if not keys:
         raise ValueError("lora_state_dict 与 trunk 参数名不匹配，请检查 LoRA 配置")

@@ -1,6 +1,6 @@
 # 低碳钢金相图像相区分割
 
-> 技术路线：**冻结 SAM 2 Image Encoder + 自制独立双 FPN 解码头（语义/边界双分支）+ 离线边界净化 GT + 两阶段训练（Stage 1 全监督 → Stage 2 半监督 Mean Teacher）+ 边界骨架化 + 受阻分水岭实例分割 +（可选）LoRA 低秩适配 trunk**。
+> 技术路线：**冻结 SAM 2 Image Encoder + 自制独立双 FPN 解码头（语义/边界双分支）+ 离线边界净化 GT + 两阶段训练（Stage 1 全监督 → Stage 2 半监督）+ 边界骨架化 + 受阻分水岭实例分割 + LoRA 低秩适配 trunk（协议 C：自监督 LoRA 预训练 → Stage-1(LoRA) → 联合微调）**。
 
 ## 当前进度
 
@@ -106,11 +106,15 @@ python train.py --config config/default_config.yaml --resume outputs/stage1/chec
 
 ### Stage 2 半监督微调
 
-> **LoRA（可选，治特征上限）**：`config/default_config.yaml` 的 `lora.enabled: true`
-> 会在冻结 trunk 的注意力 qkv/proj 上注入低秩适配器（rank 16，约 1M 参数），
-> 让语义/边界共享域适配后的特征，突破"冻结 encoder 特征上限"（文献：LoRA /
-> Conv-LoRA / TopoLoRA-SAM）。启用后 trunk 前向保留梯度，显存上升，建议
-> `batch_size` 调小；检查点自动保存 `lora_state_dict`，推理端自动加载。
+> **协议 C（LoRA 完整链路，当前主线）**：
+> 1. `python tools/pretrain_lora_ssl.py`：1000 张无标签上自监督 LoRA 预训练
+>    （MAE 风格掩码重建，只训 LoRA+重建头）→ `outputs/lora_pretrain/lora_state_dict.pth`；
+> 2. `python train.py --config ...`（`lora.enabled: true`）：Stage-1 监督，
+>    语义/边界头建立在域适配特征上（建议 `lora.lr_ratio: 0.5` 起步）；
+> 3. `python train_stage2.py --config ...`（`lora.enabled: true`、双分支联合）：
+>    联合微调，两个头与 LoRA 一起适应，避免"特征动了、头冻结"的漂移。
+> 文献：LoRA / Conv-LoRA / TopoLoRA-SAM。启用后 trunk 前向保留梯度，显存上升，
+> 建议 `batch_size` 调小；检查点自动保存 `lora_state_dict`，推理端自动加载。
 
 ```bash
 # 推荐：预计算 Stage-1 边界伪标签缓存（stage1_direct 模式使用，
