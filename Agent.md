@@ -36,6 +36,10 @@ Python 环境：`conda activate sam2_env`（或 `D:\Anaconda\envs\sam2_env\pytho
 - 可选 LoRA（`config.lora`，默认关闭）：冻结 trunk 的注意力 qkv/proj 注入低秩
   适配器（rank 16 ≈ 1M 参数），语义/边界共享域适配特征；启用后 trunk 前向保留
   梯度（显存上升），checkpoint 保存 `lora_state_dict`，推理端自动加载。
+- **协议 C（LoRA 完整链路）**：自监督 LoRA 预训练（`tools/pretrain_lora_ssl.py`，
+  1000 无标签 MAE 掩码重建）→ Stage-1 监督（`train.py`，LoRA 开）→ Stage-2 联合
+  微调（`train_stage2.py`，双分支联合 + LoRA）。要点：特征层随训练变动时，
+  被冻结的头必须阶段末重拟合，或干脆联合训练——避免"特征动了、头冻结"的漂移。
 - 双流 batch：有标签流（BoundaryLoss）+ 无标签流（一致性损失，权重 `unsup_weight` × sigmoid ramp-up 10 ep）。
 - 边界伪标签源 `boundary_teacher_mode`：
   - `ema`（默认）：EMA 教师 + Stage-1 锚点渐进混合（`anchor_alpha` 从 1.0 线性衰减至 `anchor_floor=0.3`，20 ep）；
@@ -80,6 +84,7 @@ Python 环境：`conda activate sam2_env`（或 `D:\Anaconda\envs\sam2_env\pytho
 | `inference_instance.py` | 实例级分类器推理管线（主流程，见 §12）|
 | `tools/instance_classifier.py` | 实例特征提取 + 分类器训练（labelme 实例标签）|
 | `tools/eval_instance_pipelines.py` | 双管线实例分类对照评估（labelme GT）|
+| `tools/pretrain_lora_ssl.py` | 自监督 LoRA 预训练（MAE 风格，1000 无标签图，协议 C）|
 
 ## 5. 数据管线
 
