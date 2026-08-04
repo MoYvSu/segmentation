@@ -101,12 +101,18 @@ class BoundaryLoss(nn.Module):
             )
             if self.seg_dice_weight > 0:
                 # 语义 Dice：块状低频结构，BCE 在类不平衡下易钝；
-                # Dice 对稀疏类别更敏感，缓解珠光体/铁素体面积失衡
+                # Dice 对掩码边界更敏感。两类平均 Dice (DSC_0+DSC_1)/2：
+                # 原实现只算 class-1（铁素体前景）单类 Dice，在两类面积可比
+                # （无显著小样本特性）时会对珠光体不公平，改为对称处理。
                 seg_prob = torch.sigmoid(seg_logits)
-                dice_denom = seg_prob.sum() + seg_target.sum() + self.eps
-                dice = 1.0 - (
-                    2.0 * (seg_prob * seg_target).sum() + self.eps
-                ) / dice_denom
+                eps = self.eps
+                dice0 = 1.0 - (
+                    2.0 * ((1.0 - seg_prob) * (1.0 - seg_target)).sum() + eps
+                ) / ((1.0 - seg_prob).sum() + (1.0 - seg_target).sum() + eps)
+                dice1 = 1.0 - (
+                    2.0 * (seg_prob * seg_target).sum() + eps
+                ) / (seg_prob.sum() + seg_target.sum() + eps)
+                dice = 0.5 * (dice0 + dice1)
                 loss_seg = loss_seg + self.seg_dice_weight * dice
 
         # ---- 边界 Focal Loss × EDT 权重 ----

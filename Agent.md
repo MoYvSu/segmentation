@@ -41,7 +41,7 @@ Python 环境：`conda activate sam2_env`（或 `D:\Anaconda\envs\sam2_env\pytho
   - `anchor_self`：学生弱增强预测 + Stage-1 锚点混合（`anchor_alpha` 从 1.0
     退火到 `anchor_floor`）——自一致性恢复弱边界 recall，锚点锚定几何防漂移。
 - 无监督损失（`utils/loss_semi.py`）：
-  - 语义：弱图伪标签 vs 强图学生预测 MSE，Random Patch Masking 加权（掩码区 seg 权重 2.0、boundary 权重 0.3）；
+  - 语义：弱图伪标签 vs 强图学生预测 MSE，Random Patch Masking 加权（掩码区 seg 权重 1.0、boundary 权重 1.0）；
   - 边界：MSE + `sobel_weight`×Sobel 梯度一致性 + `tv_weight`×各向异性 TV + `bg_suppress_weight`×背景抑制；
   - **骨架过滤**（`skeleton_filter`）：阈值 0.3 二值化 → Zhang-Suen 骨架 → 膨胀 1px → 高斯模糊软目标；**必须施加在锚点混合之后**。
 - 渐进式外观增强（`utils/progressive_aug.py`）：仅施加于学生输入（亮度/对比度/锐度/噪声），prob 0→0.8 线性 ramp 10 ep；启用时自动禁用 UnlabeledDataset 内置外观增强。
@@ -51,9 +51,9 @@ Python 环境：`conda activate sam2_env`（或 `D:\Anaconda\envs\sam2_env\pytho
   边界一致性损失含**正样本加权**（`pos_weight`，目标 >0.5 像素放大）与
   **边界-背景 margin 项**（`margin_loss_weight` / `margin`，直接拉开输出差值），
   并配合 `tools/precompute_pseudo_labels.py` 离线伪标签缓存（TTA + 质量剔除）。
-- 优化器：三分组 AdamW（seg lr / boundary lr = base×0.1）。
+- 优化器：三分组 AdamW（seg lr = base×0.3、boundary lr = base×1.0）。
 - 调度：`flat_decay`（warmup 5 → flat 30 → 温和线性衰减至 0.2×base）或 cosine；无监督权重 sigmoid ramp-up；自适应 EMA。
-- 监控：每 `checkpoint_interval`(5) epoch 对 `data/test` 前 3 张输出语义/边界概率图到 `outputs/stage2/monitor/`。
+- 监控：每 `checkpoint_interval`(5) epoch 对 `data/test` 前 3 张输出语义/边界概率图到 `outputs/stage2/monitor/`；每 epoch 额外打印 test 语义置信度（>0.8 高置信占比 / 0.4-0.6 模糊带占比，无需 GT），用于及时发现"语义变糊/涌动"。
 
 ## 4. 模块地图
 
@@ -91,7 +91,7 @@ Python 环境：`conda activate sam2_env`（或 `D:\Anaconda\envs\sam2_env\pytho
 
 - `paths.project_root`：硬编码绝对路径（YAML anchor 复用），迁移目录时需同步修改。
 - `inference`：test_dir / output_dir / threshold / boundary_threshold / boundary_threshold_high（双阈值滞后）/ boundary_logit_scale / tta / checkpoint_stage / stage1|stage2_checkpoint。
-- `semi_supervised`：boundary_teacher_mode（ema / stage1_direct / self_consistency / anchor_self）/ use_cached_pseudo_labels / pseudo_label_cache_dir / unsup_weight / unsup_rampup_epochs / ema_decay / adaptive_ema / lr_schedule（flat_decay）/ flat_epochs / freeze / sem_boundary_align_weight / boundary_anchor / boundary_consistency（含 pos_weight / margin_loss_weight / margin / rate_regularizer_weight 及退火）/ skeleton_filter（threshold / threshold_end / threshold_ramp_epochs）/ patch_mask / monitor / checkpoint_interval。
+- `semi_supervised`：boundary_teacher_mode（ema / stage1_direct / self_consistency / anchor_self）/ use_cached_pseudo_labels / pseudo_label_cache_dir / unsup_weight（边界一致性）/ unsup_seg_weight（语义一致性，独立权重）/ unsup_seg_sharpen_temperature（语义一致性目标温度锐化）/ unsup_rampup_epochs / ema_decay / adaptive_ema / lr_schedule（flat_decay）/ flat_epochs / freeze / sem_boundary_align_weight / boundary_anchor / boundary_consistency（含 pos_weight / margin_loss_weight / margin / rate_regularizer_weight 及退火）/ skeleton_filter（threshold / threshold_end / threshold_ramp_epochs）/ patch_mask / monitor / checkpoint_interval。
 - `train`：`seg_dice_weight`（语义监督 Dice，语义阶段建议 0.2~0.5）。
 - `progressive_aug`：学生输入外观增强参数（enabled / ramp_epochs / max_prob / 各抖动范围）。
 - `boundary`：净化 GT 目录、EDT 权重范围、净化参数。
@@ -202,4 +202,8 @@ Checkpoint 统一格式：`decoder_state_dict` + `optimizer_state_dict` + `sched
 - **半监督初段伪标签不可靠**：unsup 权重 sigmoid ramp-up 10 ep。
 - **patch_mask 与 output_size 尺寸一致性**：曾有专门修复，改动时注意。
 - **调度器迁移**：曾从 SequentialLR 迁移到 LambdaLR，旧 checkpoint 恢复时会从头重新调度（代码已兼容）。
+- **自适应 EMA ratio 历史遗留问题（已修复）**：此前 `get_current_lr_ratio` 以全局
+  base_lr 为分母，语义阶段（唯一训练组是 seg 组，lr=seg_lr_ratio×base_lr）会被错误
+  压成 0.1，使 EMA decay≈0.9999、教师几乎冻结在初始化权重上；现改为按参数组自身
+  峰值 LR 计算（`group_peaks`），flat 阶段 ratio=1.0 → decay=base_decay。
 - 待探索：语义/边界分支进一步解耦训练、锚点混合调度曲线、更大规模无标签数据利用。

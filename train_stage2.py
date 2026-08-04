@@ -113,18 +113,29 @@ def compute_adaptive_ema_decay(base_decay, current_lr_ratio):
     return 1.0 - (1.0 - base_decay) * lr_ratio
 
 
-def get_current_lr_ratio(scheduler, base_lr):
-    """获取当前学习率相对于峰值学习率的比例。
+def get_current_lr_ratio(scheduler, group_peaks):
+    """获取当前学习率相对于该参数组自身峰值学习率的比例。
+
+    历史遗留问题修复：此前用全局 base_lr 作分母，语义阶段（冻结边界后
+    唯一训练组是 seg 组，lr = seg_lr_ratio × base_lr）会被错误压成 0.1，
+    使自适应 EMA decay 变成 0.9999，教师几乎冻结在初始化权重上。
+    现在以每个参数组自身的峰值 lr 为分母，ratio 即调度器倍率 lambda，
+    与分支冻结与否无关，flat 阶段稳定在 1.0 → decay = base_decay。
 
     Args:
         scheduler: LambdaLR 调度器
-        base_lr: 峰值学习率
+        group_peaks: 各参数组创建时的峰值 LR 列表（必须与 param_groups 对齐，
+            且在调度器首次 step 前记录，因为 LambdaLR 会原地改写 group['lr']）
 
     Returns:
         [0, 1] 之间的比例
     """
     current_lr = scheduler.optimizer.param_groups[0]["lr"]
-    return max(0.0, min(1.0, current_lr / max(base_lr, 1e-12)))
+    if group_peaks:
+        peak_lr = max(float(group_peaks[0]), 1e-12)
+    else:
+        peak_lr = max(float(current_lr), 1e-12)
+    return max(0.0, min(1.0, current_lr / peak_lr))
 
 
 def build_model(config, device):
@@ -299,12 +310,14 @@ def build_dataloaders(config, disable_unlabeled_appearance_aug=False,
 
 def train_one_epoch(
     student_model, labeled_loader, unlabeled_iter,
-    num_steps, num_unlabeled_steps, criterion, unsup_weight, ema_decay,
+    num_steps, num_unlabeled_steps, criterion, unsup_weight, unsup_seg_weight,
+    ema_decay,
     optimizer, scaler, device, grad_clip=1.0, use_amp=False,
     teacher_model=None, boundary_teacher_mode="ema",
     augmentor=None, boundary_anchor_cfg=None, ref_model=None, anchor_alpha=1.0,
     skeleton_filter_cfg=None, freeze_seg=False, freeze_boundary=False,
     seg_mask_region_weight=2.0, boundary_mask_region_weight=0.3,
+    seg_sharpen_temperature=1.0,
     sobel_weight=1.0, tv_weight=0.1, tv_dilate_radius=3,
     tv_bg_weight=1.0, tv_boundary_weight=0.1,
     bg_suppress_weight=0.5, bg_suppress_threshold=0.1,
@@ -326,6 +339,12 @@ def train_one_epoch(
         skeleton_filter_cfg: 骨架过滤配置，传入 compute_unsupervised_loss。
         freeze_seg: 冻结语义分支，跳过语义损失和 EMA 更新。
         freeze_boundary: 冻结边界分支，跳过边界损失和 EMA 更新。
+        unsup_weight: 边界一致性损失权重（已含 ramp-up）。
+        unsup_seg_weight: 语义一致性损失权重（已含 ramp-up）。语义伪标签
+            可靠度低于边界，独立权重便于语义阶段（如 0.05~0.1）与边界
+            阶段（可沿用 0.3）分别调节。
+        seg_sharpen_temperature: 语义一致性目标温度锐化系数（1.0=关闭），
+            传给 compute_unsupervised_loss。
         sobel_weight: Sobel 梯度一致性损失权重。
         tv_weight: 各向异性 TV 正则化权重。
         tv_dilate_radius: TV 中边界区域膨胀半径（px）。
@@ -394,7 +413,7 @@ def train_one_epoch(
 
                 if use_amp:
                     with autocast('cuda'):
-                        unsup_loss, seg_consist_val, boundary_consist_val, bnd_stats = (
+                        unsup_seg_loss, unsup_bnd_loss, bnd_stats = (
                             compute_unsupervised_loss(
                                 student_model,
                                 img_weak, img_strong, patch_mask,
@@ -409,6 +428,7 @@ def train_one_epoch(
                                 freeze_boundary=freeze_boundary,
                                 seg_mask_region_weight=seg_mask_region_weight,
                                 boundary_mask_region_weight=boundary_mask_region_weight,
+                                seg_sharpen_temperature=seg_sharpen_temperature,
                                 sobel_weight=sobel_weight,
                                 tv_weight=tv_weight,
                                 tv_dilate_radius=tv_dilate_radius,
@@ -426,7 +446,7 @@ def train_one_epoch(
                             )
                         )
                 else:
-                    unsup_loss, seg_consist_val, boundary_consist_val, bnd_stats = (
+                    unsup_seg_loss, unsup_bnd_loss, bnd_stats = (
                         compute_unsupervised_loss(
                             student_model,
                             img_weak, img_strong, patch_mask,
@@ -441,6 +461,7 @@ def train_one_epoch(
                             freeze_boundary=freeze_boundary,
                             seg_mask_region_weight=seg_mask_region_weight,
                             boundary_mask_region_weight=boundary_mask_region_weight,
+                            seg_sharpen_temperature=seg_sharpen_temperature,
                             sobel_weight=sobel_weight,
                             tv_weight=tv_weight,
                             tv_dilate_radius=tv_dilate_radius,
@@ -459,8 +480,18 @@ def train_one_epoch(
                     )
             except StopIteration:
                 pass
+            else:
+                # 语义/边界一致性损失独立加权：
+                # 语义伪标签可靠度低，权重单独控制（unsup_seg_weight），
+                # 边界一致性沿用 unsup_weight
+                unsup_loss = (
+                    unsup_seg_weight * unsup_seg_loss
+                    + unsup_weight * unsup_bnd_loss
+                )
+                seg_consist_val = unsup_seg_loss.item()
+                boundary_consist_val = unsup_bnd_loss.item()
 
-        total_loss = sup_loss + unsup_weight * unsup_loss
+        total_loss = sup_loss + unsup_loss
 
         if use_amp:
             scaler.scale(total_loss).backward()
@@ -628,6 +659,63 @@ def monitor_inference(model, config, epoch, device):
         cv2.imwrite(os.path.join(epoch_dir, f"{basename}_boundary.png"), bnd_color)
 
     logger.info(f"  Monitor inference saved: {epoch_dir} ({len(image_paths)} images)")
+
+
+@torch.no_grad()
+def compute_semantic_confidence_stats(model, config, device):
+    """统计 data/test 前 N 张图的语义置信度分布（无需 GT）。
+
+    返回 (高置信 >0.8 占比, 模糊带 0.4-0.6 占比)；test 目录为空时返回 (None, None)。
+    用于训练中监控"语义变糊/涌动"：若高置信占比持续下降、模糊带持续扩张，
+    说明无监督语义一致性在把输出拉向 0.5（见 20260804 运行的 test 置信度
+    从 Stage-1 63.5% 掉到 ep60 52%、模糊带 7.5% 扩到 9.3% 的现象）。
+    """
+    paths_cfg = config["paths"]
+    data_cfg = config["data"]
+    monitor_cfg = config.get("semi_supervised", {}).get("monitor", {})
+
+    image_dir = os.path.join(
+        paths_cfg["project_root"],
+        monitor_cfg.get("image_dir", "data/test"),
+    )
+    num_images = monitor_cfg.get("num_images", 3)
+    image_size = data_cfg.get("image_size", 1024)
+
+    valid_exts = ("*.jpg", "*.jpeg", "*.png", "*.bmp", "*.tif", "*.tiff")
+    image_paths = []
+    for ext in valid_exts:
+        image_paths.extend(glob.glob(os.path.join(image_dir, ext)))
+    image_paths.sort()
+
+    if len(image_paths) == 0:
+        logger.warning(f"Sem conf: no images found in {image_dir}")
+        return None, None
+
+    image_paths = image_paths[:num_images]
+
+    model.eval()
+    high_sum = 0.0
+    mid_sum = 0.0
+    n = 0
+    for img_path in image_paths:
+        image = cv2.imread(img_path, cv2.IMREAD_COLOR)
+        if image is None:
+            continue
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        image_lb, _, _, _ = letterbox(image_rgb, image_size)
+        image_tensor = (
+            torch.from_numpy(image_lb).float().permute(2, 0, 1).unsqueeze(0) / 255.0
+        ).to(device)
+
+        output = model(image_tensor)
+        seg_prob = torch.sigmoid(output[0, 0])
+        high_sum += float((seg_prob > 0.8).float().mean())
+        mid_sum += float(((seg_prob > 0.4) & (seg_prob < 0.6)).float().mean())
+        n += 1
+
+    if n == 0:
+        return None, None
+    return high_sum / n, mid_sum / n
 
 
 def main():
@@ -804,6 +892,10 @@ def main():
                 f"Seg lr={seg_lr:.2e} ({len(seg_params)} params), "
                 f"Boundary lr={boundary_lr:.2e} ({len(boundary_params)} params)")
 
+    # 记录每个参数组创建时的峰值 LR（LambdaLR 会原地改写 group['lr']，
+    # 必须在调度器第一次 step 前保存，供自适应 EMA ratio 计算使用）
+    group_peaks = [g["lr"] for g in optimizer.param_groups]
+
     warmup_epochs = semi_cfg.get("warmup_epochs", 5)
     total_epochs = semi_cfg.get("epochs", 50)
     warmup_start_factor = semi_cfg.get("warmup_start_factor", 0.01)
@@ -867,6 +959,11 @@ def main():
     ema_decay_base = semi_cfg.get("ema_decay", 0.999)
     adaptive_ema = semi_cfg.get("adaptive_ema", False)
     unsup_weight = semi_cfg.get("unsup_weight", 1.0)
+    # 语义一致性损失独立权重（历史问题：语义伪标签可靠度低于边界，
+    # 与边界共用 unsup_weight 会随 ramp-up 放大无标签对语义的拖拽）
+    unsup_seg_weight = semi_cfg.get("unsup_seg_weight", 0.1)
+    # 语义一致性目标温度锐化（方案 A）：T<1 推向 0/1，对抗语义输出塌向 0.5
+    unsup_seg_sharpen_temperature = semi_cfg.get("unsup_seg_sharpen_temperature", 1.0)
     unsup_rampup_epochs = semi_cfg.get("unsup_rampup_epochs", 10)
 
     if adaptive_ema and need_teacher:
@@ -882,10 +979,12 @@ def main():
     if unsup_rampup_epochs > 0:
         logger.info(
             f"Unsup weight ramp-up: {unsup_rampup_epochs} epochs "
-            f"(sigmoid ramp-up 0→{unsup_weight})"
+            f"(sigmoid ramp-up 0→seg {unsup_seg_weight} / bnd {unsup_weight})"
         )
     else:
-        logger.info(f"Unsup weight: fixed at {unsup_weight} (no ramp-up)")
+        logger.info(
+            f"Unsup weight: fixed at seg {unsup_seg_weight} / bnd {unsup_weight} (no ramp-up)"
+        )
 
     # 掩码区域损失权重配置
     seg_mask_region_weight = semi_cfg.get("seg_mask_region_weight", 2.0)
@@ -1079,7 +1178,12 @@ def main():
     logger.info(f"  Boundary teacher mode: {boundary_teacher_mode}")
     if need_teacher:
         logger.info(f"  EMA decay: {ema_decay_base}" + (" (adaptive)" if adaptive_ema else " (fixed)"))
-    logger.info(f"  Unsupervised weight: {unsup_weight}" + (f" (ramp-up {unsup_rampup_epochs}ep)" if unsup_rampup_epochs > 0 else ""))
+    logger.info(
+        f"  Unsupervised weight: seg={unsup_seg_weight} bnd={unsup_weight}"
+        + (f" (ramp-up {unsup_rampup_epochs}ep)" if unsup_rampup_epochs > 0 else "")
+        + (f" | seg sharpen T={unsup_seg_sharpen_temperature}"
+           if unsup_seg_sharpen_temperature < 1.0 else " | seg sharpen OFF")
+    )
     logger.info(f"  LR: {semi_cfg.get('learning_rate', train_cfg['learning_rate'])}")
     logger.info("=" * 60)
 
@@ -1141,14 +1245,19 @@ def main():
             if (epoch + 1) % 5 == 0 or epoch == start_epoch:
                 logger.info(f"  Rate reg weight: {rate_regularizer_weight:.3f}")
 
-        # 计算无监督损失权重（sigmoid ramp-up）
+        # 计算无监督损失权重（sigmoid ramp-up，语义/边界独立）
         unsup_weight_eff = unsup_weight * sigmoid_rampup(epoch, unsup_rampup_epochs)
+        unsup_seg_weight_eff = unsup_seg_weight * sigmoid_rampup(epoch, unsup_rampup_epochs)
         if (epoch + 1) % 5 == 0 or epoch == start_epoch:
-            logger.info(f"  Unsup weight: {unsup_weight_eff:.4f} (base={unsup_weight})")
+            logger.info(
+                f"  Unsup weight: seg={unsup_seg_weight_eff:.4f} "
+                f"bnd={unsup_weight_eff:.4f} "
+                f"(base seg={unsup_seg_weight}, bnd={unsup_weight})"
+            )
 
         # 计算自适应 EMA 衰减系数
         if adaptive_ema and need_teacher:
-            lr_ratio = get_current_lr_ratio(scheduler, base_lr)
+            lr_ratio = get_current_lr_ratio(scheduler, group_peaks)
             ema_decay_eff = compute_adaptive_ema_decay(ema_decay_base, lr_ratio)
             if (epoch + 1) % 5 == 0 or epoch == start_epoch:
                 logger.info(
@@ -1161,7 +1270,8 @@ def main():
         train_metrics = train_one_epoch(
             student_model, labeled_loader, unlabeled_iter,
             num_steps, num_unlabeled_steps if unlabeled_loader is not None else 0,
-            criterion, unsup_weight=unsup_weight_eff, ema_decay=ema_decay_eff,
+            criterion, unsup_weight=unsup_weight_eff,
+            unsup_seg_weight=unsup_seg_weight_eff, ema_decay=ema_decay_eff,
             optimizer=optimizer, scaler=scaler, device=device,
             grad_clip=train_cfg.get("grad_clip", 1.0), use_amp=use_amp,
             teacher_model=teacher_model,
@@ -1175,6 +1285,7 @@ def main():
             freeze_boundary=freeze_boundary,
             seg_mask_region_weight=seg_mask_region_weight,
             boundary_mask_region_weight=boundary_mask_region_weight,
+            seg_sharpen_temperature=unsup_seg_sharpen_temperature,
             sobel_weight=sobel_weight,
             tv_weight=tv_weight,
             tv_dilate_radius=tv_dilate_radius,
@@ -1191,6 +1302,19 @@ def main():
         )
         val_metrics = validate(student_model, val_loader, criterion, device)
         scheduler.step()
+
+        # test 语义置信度监控（新日志参数）：无需 GT，统计概率分布
+        # >0.8 高置信占比 / 0.4-0.6 模糊带占比
+        seg_high_conf, seg_mid_conf = compute_semantic_confidence_stats(
+            student_model, config, device
+        )
+        if seg_high_conf is not None:
+            logger.info(
+                f"  Sem conf (test): >0.8={seg_high_conf * 100:.1f}% "
+                f"0.4-0.6={seg_mid_conf * 100:.1f}%"
+            )
+        else:
+            logger.info("  Sem conf (test): N/A (no test images)")
 
         epoch_time = time.time() - epoch_start
         logger.info(f"Epoch {epoch + 1} done ({epoch_time:.1f}s)")
@@ -1254,6 +1378,8 @@ def main():
             "boundary": train_metrics["boundary"],
             "seg_consist": train_metrics["seg_consist"],
             "boundary_consist": train_metrics["boundary_consist"],
+            "seg_high_conf": seg_high_conf if seg_high_conf is not None else -1.0,
+            "seg_mid_conf": seg_mid_conf if seg_mid_conf is not None else -1.0,
             "bnd_max": train_metrics["bnd_max"],
             "bnd_pos_frac": train_metrics["bnd_pos_frac"],
             "bnd_gap": train_metrics["bnd_gap"],
