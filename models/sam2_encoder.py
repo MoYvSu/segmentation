@@ -63,6 +63,9 @@ class SAM2Encoder(nn.Module):
         self.ckpt_path = ckpt_path
         self.device = device
         self.freeze = freeze
+        # LoRA 注入后置为 True（models/lora.py 注入时设置）：
+        # 允许 trunk 前向保留梯度，使 LoRA 参数可训练
+        self.trainable_lora = False
 
         # 将本地 segment-anything-2 仓库加入 sys.path，以 import sam2
         if sam2_repo_path is not None:
@@ -125,12 +128,16 @@ class SAM2Encoder(nn.Module):
             List of 4 feature tensors [feat_s1, feat_s2, feat_s3, feat_s4]，
             从高分辨率到低分辨率，通道数 [112, 224, 448, 896]。
         """
-        # 确保 trunk 处于 eval 模式且不计算梯度
+        # 确保 trunk 处于 eval 模式
         self.trunk.eval()
 
-        with torch.no_grad():
-            # trunk.forward 返回 List[Tensor]，顺序为 Stage1 -> Stage4
+        if self.trainable_lora:
+            # LoRA 注入后必须保留梯度（仅 LoRA 参数 requires_grad=True）
             features = self.trunk(x)
+        else:
+            with torch.no_grad():
+                # trunk.forward 返回 List[Tensor]，顺序为 Stage1 -> Stage4
+                features = self.trunk(x)
 
         return features
 

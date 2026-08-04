@@ -76,6 +76,9 @@ def build_model(config, device, checkpoint_path=None):
         logger.info(f"Loading decoder weights: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         model.decoder.load_state_dict(checkpoint["decoder_state_dict"])
+        # 含 lora_state_dict 的检查点：注入并加载 LoRA（trunk 域适配）
+        from models.lora import load_lora_from_checkpoint
+        load_lora_from_checkpoint(model, checkpoint)
         # 兼容新旧 checkpoint key
         best_score = checkpoint.get(
             "best_composite_score", checkpoint.get("best_val_iou", "?")

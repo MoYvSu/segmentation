@@ -62,6 +62,8 @@ def build_model(config, checkpoint, device):
     model = SegmentationModel(encoder, decoder).to(device)
     ck = torch.load(checkpoint, map_location=device, weights_only=False)
     model.decoder.load_state_dict(ck["decoder_state_dict"])
+    from models.lora import load_lora_from_checkpoint
+    load_lora_from_checkpoint(model, ck)
     model.eval()
     return model
 
