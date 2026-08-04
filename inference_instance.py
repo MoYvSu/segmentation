@@ -64,6 +64,7 @@ def build_model(config, checkpoint, device):
     model.decoder.load_state_dict(ck["decoder_state_dict"])
     from models.lora import load_lora_from_checkpoint
     load_lora_from_checkpoint(model, ck)
+    model.to(device)   # 注入发生在 .to() 之后，需再移动一次 LoRA 参数
     model.eval()
     return model
 

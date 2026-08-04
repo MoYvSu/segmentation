@@ -79,6 +79,7 @@ def build_model(config, device, checkpoint_path=None):
         # 含 lora_state_dict 的检查点：注入并加载 LoRA（trunk 域适配）
         from models.lora import load_lora_from_checkpoint
         load_lora_from_checkpoint(model, checkpoint)
+        model.to(device)   # 注入发生在 .to() 之后，需再移动一次 LoRA 参数
         # 兼容新旧 checkpoint key
         best_score = checkpoint.get(
             "best_composite_score", checkpoint.get("best_val_iou", "?")
