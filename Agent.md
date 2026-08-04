@@ -135,6 +135,7 @@ Checkpoint 统一格式：`decoder_state_dict` + `optimizer_state_dict` + `sched
 ## 8. 调试与验证
 
 - `tools/eval_instance_pipelines.py`：两臂实例分类对照评估（labelme 多边形 GT）。
+- `visualize_instances.py`：实例图着色可视化（`_inst.png` + `_class.json` → `_inst_color.png`）。
 - 推理可选 `--tta`（hflip/vflip/rot180 logits 平均）与双阈值滞后二值化
   （`boundary_threshold` 弱阈值 + `boundary_threshold_high` 强阈值），
   弱真实边界若与强边界连通则保留、孤立噪声剔除。

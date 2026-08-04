@@ -142,7 +142,7 @@ post_process:
   align_corners: true
   connectivity: 8
   min_noise_area: 50
-  save_visualization: true
+  save_visualization: false
 
 # -----------------------------------------------------------------------------
 # 半监督配置（Stage 2: Mean Teacher）

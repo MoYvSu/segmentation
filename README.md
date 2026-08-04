@@ -81,6 +81,7 @@ segmentationv2/
 ├── train_stage2.py              # Stage 2 半监督训练入口
 ├── inference.py                 # 推理入口（语义投票实例分类，对照臂）
 ├── inference_instance.py        # 推理入口（实例级分类器判类，主流程）
+├── visualize_instances.py       # 实例图着色可视化（_inst.png + _class.json → _inst_color.png）
 ```
 
 ## 训练
