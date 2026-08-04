@@ -89,6 +89,14 @@ def build_model(config, device):
         )
         n_params = count_lora_params(encoder)
         logger.info(f"LoRA: ENABLED ({n_layers} 层, 可训练参数 {n_params / 1e6:.2f}M)")
+        # 可选：加载自监督预训练 LoRA 状态（lora.init_from）
+        init_from = lora_cfg.get("init_from", "")
+        if init_from and os.path.exists(init_from):
+            st = torch.load(init_from, map_location=device, weights_only=False)
+            n_load = load_lora_state_dict(encoder, st)
+            logger.info(f"LoRA: 预训练状态已加载 {init_from} ({n_load} 个参数)")
+        elif init_from:
+            logger.warning(f"LoRA init_from 不存在: {init_from}")
     else:
         logger.info("LoRA: DISABLED (trunk 全冻结)")
 
