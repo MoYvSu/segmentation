@@ -148,6 +148,9 @@ lora:
   target_layers: ["attn.qkv", "attn.proj"]
   # LoRA 学习率比例（lora lr = base_lr × lr_ratio；LoRA 通常需要比 head 更高的 lr）
   lr_ratio: 2.0
+  # 自监督预训练 LoRA 状态（tools/pretrain_lora_ssl.py 产物）：
+  # 留空=随机初始化；填路径=加载（如 "outputs/lora_pretrain/lora_state_dict.pth"）
+  init_from: ""
 
 # -----------------------------------------------------------------------------
 # 主动学习配置
