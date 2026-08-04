@@ -1,6 +1,6 @@
 # 低碳钢金相图像相区分割
 
-> 技术路线：**冻结 SAM 2 Image Encoder + 自制独立双 FPN 解码头（语义/边界双分支）+ 离线边界净化 GT + 两阶段训练（Stage 1 全监督 → Stage 2 半监督 Mean Teacher）+ 边界骨架化 + 受阻分水岭实例分割**。
+> 技术路线：**冻结 SAM 2 Image Encoder + 自制独立双 FPN 解码头（语义/边界双分支）+ 离线边界净化 GT + 两阶段训练（Stage 1 全监督 → Stage 2 半监督 Mean Teacher）+ 边界骨架化 + 受阻分水岭实例分割 +（可选）LoRA 低秩适配 trunk**。
 
 ## 当前进度
 
@@ -105,6 +105,12 @@ python train.py --config config/default_config.yaml --resume outputs/stage1/chec
 ```
 
 ### Stage 2 半监督微调
+
+> **LoRA（可选，治特征上限）**：`config/default_config.yaml` 的 `lora.enabled: true`
+> 会在冻结 trunk 的注意力 qkv/proj 上注入低秩适配器（rank 16，约 1M 参数），
+> 让语义/边界共享域适配后的特征，突破"冻结 encoder 特征上限"（文献：LoRA /
+> Conv-LoRA / TopoLoRA-SAM）。启用后 trunk 前向保留梯度，显存上升，建议
+> `batch_size` 调小；检查点自动保存 `lora_state_dict`，推理端自动加载。
 
 ```bash
 # 推荐：预计算 Stage-1 边界伪标签缓存（stage1_direct 模式使用，

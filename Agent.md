@@ -33,6 +33,9 @@ Python 环境：`conda activate sam2_env`（或 `D:\Anaconda\envs\sam2_env\pytho
 ### Stage 2（`train_stage2.py`，半监督 Mean Teacher，进行中）
 
 - 从 Stage-1 checkpoint 初始化 decoder；维护 EMA 教师（decay 0.999，可自适应）。
+- 可选 LoRA（`config.lora`，默认关闭）：冻结 trunk 的注意力 qkv/proj 注入低秩
+  适配器（rank 16 ≈ 1M 参数），语义/边界共享域适配特征；启用后 trunk 前向保留
+  梯度（显存上升），checkpoint 保存 `lora_state_dict`，推理端自动加载。
 - 双流 batch：有标签流（BoundaryLoss）+ 无标签流（一致性损失，权重 `unsup_weight` × sigmoid ramp-up 10 ep）。
 - 边界伪标签源 `boundary_teacher_mode`：
   - `ema`（默认）：EMA 教师 + Stage-1 锚点渐进混合（`anchor_alpha` 从 1.0 线性衰减至 `anchor_floor=0.3`，20 ep）；
@@ -94,6 +97,7 @@ Python 环境：`conda activate sam2_env`（或 `D:\Anaconda\envs\sam2_env\pytho
 
 - `paths.project_root`：硬编码绝对路径（YAML anchor 复用），迁移目录时需同步修改。
 - `inference`：test_dir / output_dir / threshold / boundary_threshold / boundary_threshold_high（双阈值滞后）/ boundary_logit_scale / tta / checkpoint_stage / stage1|stage2_checkpoint。
+- `lora`：enabled / rank / alpha / target_layers / lr_ratio（冻结 trunk 的低秩适配，见 §3）。
 - `semi_supervised`：boundary_teacher_mode（ema / stage1_direct / self_consistency / anchor_self）/ use_cached_pseudo_labels / pseudo_label_cache_dir / unsup_weight（边界一致性）/ unsup_seg_weight（语义一致性，独立权重）/ unsup_seg_sharpen_temperature（语义一致性目标温度锐化）/ unsup_rampup_epochs / ema_decay / adaptive_ema / lr_schedule（flat_decay）/ flat_epochs / freeze / sem_boundary_align_weight / boundary_anchor / boundary_consistency（含 pos_weight / margin_loss_weight / margin / rate_regularizer_weight 及退火）/ skeleton_filter（threshold / threshold_end / threshold_ramp_epochs）/ patch_mask / monitor / checkpoint_interval。
 - `train`：`seg_dice_weight`（语义监督 Dice，语义阶段建议 0.2~0.5）。
 - `progressive_aug`：学生输入外观增强参数（enabled / ramp_epochs / max_prob / 各抖动范围）。
