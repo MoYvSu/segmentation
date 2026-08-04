@@ -115,24 +115,6 @@ inference:
   stage2_checkpoint: "outputs/stage2/stage2_epoch100stage1_direct.pth"
 
 # -----------------------------------------------------------------------------
-# 实例级分类器推理配置（对照实验证实优于语义投票，见 README）
-# -----------------------------------------------------------------------------
-# 流程：best_bnd 边界模型分水岭 -> 冻结 SAM2/FPN 特征按实例掩码池化 ->
-#       tools/instance_classifier.py 训练的实例分类器判类。
-# 训练产物在 outputs/instance_clf/（classifier.joblib + meta.json），
-# 需先运行 tools/instance_classifier.py 生成，再运行 inference_instance.py。
-instance_classifier:
-  # 边界模型检查点（实例掩码来源；默认使用最佳边界模型）
-  checkpoint: "outputs/stage2/best_bnd_model/stage2_epoch100.pth"
-  # 实例分类器产物（tools/instance_classifier.py 训练）
-  classifier: "outputs/instance_clf/classifier.joblib"
-  # 推理输入/输出
-  test_dir: "data/test"
-  output_dir: "outputs/inference_instance"
-  # 特征目标分辨率（与训练一致，勿改）
-  target_size: 1024
-
-# -----------------------------------------------------------------------------
 # LoRA 配置（冻结 trunk 的参数高效适配；语义/边界共享域适配特征）
 # -----------------------------------------------------------------------------
 # 文献背书：LoRA (Hu et al. 2021) / Conv-LoRA (2024) / TopoLoRA-SAM (2026)；

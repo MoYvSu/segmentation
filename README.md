@@ -81,8 +81,7 @@ segmentationv2/
 ├── segment-anything-2/          # SAM 2 源码（本地仓库）
 ├── train.py                     # Stage 1 训练入口
 ├── train_stage2.py              # Stage 2 半监督训练入口
-├── inference.py                 # 推理入口（语义投票实例分类，对照臂）
-├── inference_instance.py        # 推理入口（实例级分类器判类，主流程）
+├── inference.py                 # 推理入口（语义投票实例分类）
 ├── debug_iou.py                 # 零 epoch IoU 硬审计
 ├── debug_pipeline.py            # 数据管线诊断（letterbox / 边界权重 / 受阻分水岭）
 ├── test_skeleton_watershed.py   # 骨架 + 分水岭纯图像验证
@@ -186,38 +185,11 @@ python inference.py --config config/default_config.yaml --test_dir data/test --o
 
 不指定 `--checkpoint` 时，按配置 `inference.checkpoint_stage`（stage1/stage2）选择默认权重（当前默认指向 `outputs/stage2/stage2_epoch30.pth`）。
 
-## 实例级分类器推理管线（主流程，对照实验证实更优）
+## 实例级分类器（已废弃）
 
-> 背景：语义头在暗域 test 上泛化不足，逐像素语义投票直接污染实例类别。
-> 对照实验（best_bnd 模型 + 68 张 test）确认**实例级分类器判类优于语义投票**；
-> 域内（7 张 val，1114 实例）基线 96.2% / 分类器 92.8%（训练/推理掩码类型差异所致，
-> 见下方局限）；test 域两臂逐像素类别分歧 2.73%，集中在少数图。
-> 人工标注分歧最高图（test_045/019/020/036/052/066）后可用评估工具裁决暗域优劣。
-
-训练实例分类器（特征：冻结 SAM2 四尺度 trunk + seg/boundary FPN 的逐通道 masked
-mean/std + 灰度统计，4388 维；SVM-RBF/PCA-128 为最优）：
-
-```bash
-conda activate sam2_env
-python tools/instance_classifier.py --config config/default_config.yaml     --checkpoint outputs/stage2/best_bnd_model/stage2_epoch100.pth     --outdir outputs/instance_clf
-```
-
-推理（默认参数取 `instance_classifier` 配置段，均可 CLI 覆盖）：
-
-```bash
-python inference_instance.py --config config/default_config.yaml
-python inference_instance.py --config config/default_config.yaml --test_dir data/test --output_dir outputs/inference_instance
-```
-
-对照评估（labelme 多边形 GT → 两臂实例级准确率）：
-
-```bash
-python tools/eval_instance_pipelines.py     --gt_dir data/raw --images <待评图目录>     --baseline_dir outputs/inference_baseline --instance_dir outputs/inference_instance
-```
-
-已知局限：分类器训练于 labelme 手画多边形、推理于分水岭掩码，掩码类型不一致
-导致域内准确率低于语义投票（92.8% vs 96.2%）；下一步应改为"训练图跑分水岭后按
-IoU 匹配 GT 再提取特征训练"，以对齐训练/推理特征分布。
+> v4.0 实例分类器推理管线（对照实验曾证实优于语义投票）已在协议 C（LoRA）落地后废弃：
+> 当前语义头在 LoRA 特征上已接近直接可用，实例类别由分水岭 + 语义投票产生。
+> 历史实现见 git 标签 `v4.0-instance-clf`。
 
 ## 输出文件
 
