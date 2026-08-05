@@ -107,6 +107,9 @@ inference:
   boundary_threshold: 0.4
   # 推理时对边界 logits 乘系数再 sigmoid（>1 增强弱响应，默认 1.0 不缩放）
   boundary_logit_scale: 1.0
+  # 语义边缘升权（0=关闭）：边界概率 × (1 + α×|∇语义概率|)，
+  # 相界（铁素体↔珠光体交界）处边界增强，相内噪声不被放大
+  sem_edge_boost_alpha: 0.0
   # 推理 TTA（hflip/vflip/rot180 平均），提升弱边界召回与稳定性
   tta: false
   watershed_dilate_width: 1
