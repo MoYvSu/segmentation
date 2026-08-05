@@ -36,6 +36,7 @@ def boundary_watershed_separation(
     dilate_width: int = 2,
     min_area: int = 50,
     max_instance_id: int = 255,
+    bridge_width: int = 1,
 ) -> Tuple[np.ndarray, Dict[int, int]]:
     """
     基于边界预测的受阻分水岭实例分割。
@@ -51,8 +52,15 @@ def boundary_watershed_separation(
     """
     h, w = semantic_mask.shape[:2]
 
-    # Step 1: 骨架化边界
+    # Step 1: 骨架化边界（可选先膨胀桥接"双峰/双线"输出：
+    # 边界概率剖面呈两条脊时，阈值化后是两条分离的细带，骨架化得到粗糙双线；
+    # 先膨胀 bridge_width 像素把两条脊合成一条带，骨架取中轴即为平滑单线）
     boundary_binary = (boundary_mask > 0).astype(np.uint8) * 255
+    if bridge_width > 0:
+        k = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (2 * bridge_width + 1, 2 * bridge_width + 1)
+        )
+        boundary_binary = cv2.dilate(boundary_binary, k)
     try:
         skeleton = cv2.ximgproc.thinning(
             boundary_binary, thinningType=cv2.ximgproc.THINNING_ZHANGSUEN
@@ -126,6 +134,26 @@ def boundary_watershed_separation(
     return inst_map, class_map
 
 
+def semantic_edge_map(seg_prob, mode="gradient"):
+    """语义引导的边界信号图（归一化到 P95 分位数，稳健）。
+
+    mode="gradient": |∇seg|，在相界/凹陷两侧均有响应（双峰）；
+    mode="valley":   max(0, -∇²seg)，只在凹陷（晶界线）中心给出单峰响应，
+                     可避免把双峰剖面再次放大成两条脊。
+    """
+    if mode == "valley":
+        lap = cv2.Laplacian(seg_prob, cv2.CV_32F, ksize=3)
+        resp = np.clip(-lap, 0, None)
+    else:
+        gx = cv2.Sobel(seg_prob, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(seg_prob, cv2.CV_32F, 0, 1, ksize=3)
+        resp = np.sqrt(gx ** 2 + gy ** 2)
+    p95 = float(np.percentile(resp, 95))
+    if p95 <= 1e-8:
+        return np.zeros_like(resp, dtype=np.float32)
+    return (resp / p95).astype(np.float32)
+
+
 def semantic_edge_boost(boundary_prob, seg_prob, alpha=0.0):
     """语义边缘升权：边界概率 × (1 + α × |∇语义概率|)。
 
@@ -156,7 +184,10 @@ def post_process_prediction_boundary(
     boundary_threshold: float = 0.5,
     boundary_logit_scale: float = 1.0,
     sem_edge_boost_alpha: float = 0.0,
+    sem_edge_merge_weight: float = 0.0,
+    sem_edge_mode: str = "gradient",
     watershed_dilate_width: int = 2,
+    bridge_width: int = 1,
     save_visualization: bool = True,
 ) -> Tuple[Dict[str, str], np.ndarray, Dict[int, int]]:
     """
@@ -179,7 +210,15 @@ def post_process_prediction_boundary(
     boundary_prob = torch.sigmoid(boundary_logits).numpy()
 
     semantic_mask = (seg_prob > threshold).astype(np.uint8)
-    # 语义边缘升权（可选）：相界处边界增强，相内噪声不被放大
+    # 语义引导融合（可选）：
+    # 1) 加性融合：final = (1-λ)·bnd + λ·edge（补回边界分支漏检的铁素体内部晶界）
+    # 2) 乘性升权：bnd × (1 + α·edge)（放大相界处已有响应）
+    if sem_edge_merge_weight > 0:
+        edge = semantic_edge_map(seg_prob, mode=sem_edge_mode)
+        boundary_prob = (
+            (1.0 - sem_edge_merge_weight) * boundary_prob
+            + sem_edge_merge_weight * edge
+        )
     if sem_edge_boost_alpha > 0:
         boundary_prob = semantic_edge_boost(
             boundary_prob, seg_prob, alpha=sem_edge_boost_alpha
@@ -194,6 +233,7 @@ def post_process_prediction_boundary(
         dilate_width=watershed_dilate_width,
         min_area=min_instance_area,
         max_instance_id=max_instance_id,
+        bridge_width=bridge_width,
     )
 
     inst_path = os.path.join(output_dir, f"{image_basename}_inst.png")
