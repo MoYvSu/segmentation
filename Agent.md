@@ -20,9 +20,15 @@ Python 环境：`conda activate sam2_env`（或 `D:\Anaconda\envs\sam2_env\pytho
 4. 长宽比保真：一律 Letterbox（等比缩放 + BORDER_REFLECT 镜像填充），禁止挤压变形。
 5. 禁止离线改图：所有变换/增强必须在线完成。
 
-## 3. 当前架构（两阶段）
+## 3. 当前架构（协议 C：LoRA 全链路）
 
-### Stage 1（`train.py`，全监督，已完成）
+> **当前主线**：自监督 LoRA 预训练（`tools/pretrain_lora_ssl.py`，1000 无标签 MAE
+> 掩码重建）→ Stage-1 监督（`train.py` + `config/stage1_lora.yaml`，LoRA 开）→
+> Stage-2 联合微调（`train_stage2.py` + `config/stage2_lora.yaml`，双分支联合 + LoRA）。
+> 当前最优 `outputs/stage2_lora/best_model_stage2.pth`：val mIoU 0.8315 / bndIoU 0.5009。
+> 已废弃：v4.0 两阶段分支冻结协议与实例分类器管线（git 标签 `v4.0-instance-clf` 可回溯）。
+
+### Stage 1（`train.py`，全监督，协议 C 第二步）
 
 - 冻结 SAM 2 Hiera trunk（base+），输出 4 尺度特征：112 / 224 / 448 / 896 ch，分辨率 256→32。
 - **独立双 FPN 解码头**（`models/fpn_decoder.py`）：`seg_fpn` + `boundary_fpn` 各自拥有独立的 lateral_convs + ResidualBlocks + top-down 融合（256ch），再各接独立输出头（GroupNorm + ReLU + Dropout + 1×1 Conv）。
@@ -30,9 +36,15 @@ Python 环境：`conda activate sam2_env`（或 `D:\Anaconda\envs\sam2_env\pytho
 - 损失：`BoundaryLoss` = 语义 BCE + `alpha_boundary` × FocalLoss(边界) × EDT 权重（权重 clamp [1, 4]）。
 - 优化：AdamW(1.5e-4) + warmup(25) → cosine；梯度裁剪 1.0；best 模型按复合评分 `0.2×mIoU + 0.8×BndIoU` 保存。
 
-### Stage 2（`train_stage2.py`，半监督 Mean Teacher，进行中）
+### Stage 2（`train_stage2.py`，半监督联合微调，协议 C 第三步）
 
-- 从 Stage-1 checkpoint 初始化 decoder；维护 EMA 教师（decay 0.999，可自适应）。
+- 从 Stage-1 LoRA checkpoint 初始化 decoder + LoRA；双分支联合训练（freeze 全关），
+  LoRA 随训练继续适配；维护 EMA 教师（decay 0.999，可自适应）。
+- LoRA（`config.lora`）：冻结 trunk 的注意力 qkv/proj 注入低秩适配器
+  （rank 16 ≈ 1M 参数），语义/边界共享域适配特征；trunk 梯度检查点已启用
+  （batch 可开大）；checkpoint 保存 `lora_state_dict`，推理端自动加载。
+- 关键原则：特征层随训练变动时，被冻结的头必须阶段末重拟合，或干脆联合训练
+  ——避免"特征动了、头冻结"的漂移（协议 C 采用联合训练）。
 - 双流 batch：有标签流（BoundaryLoss）+ 无标签流（一致性损失，权重 `unsup_weight` × sigmoid ramp-up 10 ep）。
 - 边界伪标签源 `boundary_teacher_mode`：
   - `ema`（默认）：EMA 教师 + Stage-1 锚点渐进混合（`anchor_alpha` 从 1.0 线性衰减至 `anchor_floor=0.3`，20 ep）；
@@ -73,10 +85,8 @@ Python 环境：`conda activate sam2_env`（或 `D:\Anaconda\envs\sam2_env\pytho
 | `utils/progressive_aug.py` | 渐进式外观增强 |
 | `utils/run_recorder.py` | 训练运行记录器（配置快照 / git / 环境 / metrics.csv / 权重归档）|
 | `train.py` / `train_stage2.py` | 两阶段训练入口 |
-| `inference.py` | Letterbox 推理 + 后处理管线（语义投票实例分类，对照臂）|
-| `inference_instance.py` | 实例级分类器推理管线（主流程，见 §12）|
-| `tools/instance_classifier.py` | 实例特征提取 + 分类器训练（labelme 实例标签）|
-| `tools/eval_instance_pipelines.py` | 双管线实例分类对照评估（labelme GT）|
+| `inference.py` | Letterbox 推理 + 后处理管线（语义投票实例分类）|
+| `tools/pretrain_lora_ssl.py` | 自监督 LoRA 预训练（MAE 风格，1000 无标签图，协议 C）|
 
 ## 5. 数据管线
 
@@ -94,6 +104,7 @@ Python 环境：`conda activate sam2_env`（或 `D:\Anaconda\envs\sam2_env\pytho
 
 - `paths.project_root`：硬编码绝对路径（YAML anchor 复用），迁移目录时需同步修改。
 - `inference`：test_dir / output_dir / threshold / boundary_threshold / boundary_threshold_high（双阈值滞后）/ boundary_logit_scale / tta / checkpoint_stage / stage1|stage2_checkpoint。
+- `lora`：enabled / rank / alpha / target_layers / lr_ratio（冻结 trunk 的低秩适配，见 §3）。
 - `semi_supervised`：boundary_teacher_mode（ema / stage1_direct / self_consistency / anchor_self）/ use_cached_pseudo_labels / pseudo_label_cache_dir / unsup_weight（边界一致性）/ unsup_seg_weight（语义一致性，独立权重）/ unsup_seg_sharpen_temperature（语义一致性目标温度锐化）/ unsup_rampup_epochs / ema_decay / adaptive_ema / lr_schedule（flat_decay）/ flat_epochs / freeze / sem_boundary_align_weight / boundary_anchor / boundary_consistency（含 pos_weight / margin_loss_weight / margin / rate_regularizer_weight 及退火）/ skeleton_filter（threshold / threshold_end / threshold_ramp_epochs）/ patch_mask / monitor / checkpoint_interval。
 - `train`：`seg_dice_weight`（语义监督 Dice，语义阶段建议 0.2~0.5）。
 - `progressive_aug`：学生输入外观增强参数（enabled / ramp_epochs / max_prob / 各抖动范围）。
@@ -126,9 +137,6 @@ python train_stage2.py --config config/default_config.yaml --init_from_checkpoin
 # 推理
 python inference.py --config config/default_config.yaml --checkpoint outputs/stage2/best_model_stage2.pth
 
-# 实例级分类器推理（主流程；默认参数取 instance_classifier 配置段）
-python tools/instance_classifier.py --config config/default_config.yaml --outdir outputs/instance_clf
-python inference_instance.py --config config/default_config.yaml
 ```
 
 Checkpoint 统一格式：`decoder_state_dict` + `optimizer_state_dict` + `scheduler_state_dict` + `epoch` + `best_composite_score` + `config`。读取时用 `.get()` 兼容旧 key（如 `best_val_iou`）。
@@ -139,7 +147,6 @@ Checkpoint 统一格式：`decoder_state_dict` + `optimizer_state_dict` + `sched
 - `debug_iou.py`：零 epoch IoU 硬审计（数据源 / 前向数值 / 二值化门限三项闭环）。
 - `test_skeleton_watershed.py`：纯图像处理的骨架 + 受阻分水岭验证。
 - `visualize_instances.py`：实例图着色（`_inst.png` + `_class.json`）。
-- `tools/eval_instance_pipelines.py`：两臂实例分类对照评估（labelme 多边形 GT）。
 - 推理可选 `--tta`（hflip/vflip/rot180 logits 平均）与双阈值滞后二值化
   （`boundary_threshold` 弱阈值 + `boundary_threshold_high` 强阈值），
   弱真实边界若与强边界连通则保留、孤立噪声剔除。
@@ -214,30 +221,4 @@ Checkpoint 统一格式：`decoder_state_dict` + `optimizer_state_dict` + `sched
   base_lr 为分母，语义阶段（唯一训练组是 seg 组，lr=seg_lr_ratio×base_lr）会被错误
   压成 0.1，使 EMA decay≈0.9999、教师几乎冻结在初始化权重上；现改为按参数组自身
   峰值 LR 计算（`group_peaks`），flat 阶段 ratio=1.0 → decay=base_decay。
-- **实例分类器训练/推理掩码类型不一致（下一步优化点）**：分类器在 labelme 手画
-  多边形特征上训练、在分水岭掩码特征上推理，域内准确率 92.8% 低于语义投票 96.2%；
-  应改为"训练图跑分水岭 -> 按 IoU 匹配 GT -> 同源掩码特征训练"，对齐分布后再比较。
 - 待探索：语义/边界分支进一步解耦训练、锚点混合调度曲线、更大规模无标签数据利用。
-
-## 12. 实例级分类器推理管线（主流程）
-
-**动机**：语义头在暗域 test 上泛化不足，逐像素语义投票直接污染实例类别。对照实验
-（best_bnd 模型 + 68 张 test）确认实例级分类器判类优于语义投票。
-
-**流程**：
-1. `tools/instance_classifier.py`：labelme 多边形 = 实例标注（32 图约 5127 实例，
-   0=珠光体 / 1=铁素体，按图 seed42/0.8 划分）。特征 = 冻结 SAM2 四尺度 trunk +
-   seg/boundary FPN 的逐通道 masked mean/std + 灰度统计（4388 维），分类器
-   LogReg / SVM-RBF(PCA-128) / MLP 对比，产物存 `outputs/instance_clf/`。
-2. `inference_instance.py`：best_bnd 边界模型 -> 骨架化 + 受阻分水岭 -> 实例掩码
-   -> 按掩码池化特征 -> 分类器判类，输出与 `inference.py` 相同格式
-   （`{name}_inst.png` + `{name}_class.json`）。
-3. `tools/eval_instance_pipelines.py`：labelme GT 多边形 -> 与预测实例 IoU 配对
-   -> 两臂实例级准确率。
-
-**当前结论**：域内（7 val 图 1114 实例）基线 96.2% / 分类器 92.8%；test 域两臂
-逐像素类别分歧 2.73%，集中在少数图（test_045/019/020/036/052/066 建议优先人工标注）。
-
-**约束**：`utils/post_process.py` 的 `boundary_watershed_separation` 新增可选
-`classify_fn` 参数（默认语义投票，向后兼容）；实例分类器参数固化于
-`config/default_config.yaml` 的 `instance_classifier` 段。

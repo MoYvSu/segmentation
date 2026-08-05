@@ -115,22 +115,24 @@ inference:
   stage2_checkpoint: "outputs/stage2/stage2_epoch100stage1_direct.pth"
 
 # -----------------------------------------------------------------------------
-# 实例级分类器推理配置（对照实验证实优于语义投票，见 README）
+# LoRA 配置（冻结 trunk 的参数高效适配；语义/边界共享域适配特征）
 # -----------------------------------------------------------------------------
-# 流程：best_bnd 边界模型分水岭 -> 冻结 SAM2/FPN 特征按实例掩码池化 ->
-#       tools/instance_classifier.py 训练的实例分类器判类。
-# 训练产物在 outputs/instance_clf/（classifier.joblib + meta.json），
-# 需先运行 tools/instance_classifier.py 生成，再运行 inference_instance.py。
-instance_classifier:
-  # 边界模型检查点（实例掩码来源；默认使用最佳边界模型）
-  checkpoint: "outputs/stage2/best_bnd_model/stage2_epoch100.pth"
-  # 实例分类器产物（tools/instance_classifier.py 训练）
-  classifier: "outputs/instance_clf/classifier.joblib"
-  # 推理输入/输出
-  test_dir: "data/test"
-  output_dir: "outputs/inference_instance"
-  # 特征目标分辨率（与训练一致，勿改）
-  target_size: 1024
+# 文献背书：LoRA (Hu et al. 2021) / Conv-LoRA (2024) / TopoLoRA-SAM (2026)；
+# 动机：暗域金相上冻结 SAM2 特征可分性不足是边界/语义上限的根因，
+# 低秩适配器让特征适应域，总参数量仍 <500M。
+# 注意：启用后 trunk 前向保留梯度（内存上升），建议 batch 适当调小；
+#       检查点会额外保存 lora_state_dict，推理端自动加载。
+lora:
+  enabled: false
+  rank: 16
+  alpha: 32.0
+  # 注入目标层（模块名子串）：默认注意力 qkv 融合投影 + 输出投影
+  target_layers: ["attn.qkv", "attn.proj"]
+  # LoRA 学习率比例（lora lr = base_lr × lr_ratio；LoRA 通常需要比 head 更高的 lr）
+  lr_ratio: 2.0
+  # 自监督预训练 LoRA 状态（tools/pretrain_lora_ssl.py 产物）：
+  # 留空=随机初始化；填路径=加载（如 "outputs/lora_pretrain/lora_state_dict.pth"）
+  init_from: ""
 
 # -----------------------------------------------------------------------------
 # 主动学习配置

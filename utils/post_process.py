@@ -36,7 +36,6 @@ def boundary_watershed_separation(
     dilate_width: int = 2,
     min_area: int = 50,
     max_instance_id: int = 255,
-    classify_fn=None,
 ) -> Tuple[np.ndarray, Dict[int, int]]:
     """
     基于边界预测的受阻分水岭实例分割。
@@ -47,7 +46,7 @@ def boundary_watershed_separation(
     3. 全图减去骨架带 -> 独立晶核
     4. 连通域标记 -> 种子
     5. 受阻分水岭缝合 -> 实例图
-    6. 每个实例区域类别判定（默认语义投票；传入 classify_fn 时用实例级分类器）
+    6. 每个实例区域语义投票 -> 晶粒类别
     7. 面积过滤 + ID 分配
     """
     h, w = semantic_mask.shape[:2]
@@ -97,7 +96,7 @@ def boundary_watershed_separation(
     ws_result = cv2.watershed(img_for_ws, markers.copy())
     ws_result[ws_result < 0] = 0
 
-    # Step 6: 实例类别判定（classify_fn 提供时用实例级分类器，否则语义投票）
+    # Step 6: 语义投票 -> 晶粒类别
     instances = []
     unique_labels = np.unique(ws_result)
     unique_labels = unique_labels[unique_labels > 0]
@@ -107,11 +106,8 @@ def boundary_watershed_separation(
         area = int(inst_mask.sum())
         if area < min_area:
             continue
-        if classify_fn is not None:
-            cls = int(classify_fn(inst_mask))
-        else:
-            ferrite_ratio = float((semantic_mask[inst_mask] > 0).sum()) / area
-            cls = CLASS_FERRITE if ferrite_ratio > 0.5 else CLASS_PEARLITE
+        ferrite_ratio = float((semantic_mask[inst_mask] > 0).sum()) / area
+        cls = CLASS_FERRITE if ferrite_ratio > 0.5 else CLASS_PEARLITE
         instances.append((area, cls, inst_mask))
 
     # Step 7: 按面积降序分配 ID

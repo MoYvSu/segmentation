@@ -52,6 +52,12 @@ from data.dataset_semi import (
     unlabeled_collate_fn,
 )
 from models.fpn_decoder import FPNDecoder, SegmentationModel
+from models.lora import (
+    count_lora_params,
+    extract_lora_state_dict,
+    inject_trunk_lora,
+    load_lora_state_dict,
+)
 from models.sam2_encoder import SAM2Encoder
 from utils.loss import BoundaryLoss
 from utils.loss_semi import compute_unsupervised_loss, update_ema
@@ -155,6 +161,30 @@ def build_model(config, device):
         freeze=sam2_cfg["freeze"],
         sam2_repo_path=os.path.join(paths_cfg["project_root"], sam2_cfg["sam2_repo_path"]),
     )
+
+    # LoRA：冻结 trunk 的参数高效适配（语义/边界共享域适配特征）
+    lora_cfg = config.get("lora", {})
+    if lora_cfg.get("enabled", False):
+        n_layers = inject_trunk_lora(
+            encoder,
+            rank=lora_cfg.get("rank", 16),
+            alpha=lora_cfg.get("alpha", 32.0),
+            target_layers=lora_cfg.get("target_layers"),
+        )
+        n_params = count_lora_params(encoder)
+        logger.info(
+            f"LoRA: ENABLED ({n_layers} 层, 可训练参数 {n_params / 1e6:.2f}M)"
+        )
+        # 可选：加载自监督预训练 LoRA 状态（lora.init_from）
+        init_from = lora_cfg.get("init_from", "")
+        if init_from and os.path.exists(init_from):
+            st = torch.load(init_from, map_location=device, weights_only=False)
+            n_load = load_lora_state_dict(encoder, st)
+            logger.info(f"LoRA: 预训练状态已加载 {init_from} ({n_load} 个参数)")
+        elif init_from:
+            logger.warning(f"LoRA init_from 不存在: {init_from}")
+    else:
+        logger.info("LoRA: DISABLED (trunk 全冻结)")
 
     decoder = FPNDecoder(
         in_channels=encoder.get_stage_channels(),
@@ -741,6 +771,7 @@ def main():
     paths_cfg = config["paths"]
     train_cfg = config["train"]
     semi_cfg = config.get("semi_supervised", {})
+    lora_cfg = config.get("lora", {})
 
     device = sam2_cfg["device"]
     if not torch.cuda.is_available() and device == "cuda":
@@ -875,12 +906,27 @@ def main():
         else:
             seg_params.append(param)
 
+    # LoRA 参数组（trunk 中仅 lora_A/lora_B 可训练）
+    lora_params = []
+    if lora_cfg.get("enabled", False):
+        lora_params = [
+            p for n, p in student_model.encoder.trunk.named_parameters()
+            if ("lora_A" in n or "lora_B" in n) and p.requires_grad
+        ]
+        lora_lr_ratio = lora_cfg.get("lr_ratio", 2.0)
+        lora_lr = base_lr * lora_lr_ratio
+    else:
+        lora_lr_ratio = 0.0
+        lora_lr = 0.0
+
     # 构建优化器参数组列表（跳过空组，冻结分支的参数已被排除）
     param_groups = []
     if len(seg_params) > 0:
         param_groups.append({"params": seg_params, "lr": seg_lr})
     if len(boundary_params) > 0:
         param_groups.append({"params": boundary_params, "lr": boundary_lr})
+    if len(lora_params) > 0:
+        param_groups.append({"params": lora_params, "lr": lora_lr})
 
     optimizer = torch.optim.AdamW(
         param_groups,
@@ -890,7 +936,8 @@ def main():
     )
     logger.info(f"Layered optimizer (dual FPN): "
                 f"Seg lr={seg_lr:.2e} ({len(seg_params)} params), "
-                f"Boundary lr={boundary_lr:.2e} ({len(boundary_params)} params)")
+                f"Boundary lr={boundary_lr:.2e} ({len(boundary_params)} params), "
+                f"LoRA lr={lora_lr:.2e} ({len(lora_params)} params, ratio={lora_lr_ratio})")
 
     # 记录每个参数组创建时的峰值 LR（LambdaLR 会原地改写 group['lr']，
     # 必须在调度器第一次 step 前保存，供自适应 EMA ratio 计算使用）
@@ -1032,11 +1079,29 @@ def main():
             for param in ref_decoder.parameters():
                 param.requires_grad = False
             ref_decoder.eval()
-            ref_model = SegmentationModel(student_model.encoder, ref_decoder)
-            logger.info(
-                "Boundary anchor / ref model: ENABLED "
-                "(Stage-1 ref model loaded, shared encoder)"
-            )
+            if lora_cfg.get("enabled", False):
+                # LoRA 启用时 ref_model 使用独立的无 LoRA 编码器，
+                # 保证 Stage-1 锚点仍是纯 Stage-1 特征，不被域适配带偏
+                ref_encoder = SAM2Encoder(
+                    config_file=sam2_cfg["config_file"],
+                    ckpt_path=os.path.join(paths_cfg["weights_dir"], paths_cfg["sam2_ckpt"])
+                    if os.path.exists(os.path.join(paths_cfg["weights_dir"], paths_cfg["sam2_ckpt"]))
+                    else None,
+                    device=device,
+                    freeze=sam2_cfg["freeze"],
+                    sam2_repo_path=os.path.join(paths_cfg["project_root"], sam2_cfg["sam2_repo_path"]),
+                )
+                ref_model = SegmentationModel(ref_encoder, ref_decoder)
+                logger.info(
+                    "Boundary anchor / ref model: ENABLED "
+                    "(独立无 LoRA 编码器，锚点保持 Stage-1 特征)"
+                )
+            else:
+                ref_model = SegmentationModel(student_model.encoder, ref_decoder)
+                logger.info(
+                    "Boundary anchor / ref model: ENABLED "
+                    "(Stage-1 ref model loaded, shared encoder)"
+                )
 
             anchor_floor = boundary_anchor_cfg.get("anchor_floor", 0.3)
             anchor_ramp_epochs = boundary_anchor_cfg.get("anchor_ramp_epochs", 20)
@@ -1124,6 +1189,9 @@ def main():
     if args.resume and os.path.exists(args.resume):
         checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
         student_model.decoder.load_state_dict(checkpoint["decoder_state_dict"])
+        if "lora_state_dict" in checkpoint and checkpoint["lora_state_dict"]:
+            n_lora = load_lora_state_dict(student_model, checkpoint["lora_state_dict"])
+            logger.info(f"  LoRA state loaded: {n_lora} params")
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         try:
             scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
@@ -1148,6 +1216,9 @@ def main():
             raise FileNotFoundError(f"Init checkpoint not found: {init_ckpt_path}")
         init_checkpoint = torch.load(init_ckpt_path, map_location=device, weights_only=False)
         student_model.decoder.load_state_dict(init_checkpoint["decoder_state_dict"])
+        if "lora_state_dict" in init_checkpoint and init_checkpoint["lora_state_dict"]:
+            n_lora = load_lora_state_dict(student_model, init_checkpoint["lora_state_dict"])
+            logger.info(f"  LoRA state loaded: {n_lora} params")
         start_epoch = 0
         best_composite_score = 0.0
         init_epoch = init_checkpoint.get("epoch", "?")
@@ -1399,6 +1470,7 @@ def main():
                 "decoder_state_dict": student_model.decoder.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
+                "lora_state_dict": extract_lora_state_dict(student_model),
                 "best_composite_score": best_composite_score,
                 "config": config,
             }, best_path)
@@ -1417,6 +1489,7 @@ def main():
                 "decoder_state_dict": student_model.decoder.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
+                "lora_state_dict": extract_lora_state_dict(student_model),
                 "best_composite_score": best_composite_score,
                 "config": config,
             }, ckpt_path)
@@ -1430,6 +1503,7 @@ def main():
     torch.save({
         "epoch": total_epochs - 1,
         "decoder_state_dict": student_model.decoder.state_dict(),
+        "lora_state_dict": extract_lora_state_dict(student_model),
         "best_composite_score": best_composite_score,
         "config": config,
     }, final_path)
