@@ -8,7 +8,7 @@
 # 路径配置
 # -----------------------------------------------------------------------------
 paths:
-  project_root: &project_root "/root/autodl-tmp/segmentationv2"
+  project_root: &project_root "d:/MY_PROGRAMME/segmentationv2"
   raw_data_dir: "data/raw"
   weights_dir: "weights"
   sam2_ckpt: "sam2_hiera_base_plus.pt"
@@ -112,7 +112,7 @@ inference:
   watershed_dilate_width: 1
   checkpoint_stage: "stage2"
   stage1_checkpoint: "outputs/stage1/best_model.pth"
-  stage2_checkpoint: "outputs/stage2/stage2_epoch100stage1_direct.pth"
+  stage2_checkpoint: "outputs/stage2/stage2_epoch60_lora_bnd.pth"
 
 # -----------------------------------------------------------------------------
 # LoRA 配置（冻结 trunk 的参数高效适配；语义/边界共享域适配特征）
