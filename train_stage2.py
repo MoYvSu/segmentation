@@ -180,7 +180,7 @@ def build_model(config, device):
         if init_from and os.path.exists(init_from):
             st = torch.load(init_from, map_location=device, weights_only=False)
             n_load = load_lora_state_dict(encoder, st)
-            logger.info(f"LoRA: 预训练状态已加载 {init_from} ({n_load} 个参数)")
+            logger.info(f"LoRA: 预训练状态已加载 {init_from} ({n_load} 个参数张量)")
         elif init_from:
             logger.warning(f"LoRA init_from 不存在: {init_from}")
         # 可选：冻结 LoRA（B1 校准实验——只训边界头，特征与 LoRA 均固定）
@@ -192,7 +192,7 @@ def build_model(config, device):
             for n, p in encoder.trunk.named_parameters():
                 if "lora_A" in n or "lora_B" in n:
                     p.requires_grad_(False)
-            logger.info(f"LoRA: FREEZED ({n_frozen} 个参数，特征固定)")
+            logger.info(f"LoRA: FREEZED ({n_frozen} 个参数张量，共 {count_lora_params(encoder) / 1e6:.2f}M 元素，特征固定)")
     else:
         logger.info("LoRA: DISABLED (trunk 全冻结)")
 
@@ -1209,7 +1209,7 @@ def main():
         student_model.decoder.load_state_dict(checkpoint["decoder_state_dict"])
         if "lora_state_dict" in checkpoint and checkpoint["lora_state_dict"]:
             n_lora = load_lora_state_dict(student_model, checkpoint["lora_state_dict"])
-            logger.info(f"  LoRA state loaded: {n_lora} params")
+            logger.info(f"  LoRA state loaded: {n_lora} 个参数张量")
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         try:
             scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
@@ -1236,7 +1236,7 @@ def main():
         student_model.decoder.load_state_dict(init_checkpoint["decoder_state_dict"])
         if "lora_state_dict" in init_checkpoint and init_checkpoint["lora_state_dict"]:
             n_lora = load_lora_state_dict(student_model, init_checkpoint["lora_state_dict"])
-            logger.info(f"  LoRA state loaded: {n_lora} params")
+            logger.info(f"  LoRA state loaded: {n_lora} 个参数张量")
         start_epoch = 0
         best_composite_score = 0.0
         init_epoch = init_checkpoint.get("epoch", "?")

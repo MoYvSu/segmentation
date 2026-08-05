@@ -156,7 +156,7 @@ def extract_lora_state_dict(model: nn.Module) -> dict:
 
 
 def load_lora_state_dict(model: nn.Module, state: dict) -> int:
-    """把 lora_state_dict 载入 trunk（严格模式，返回载入参数个数）。"""
+    """把 lora_state_dict 载入 trunk（严格模式，返回载入的参数张量个数）。"""
     if not state:
         return 0
     cur = _get_trunk(model).state_dict()
@@ -193,5 +193,5 @@ def load_lora_from_checkpoint(model: nn.Module, checkpoint: dict) -> bool:
     inject_trunk_lora(model.encoder, rank=rank, alpha=alpha,
                       target_layers=target_layers, use_grad_checkpoint=False)
     n = load_lora_state_dict(model, state)
-    logger.info(f"LoRA loaded from checkpoint: rank={rank}, alpha={alpha}, params={n}")
+    logger.info(f"LoRA loaded from checkpoint: rank={rank}, alpha={alpha}, tensors={n}")
     return True
