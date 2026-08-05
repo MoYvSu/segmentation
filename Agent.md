@@ -103,7 +103,7 @@ Python 环境：`conda activate sam2_env`（或 `D:\Anaconda\envs\sam2_env\pytho
 `config/default_config.yaml` 是唯一主配置（含 Stage 2 的 `semi_supervised` 段）；`config/stage2_config.yaml` 为早期独立配置，已被取代，不要回退使用。
 
 - `paths.project_root`：硬编码绝对路径（YAML anchor 复用），迁移目录时需同步修改。
-- `inference`：test_dir / output_dir / threshold / boundary_threshold / boundary_threshold_high（双阈值滞后）/ boundary_logit_scale / tta / checkpoint_stage / stage1|stage2_checkpoint。
+- `inference`：test_dir / output_dir / threshold / boundary_threshold（单阈值）/ boundary_logit_scale / tta / checkpoint_stage / stage1|stage2_checkpoint。
 - `lora`：enabled / rank / alpha / target_layers / lr_ratio（冻结 trunk 的低秩适配，见 §3）。
 - `semi_supervised`：boundary_teacher_mode（ema / stage1_direct / self_consistency / anchor_self）/ use_cached_pseudo_labels / pseudo_label_cache_dir / unsup_weight（边界一致性）/ unsup_seg_weight（语义一致性，独立权重）/ unsup_seg_sharpen_temperature（语义一致性目标温度锐化）/ unsup_rampup_epochs / ema_decay / adaptive_ema / lr_schedule（flat_decay）/ flat_epochs / freeze / sem_boundary_align_weight / boundary_anchor / boundary_consistency（含 pos_weight / margin_loss_weight / margin / rate_regularizer_weight 及退火）/ skeleton_filter（threshold / threshold_end / threshold_ramp_epochs）/ patch_mask / monitor / checkpoint_interval。
 - `train`：`seg_dice_weight`（语义监督 Dice，语义阶段建议 0.2~0.5）。
@@ -147,9 +147,9 @@ Checkpoint 统一格式：`decoder_state_dict` + `optimizer_state_dict` + `sched
 - `debug_iou.py`：零 epoch IoU 硬审计（数据源 / 前向数值 / 二值化门限三项闭环）。
 - `test_skeleton_watershed.py`：纯图像处理的骨架 + 受阻分水岭验证。
 - `visualize_instances.py`：实例图着色（`_inst.png` + `_class.json`）。
-- 推理可选 `--tta`（hflip/vflip/rot180 logits 平均）与双阈值滞后二值化
-  （`boundary_threshold` 弱阈值 + `boundary_threshold_high` 强阈值），
-  弱真实边界若与强边界连通则保留、孤立噪声剔除。
+- 推理可选 `--tta`（hflip/vflip/rot180 logits 平均）；边界采用单阈值二值化
+  （`boundary_threshold: 0.5`，已移除 Canny 式滞后——滞后会使边界带沿脊线
+  宽窄不一、轮廓崎岖）。
 - Stage 2 训练每 5 epoch 自动产出 monitor 概率图，直接目检语义/边界头是否收敛、是否出现雾状热力图。
 
 改代码后的最小验证顺序：
@@ -209,10 +209,9 @@ Checkpoint 统一格式：`decoder_state_dict` + `optimizer_state_dict` + `sched
   （=0.0），等边界头锐利后再以 0.1 起步试验；语义阶段 `seg_lr_ratio` 用
   0.1~0.3（不要 1.0）。`sem_degrade_warn_factor` 会在验证 mIoU 明显低于
   历史最优时打 WARNING，用于尽早发现语义崩塌。
-- **推理欠分割（单阈值要压到 0.4 才可靠）**：用双阈值滞后
-  （`boundary_threshold: 0.4` + `boundary_threshold_high: 0.6`）保留与强边界
-  连通的弱边界、剔除孤立噪声；可再开推理 `--tta` 或调大
-  `boundary_logit_scale`（对边界 logits 乘系数增强弱响应）。
+- **推理欠分割**：优先调大 `boundary_logit_scale`（对边界 logits 乘系数增强
+  弱响应，实测 1.3~1.8 有效）或降低 `boundary_threshold`；可再开推理 `--tta`。
+  已移除 Canny 式滞后（其会使边界带沿脊线宽窄不一、轮廓崎岖）。
 - **三分类全盲预测死锁**：已改为二分类 + 边界通道，不要退回三分类。
 - **半监督初段伪标签不可靠**：unsup 权重 sigmoid ramp-up 10 ep。
 - **patch_mask 与 output_size 尺寸一致性**：曾有专门修复，改动时注意。

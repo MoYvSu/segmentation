@@ -168,7 +168,7 @@ python inference.py --config config/default_config.yaml --test_dir data/test --o
 
 推理增强选项（配置于 `inference` 段）：
 
-- **双阈值滞后二值化**：`boundary_threshold: 0.4`（弱阈值）+ `boundary_threshold_high: 0.6`（强阈值），弱真实边界与强边界连通时保留、孤立噪声剔除，缓解欠分割；
+- **单阈值二值化**：`boundary_threshold: 0.5`（已移除 Canny 式滞后——边界概率在邻域连续，滞后会把强脊坡脚也纳入，导致边界带宽度沿脊线变化、轮廓崎岖）；
 - **边界 logits 缩放**：`boundary_logit_scale > 1` 增强弱边界响应；
 - **推理 TTA**：`python inference.py --tta`（hflip/vflip/rot180 logits 平均），提升弱边界召回与稳定性。
 

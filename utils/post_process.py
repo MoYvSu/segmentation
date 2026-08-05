@@ -126,42 +126,6 @@ def boundary_watershed_separation(
     return inst_map, class_map
 
 
-def hysteresis_threshold(
-    prob: np.ndarray,
-    low: float,
-    high: float,
-    connectivity: int = 8,
-) -> np.ndarray:
-    """Canny 式双阈值滞后二值化：仅保留强阈值像素及其连通的弱阈值像素。
-
-    弱真实边界（low <= p < high）若与强边界（p >= high）连通则保留，
-    孤立噪声即使越过弱阈值也被剔除。用于解决推理时
-    "阈值要压到 0.4 才可靠"的欠分割：既保留弱边界，又不引入弥散噪声。
-
-    Args:
-        prob: [H, W] 边界概率图
-        low: 弱阈值
-        high: 强阈值（须 > low）
-        connectivity: 连通性（4/8）
-
-    Returns:
-        [H, W] uint8 二值掩码（1=边界）
-    """
-    strong = prob >= high
-    weak = (prob >= low).astype(np.uint8)
-    if not strong.any():
-        return weak
-    num_labels, labels, _, _ = cv2.connectedComponentsWithStats(
-        weak, connectivity=connectivity
-    )
-    keep = np.zeros(strong.shape, dtype=np.uint8)
-    for i in range(1, num_labels):
-        comp = labels == i
-        if (comp & strong).any():
-            keep[comp] = 1
-    return keep
-
-
 def post_process_prediction_boundary(
     output: torch.Tensor,
     original_size: Tuple[int, int],
@@ -171,7 +135,6 @@ def post_process_prediction_boundary(
     max_instance_id: int = 255,
     threshold: float = 0.5,
     boundary_threshold: float = 0.5,
-    boundary_threshold_high: Optional[float] = None,
     boundary_logit_scale: float = 1.0,
     watershed_dilate_width: int = 2,
     save_visualization: bool = True,
@@ -196,12 +159,9 @@ def post_process_prediction_boundary(
     boundary_prob = torch.sigmoid(boundary_logits).numpy()
 
     semantic_mask = (seg_prob > threshold).astype(np.uint8)
-    if boundary_threshold_high is not None and boundary_threshold_high > boundary_threshold:
-        boundary_mask = hysteresis_threshold(
-            boundary_prob, low=boundary_threshold, high=boundary_threshold_high
-        )
-    else:
-        boundary_mask = (boundary_prob > boundary_threshold).astype(np.uint8)
+    # 单阈值二值化（已移除 Canny 式滞后：边界概率在邻域连续，滞后会把强脊
+    # 的坡脚也纳入，导致边界带宽度沿脊线变化、轮廓崎岖不平）
+    boundary_mask = (boundary_prob > boundary_threshold).astype(np.uint8)
 
     inst_map, class_map = boundary_watershed_separation(
         semantic_mask,
