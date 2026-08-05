@@ -126,6 +126,25 @@ def boundary_watershed_separation(
     return inst_map, class_map
 
 
+def semantic_edge_boost(boundary_prob, seg_prob, alpha=0.0):
+    """语义边缘升权：边界概率 × (1 + α × |∇语义概率|)。
+
+    相界（铁素体↔珠光体交界）处 |∇seg| 高 → 该处边界被放大；
+    相内平坦区（|∇seg|≈0）边界保持原值，噪声划痕不被放大。
+    归一化：|∇seg| 除以全图最大值映射到 [0,1]。
+    """
+    if alpha <= 0:
+        return boundary_prob
+    gx = cv2.Sobel(seg_prob, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(seg_prob, cv2.CV_32F, 0, 1, ksize=3)
+    grad = np.sqrt(gx ** 2 + gy ** 2)
+    mx = float(grad.max())
+    if mx <= 1e-8:
+        return boundary_prob
+    edge = grad / mx
+    return boundary_prob * (1.0 + alpha * edge)
+
+
 def post_process_prediction_boundary(
     output: torch.Tensor,
     original_size: Tuple[int, int],
@@ -136,6 +155,7 @@ def post_process_prediction_boundary(
     threshold: float = 0.5,
     boundary_threshold: float = 0.5,
     boundary_logit_scale: float = 1.0,
+    sem_edge_boost_alpha: float = 0.0,
     watershed_dilate_width: int = 2,
     save_visualization: bool = True,
 ) -> Tuple[Dict[str, str], np.ndarray, Dict[int, int]]:
@@ -159,6 +179,11 @@ def post_process_prediction_boundary(
     boundary_prob = torch.sigmoid(boundary_logits).numpy()
 
     semantic_mask = (seg_prob > threshold).astype(np.uint8)
+    # 语义边缘升权（可选）：相界处边界增强，相内噪声不被放大
+    if sem_edge_boost_alpha > 0:
+        boundary_prob = semantic_edge_boost(
+            boundary_prob, seg_prob, alpha=sem_edge_boost_alpha
+        )
     # 单阈值二值化（已移除 Canny 式滞后：边界概率在邻域连续，滞后会把强脊
     # 的坡脚也纳入，导致边界带宽度沿脊线变化、轮廓崎岖不平）
     boundary_mask = (boundary_prob > boundary_threshold).astype(np.uint8)
