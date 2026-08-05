@@ -211,13 +211,17 @@ def post_process_prediction_boundary(
 
     semantic_mask = (seg_prob > threshold).astype(np.uint8)
     # 语义引导融合（可选）：
-    # 1) 加性融合：final = (1-λ)·bnd + λ·edge（补回边界分支漏检的铁素体内部晶界）
+    # 1) 补缺式加性融合：final = bnd + λ·edge·(1−bnd)
+    #    只在边界分支弱处补语义梯度，不增厚已有强边界——
+    #    加性融合会把相界也放大成厚带，骨架带盖住小晶粒核导致
+    #    小铁素体被吞并（实例数 33→25、中位面积 +35% 的失效模式）；
+    #    补缺式保持强边界原样、只补漏检的铁素体内部晶界
     # 2) 乘性升权：bnd × (1 + α·edge)（放大相界处已有响应）
     if sem_edge_merge_weight > 0:
         edge = semantic_edge_map(seg_prob, mode=sem_edge_mode)
         boundary_prob = (
-            (1.0 - sem_edge_merge_weight) * boundary_prob
-            + sem_edge_merge_weight * edge
+            boundary_prob
+            + sem_edge_merge_weight * edge * (1.0 - boundary_prob)
         )
     if sem_edge_boost_alpha > 0:
         boundary_prob = semantic_edge_boost(
