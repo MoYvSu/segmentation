@@ -94,7 +94,7 @@ def build_model(config, device):
         if init_from and os.path.exists(init_from):
             st = torch.load(init_from, map_location=device, weights_only=False)
             n_load = load_lora_state_dict(encoder, st)
-            logger.info(f"LoRA: 预训练状态已加载 {init_from} ({n_load} 个参数)")
+            logger.info(f"LoRA: 预训练状态已加载 {init_from} ({n_load} 个参数张量)")
         elif init_from:
             logger.warning(f"LoRA init_from 不存在: {init_from}")
     else:
@@ -391,7 +391,7 @@ def main():
         model.decoder.load_state_dict(checkpoint["decoder_state_dict"])
         if "lora_state_dict" in checkpoint and checkpoint["lora_state_dict"]:
             n_lora = load_lora_state_dict(model, checkpoint["lora_state_dict"])
-            logger.info(f"  LoRA 状态已加载: {n_lora} 个参数")
+            logger.info(f"  LoRA 状态已加载: {n_lora} 个参数张量")
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         try:
             scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
