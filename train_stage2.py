@@ -183,6 +183,16 @@ def build_model(config, device):
             logger.info(f"LoRA: 预训练状态已加载 {init_from} ({n_load} 个参数)")
         elif init_from:
             logger.warning(f"LoRA init_from 不存在: {init_from}")
+        # 可选：冻结 LoRA（B1 校准实验——只训边界头，特征与 LoRA 均固定）
+        if lora_cfg.get("freeze", False):
+            n_frozen = sum(
+                1 for n, p in encoder.trunk.named_parameters()
+                if ("lora_A" in n or "lora_B" in n) and p.requires_grad
+            )
+            for n, p in encoder.trunk.named_parameters():
+                if "lora_A" in n or "lora_B" in n:
+                    p.requires_grad_(False)
+            logger.info(f"LoRA: FREEZED ({n_frozen} 个参数，特征固定)")
     else:
         logger.info("LoRA: DISABLED (trunk 全冻结)")
 
@@ -352,6 +362,7 @@ def train_one_epoch(
     tv_bg_weight=1.0, tv_boundary_weight=0.1,
     bg_suppress_weight=0.5, bg_suppress_threshold=0.1,
     pos_weight=5.0, margin_loss_weight=0.0, margin=0.4,
+    peak_hinge_weight=0.0, peak_threshold=0.8,
     rate_regularizer_weight=0.0, rate_slack=0.05,
     sem_boundary_align_weight=0.0,
 ):
@@ -470,6 +481,8 @@ def train_one_epoch(
                                 pos_weight=pos_weight,
                                 margin_loss_weight=margin_loss_weight,
                                 margin=margin,
+                                peak_hinge_weight=peak_hinge_weight,
+                                peak_threshold=peak_threshold,
                                 rate_regularizer_weight=rate_regularizer_weight,
                                 rate_slack=rate_slack,
                                 sem_boundary_align_weight=sem_boundary_align_weight,
@@ -503,6 +516,8 @@ def train_one_epoch(
                             pos_weight=pos_weight,
                             margin_loss_weight=margin_loss_weight,
                             margin=margin,
+                            peak_hinge_weight=peak_hinge_weight,
+                            peak_threshold=peak_threshold,
                             rate_regularizer_weight=rate_regularizer_weight,
                             rate_slack=rate_slack,
                             sem_boundary_align_weight=sem_boundary_align_weight,
@@ -1124,6 +1139,8 @@ def main():
     pos_weight = bnd_consist_cfg.get("pos_weight", 5.0)
     margin_loss_weight = bnd_consist_cfg.get("margin_loss_weight", 0.0)
     margin = bnd_consist_cfg.get("margin", 0.4)
+    peak_hinge_weight = bnd_consist_cfg.get("peak_hinge_weight", 0.0)
+    peak_threshold = bnd_consist_cfg.get("peak_threshold", 0.8)
     rate_w_start = float(bnd_consist_cfg.get("rate_regularizer_weight", 0.0))
     rate_regularizer_weight = rate_w_start
     rate_w_end = float(
@@ -1139,6 +1156,7 @@ def main():
         f"tv_bg={tv_bg_weight}, tv_bnd={tv_boundary_weight}, "
         f"bg_suppress_w={bg_suppress_weight}, bg_suppress_th={bg_suppress_threshold}, "
         f"pos_w={pos_weight}, margin_w={margin_loss_weight}, margin={margin}, "
+        f"peak_w={peak_hinge_weight}, peak_th={peak_threshold}, "
         f"rate_w={rate_regularizer_weight}, rate_slack={rate_slack}"
     )
     if sem_boundary_align_weight > 0:
@@ -1367,6 +1385,8 @@ def main():
             pos_weight=pos_weight,
             margin_loss_weight=margin_loss_weight,
             margin=margin,
+            peak_hinge_weight=peak_hinge_weight,
+            peak_threshold=peak_threshold,
             rate_regularizer_weight=rate_regularizer_weight,
             rate_slack=rate_slack,
             sem_boundary_align_weight=sem_boundary_align_weight,

@@ -133,6 +133,9 @@ lora:
   # 自监督预训练 LoRA 状态（tools/pretrain_lora_ssl.py 产物）：
   # 留空=随机初始化；填路径=加载（如 "outputs/lora_pretrain/lora_state_dict.pth"）
   init_from: ""
+  # 冻结 LoRA（B1 校准实验用）：加载后把 LoRA 参数 requires_grad=False，
+  # 特征完全固定，只训练边界/语义头（避免"特征动了、头被动适应"）
+  freeze: false
 
 # -----------------------------------------------------------------------------
 # 主动学习配置
@@ -305,6 +308,11 @@ semi_supervised:
     # 直接拉开学生输出的边界/背景差值（当前症状为差值 < 0.4）
     margin_loss_weight: 1.0
     margin: 0.4
+    # 边界峰值 hinge：目标边界像素预测概率须 ≥ peak_threshold，否则惩罚
+    # relu(peak_threshold - p)。与 margin 互补（margin 管差距、hinge 管峰值），
+    # 治"边界峰值平台窄（>0.7 占比低）导致分水岭防线弱、欠分割"。
+    peak_hinge_weight: 0.0
+    peak_threshold: 0.8
     # 预测正样本占比上限正则：学生预测均值超过"目标占比 + rate_slack"时
     # 产生 hinge 惩罚，直接阻止边界概率空间扩散（>0.5 占比膨胀到 30%+ 的失效模式）。
     # 与 margin（往上拉）互补：margin 拉开对比，该正则封住扩散。
