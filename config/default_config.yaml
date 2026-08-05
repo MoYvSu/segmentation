@@ -110,6 +110,14 @@ inference:
   # 语义边缘升权（0=关闭）：边界概率 × (1 + α×|∇语义概率|)，
   # 相界（铁素体↔珠光体交界）处边界增强，相内噪声不被放大
   sem_edge_boost_alpha: 0.0
+  # 语义加性融合（0=关闭）：final = (1-λ)·bnd + λ·edge，
+  # 补回边界分支漏检的铁素体内部晶界（语义热力图在晶界处凹陷）
+  sem_edge_merge_weight: 0.0
+  # 语义边缘模式：gradient=|∇seg|（双峰，简单）/ valley=-∇²seg（单峰，少重影）
+  sem_edge_mode: "gradient"
+  # 双峰桥接（骨架化前膨胀 boundary_mask，默认 1px）：
+  # 把"双脊"边界合成一条带，骨架取中轴 -> 平滑单线（治重影/粗糙骨架）
+  bridge_width: 1
   # 推理 TTA（hflip/vflip/rot180 平均），提升弱边界召回与稳定性
   tta: false
   watershed_dilate_width: 1

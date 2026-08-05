@@ -102,7 +102,10 @@ def predict_single_image(
     threshold=0.5, boundary_threshold=0.5,
     boundary_logit_scale=1.0,
     sem_edge_boost_alpha=0.0,
+    sem_edge_merge_weight=0.0,
+    sem_edge_mode="gradient",
     use_tta=False,
+    bridge_width=1,
     watershed_dilate_width=2,
     output_dir=None, save_visualization=True,
 ):
@@ -161,7 +164,10 @@ def predict_single_image(
             boundary_threshold=boundary_threshold,
             boundary_logit_scale=boundary_logit_scale,
             sem_edge_boost_alpha=sem_edge_boost_alpha,
+            sem_edge_merge_weight=sem_edge_merge_weight,
+            sem_edge_mode=sem_edge_mode,
             watershed_dilate_width=watershed_dilate_width,
+            bridge_width=bridge_width,
             save_visualization=save_visualization,
         )
     else:
@@ -265,8 +271,11 @@ def main():
             boundary_threshold=infer_cfg.get("boundary_threshold", 0.5),
             boundary_logit_scale=infer_cfg.get("boundary_logit_scale", 1.0),
             sem_edge_boost_alpha=infer_cfg.get("sem_edge_boost_alpha", 0.0),
+            sem_edge_merge_weight=infer_cfg.get("sem_edge_merge_weight", 0.0),
+            sem_edge_mode=infer_cfg.get("sem_edge_mode", "gradient"),
             use_tta=infer_cfg.get("tta", False) or args.tta,
             watershed_dilate_width=infer_cfg.get("watershed_dilate_width", 2),
+            bridge_width=infer_cfg.get("bridge_width", 1),
             output_dir=output_dir,
             save_visualization=post_cfg.get("save_visualization", False),
         )
