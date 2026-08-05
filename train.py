@@ -38,6 +38,12 @@ if PROJECT_ROOT not in sys.path:
 import yaml
 from data.dataset import BoundaryDataset, collate_fn
 from models.fpn_decoder import FPNDecoder, SegmentationModel
+from models.lora import (
+    count_lora_params,
+    extract_lora_state_dict,
+    inject_trunk_lora,
+    load_lora_state_dict,
+)
 from models.sam2_encoder import SAM2Encoder
 from utils.loss import BoundaryLoss
 from utils.metrics import SegMetrics
@@ -71,6 +77,28 @@ def build_model(config, device):
         freeze=sam2_cfg["freeze"],
         sam2_repo_path=os.path.join(paths_cfg["project_root"], sam2_cfg["sam2_repo_path"]),
     )
+
+    # LoRA（协议 C：从 Stage-1 开始域适配；起点可用 pretrain_lora_ssl 预训练状态）
+    lora_cfg = config.get("lora", {})
+    if lora_cfg.get("enabled", False):
+        n_layers = inject_trunk_lora(
+            encoder,
+            rank=lora_cfg.get("rank", 16),
+            alpha=lora_cfg.get("alpha", 32.0),
+            target_layers=lora_cfg.get("target_layers"),
+        )
+        n_params = count_lora_params(encoder)
+        logger.info(f"LoRA: ENABLED ({n_layers} 层, 可训练参数 {n_params / 1e6:.2f}M)")
+        # 可选：加载自监督预训练 LoRA 状态（lora.init_from）
+        init_from = lora_cfg.get("init_from", "")
+        if init_from and os.path.exists(init_from):
+            st = torch.load(init_from, map_location=device, weights_only=False)
+            n_load = load_lora_state_dict(encoder, st)
+            logger.info(f"LoRA: 预训练状态已加载 {init_from} ({n_load} 个参数)")
+        elif init_from:
+            logger.warning(f"LoRA init_from 不存在: {init_from}")
+    else:
+        logger.info("LoRA: DISABLED (trunk 全冻结)")
 
     decoder = FPNDecoder(
         in_channels=encoder.get_stage_channels(),
@@ -290,6 +318,7 @@ def main():
     train_cfg = config["train"]
     sam2_cfg = config["sam2"]
     paths_cfg = config["paths"]
+    lora_cfg = config.get("lora", {})
 
     device = sam2_cfg["device"]
     if not torch.cuda.is_available() and device == "cuda":
@@ -312,8 +341,21 @@ def main():
     ).to(device)
     logger.info("损失函数: BoundaryLoss (语义 BCE + 边界 Focal × EDT 权重)")
 
+    # 优化器：decoder 组 + 可选 LoRA 组（lr = base × lora.lr_ratio）
+    lora_params = []
+    if lora_cfg.get("enabled", False):
+        lora_params = [
+            p for n, p in model.encoder.trunk.named_parameters()
+            if ("lora_A" in n or "lora_B" in n) and p.requires_grad
+        ]
+    param_groups = [{"params": model.decoder.parameters(),
+                     "lr": train_cfg["learning_rate"]}]
+    if lora_params:
+        lora_lr = train_cfg["learning_rate"] * lora_cfg.get("lr_ratio", 1.0)
+        param_groups.append({"params": lora_params, "lr": lora_lr})
+        logger.info(f"LoRA 优化器组: lr={lora_lr:.2e} ({len(lora_params)} params)")
     optimizer = torch.optim.AdamW(
-        model.decoder.parameters(),
+        param_groups,
         lr=train_cfg["learning_rate"],
         weight_decay=train_cfg["weight_decay"],
         eps=1e-4,
@@ -347,6 +389,9 @@ def main():
     if args.resume and os.path.exists(args.resume):
         checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
         model.decoder.load_state_dict(checkpoint["decoder_state_dict"])
+        if "lora_state_dict" in checkpoint and checkpoint["lora_state_dict"]:
+            n_lora = load_lora_state_dict(model, checkpoint["lora_state_dict"])
+            logger.info(f"  LoRA 状态已加载: {n_lora} 个参数")
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         try:
             scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
@@ -412,6 +457,7 @@ def main():
                 "decoder_state_dict": model.decoder.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
+                "lora_state_dict": extract_lora_state_dict(model),
                 "best_composite_score": best_composite_score,
                 "config": config,
             }, best_path)
@@ -429,6 +475,7 @@ def main():
                 "decoder_state_dict": model.decoder.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
+                "lora_state_dict": extract_lora_state_dict(model),
                 "best_composite_score": best_composite_score,
                 "config": config,
             }, ckpt_path)
@@ -438,6 +485,7 @@ def main():
     torch.save({
         "epoch": train_cfg["epochs"] - 1,
         "decoder_state_dict": model.decoder.state_dict(),
+        "lora_state_dict": extract_lora_state_dict(model),
         "best_composite_score": best_composite_score,
         "config": config,
     }, final_path)
