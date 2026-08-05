@@ -264,9 +264,13 @@ class UnlabeledDataset(Dataset):
         # patch_mask: 随机遮挡
         patch_mask = self._generate_patch_mask()
 
-        # 应用 patch mask 到 img_strong
+        # 应用 patch mask 到 img_strong（用图像通道均值填充，而非置 0）：
+        # 置 0 的"黑色圆斑"是强域外线索，模型会学到"黑斑=背景"的捷径
+        # （随机掩码过拟合/圆斑伪影）；均值填充让掩码区呈现"内容不确定"
+        # 而非"确定是背景"，迫使模型靠上下文重建被遮挡的边界/结构
         img_strong_masked = img_strong.copy()
-        img_strong_masked[patch_mask > 0] = 0
+        mean_val = img_strong.reshape(-1, 3).mean(axis=0).astype(np.uint8)
+        img_strong_masked[patch_mask > 0] = mean_val
 
         # 转张量
         img_weak_tensor = torch.from_numpy(img_weak).float().permute(2, 0, 1) / 255.0
