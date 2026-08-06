@@ -121,6 +121,11 @@ inference:
   # 双峰桥接（骨架化前膨胀 boundary_mask，默认 1px）：
   # 把"双脊"边界合成一条带，骨架取中轴 -> 平滑单线（治重影/粗糙骨架）
   bridge_width: 1
+  # 分水岭方法：skeleton=阈值+骨架+核剥离（现行）/ marker_distance=距离场marker分水岭
+  watershed_method: "skeleton"
+  # marker 分水岭参数（watershed_method=marker_distance 时生效）
+  marker_smooth_sigma: 1.5
+  marker_h_ratio: 0.3
   # 推理 TTA（hflip/vflip/rot180 平均），提升弱边界召回与稳定性
   tta: false
   watershed_dilate_width: 1
