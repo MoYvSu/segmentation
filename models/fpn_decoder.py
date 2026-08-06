@@ -130,47 +130,66 @@ class FPNBackbone(nn.Module):
 
 
 class BoundaryRefineHead(nn.Module):
-    """高分辨率边界细化头：256 -> 512 -> 1024 渐进上采样 + 原图高频引导。
+    """高分辨率边界细化头：256->512->1024 渐进上采样 + 图像多尺度跳连。
 
-    动机：边界头在 1/4 分辨率输出时，1px 晶界是亚像素，位置误差达 ±4~5px
-    （上采样 7~10 倍）。本头把边界预测提到 1024，并用输入图（下采样到 256）
-    作为高频引导，恢复被 stride-4 主干丢弃的细粒度位置信息。
-    参数量 ~1.5M，不加深 trunk/FPN。
+    设计动机（"梨形"）：经典分割网络在下采样路径各尺度有对应的高分辨率特征，
+    上采样路径逐级跳连。SAM2 trunk 最小 stride 为 4（无 512/1024 特征），
+    因此本头以【输入图像金字塔】充当高分辨率编码侧，每个上采样阶段拼接
+    该分辨率下的图像浅层特征——细化头不需要"无中生有"地猜高频细节，
+    只需学会把图像细节映射到边界位置，深度需求保持轻量（每级 2 层卷积）。
+
+    尺度自适应：输出尺寸 = 输入 boundary_feat 的 4 倍（1024 输入 -> 1024 输出；
+    512 裁剪 -> 512 输出）。
     """
 
     def __init__(self, fpn_channels: int = 256, img_ch: int = 3, hidden: int = 96):
         super().__init__()
-        # 原图高频引导 stem（256 分辨率）
-        self.img_stem = nn.Sequential(
-            nn.Conv2d(img_ch, 32, 3, padding=1, bias=False),
-            nn.GroupNorm(8, 32), nn.ReLU(inplace=True),
-            nn.Conv2d(32, 32, 3, padding=1, bias=False),
-            nn.GroupNorm(8, 32), nn.ReLU(inplace=True),
-        )
-        # 256 -> 512
+        self.img_stem = nn.ModuleList([
+            self._make_stem(img_ch, 32),   # 256 级
+            self._make_stem(img_ch, 24),   # 512 级
+            self._make_stem(img_ch, 16),   # 1024 级
+        ])
         self.up1 = nn.Sequential(
             nn.Conv2d(fpn_channels + 32, hidden, 3, padding=1, bias=False),
             nn.GroupNorm(16, hidden), nn.ReLU(inplace=True),
             nn.Conv2d(hidden, hidden, 3, padding=1, bias=False),
             nn.GroupNorm(16, hidden), nn.ReLU(inplace=True),
         )
-        # 512 -> 1024
         self.up2 = nn.Sequential(
-            nn.Conv2d(hidden, hidden // 2, 3, padding=1, bias=False),
+            nn.Conv2d(hidden + 24, hidden // 2, 3, padding=1, bias=False),
             nn.GroupNorm(16, hidden // 2), nn.ReLU(inplace=True),
             nn.Conv2d(hidden // 2, hidden // 2, 3, padding=1, bias=False),
             nn.GroupNorm(16, hidden // 2), nn.ReLU(inplace=True),
         )
-        self.out = nn.Conv2d(hidden // 2, 1, 1)
+        self.out = nn.Conv2d(hidden // 2 + 16, 1, 1)
 
-    def forward(self, boundary_feat: torch.Tensor, image_low: torch.Tensor) -> torch.Tensor:
-        """boundary_feat: [B, C, 256, 256]；image_low: [B, 3, 256, 256]"""
-        img_feat = self.img_stem(image_low)                       # [B,32,256,256]
-        x = torch.cat([boundary_feat, img_feat], dim=1)           # [B,C+32,256,256]
+    @staticmethod
+    def _make_stem(in_ch: int, out_ch: int) -> nn.Sequential:
+        return nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, 3, padding=1, bias=False),
+            nn.GroupNorm(8, out_ch), nn.ReLU(inplace=True),
+            nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False),
+            nn.GroupNorm(8, out_ch), nn.ReLU(inplace=True),
+        )
+
+    def forward(self, boundary_feat: torch.Tensor, image: torch.Tensor) -> torch.Tensor:
+        """boundary_feat: [B, C, H, W]；image: [B, 3, H_img, W_img]"""
+        # 256 级：拼接该分辨率图像特征
+        img_cur = F.interpolate(image, size=boundary_feat.shape[-2:],
+                                mode="bilinear", align_corners=True)
+        x = torch.cat([boundary_feat, self.img_stem[0](img_cur)], dim=1)
         x = F.interpolate(x, scale_factor=2, mode="bilinear", align_corners=True)
-        x = self.up1(x)                                           # 512
+        x = self.up1(x)  # 512 级
+        # 512 级：拼接 512 图像特征
+        img_cur = F.interpolate(image, size=x.shape[-2:],
+                                mode="bilinear", align_corners=True)
+        x = torch.cat([x, self.img_stem[1](img_cur)], dim=1)
         x = F.interpolate(x, scale_factor=2, mode="bilinear", align_corners=True)
-        x = self.up2(x)                                           # 1024
+        x = self.up2(x)  # 1024 级
+        # 1024 级：拼接 1024 图像特征
+        img_cur = F.interpolate(image, size=x.shape[-2:],
+                                mode="bilinear", align_corners=True)
+        x = torch.cat([x, self.img_stem[2](img_cur)], dim=1)
         return self.out(x)
 
 
