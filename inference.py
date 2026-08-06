@@ -67,6 +67,7 @@ def build_model(config, device, checkpoint_path=None):
         num_classes=decoder_cfg["num_classes"],
         dropout=decoder_cfg["dropout"],
         use_bn=decoder_cfg["use_bn"],
+        boundary_refine=decoder_cfg.get("boundary_refine", False),
     )
 
     model = SegmentationModel(encoder, decoder)
@@ -75,7 +76,8 @@ def build_model(config, device, checkpoint_path=None):
     if checkpoint_path and os.path.exists(checkpoint_path):
         logger.info(f"Loading decoder weights: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-        model.decoder.load_state_dict(checkpoint["decoder_state_dict"])
+        from models.fpn_decoder import load_decoder_state
+        load_decoder_state(model.decoder, checkpoint["decoder_state_dict"])
         # 含 lora_state_dict 的检查点：注入并加载 LoRA（trunk 域适配）
         from models.lora import load_lora_from_checkpoint
         load_lora_from_checkpoint(model, checkpoint)

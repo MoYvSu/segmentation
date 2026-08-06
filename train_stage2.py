@@ -202,6 +202,7 @@ def build_model(config, device):
         num_classes=decoder_cfg["num_classes"],
         dropout=decoder_cfg["dropout"],
         use_bn=decoder_cfg["use_bn"],
+        boundary_refine=decoder_cfg.get("boundary_refine", False),
     )
 
     model = SegmentationModel(encoder, decoder)
@@ -224,7 +225,9 @@ def load_stage1_checkpoint(model, checkpoint_path, device):
         raise FileNotFoundError(f"Stage-1 checkpoint not found: {checkpoint_path}")
 
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    model.decoder.load_state_dict(checkpoint["decoder_state_dict"])
+    from models.fpn_decoder import load_decoder_state
+    load_decoder_state(model.decoder, checkpoint["decoder_state_dict"],
+                       tag=f"Stage-1({os.path.basename(checkpoint_path)})")
     logger.info(f"Stage-1 checkpoint loaded: {checkpoint_path}")
     # 兼容新旧 checkpoint key
     best_score = checkpoint.get(
@@ -1206,7 +1209,8 @@ def main():
     best_val_miou = 0.0
     if args.resume and os.path.exists(args.resume):
         checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
-        student_model.decoder.load_state_dict(checkpoint["decoder_state_dict"])
+        from models.fpn_decoder import load_decoder_state
+        load_decoder_state(student_model.decoder, checkpoint["decoder_state_dict"])
         if "lora_state_dict" in checkpoint and checkpoint["lora_state_dict"]:
             n_lora = load_lora_state_dict(student_model, checkpoint["lora_state_dict"])
             logger.info(f"  LoRA state loaded: {n_lora} 个参数张量")
@@ -1233,7 +1237,8 @@ def main():
         if not os.path.exists(init_ckpt_path):
             raise FileNotFoundError(f"Init checkpoint not found: {init_ckpt_path}")
         init_checkpoint = torch.load(init_ckpt_path, map_location=device, weights_only=False)
-        student_model.decoder.load_state_dict(init_checkpoint["decoder_state_dict"])
+        from models.fpn_decoder import load_decoder_state
+        load_decoder_state(student_model.decoder, init_checkpoint["decoder_state_dict"])
         if "lora_state_dict" in init_checkpoint and init_checkpoint["lora_state_dict"]:
             n_lora = load_lora_state_dict(student_model, init_checkpoint["lora_state_dict"])
             logger.info(f"  LoRA state loaded: {n_lora} 个参数张量")
