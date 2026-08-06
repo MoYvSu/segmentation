@@ -134,107 +134,6 @@ def boundary_watershed_separation(
     return inst_map, class_map
 
 
-def marker_watershed_separation(
-    semantic_mask: np.ndarray,
-    boundary_prob: np.ndarray,
-    seg_prob: np.ndarray = None,
-    min_area: int = 50,
-    max_instance_id: int = 255,
-    smooth_sigma: float = 1.5,
-    h_ratio: float = 0.3,
-    otsu: bool = True,
-    threshold: float = 0.5,
-) -> Tuple[np.ndarray, Dict[int, int]]:
-    """Marker 距离场分水岭（替代"阈值+骨架+核剥离"管线）。
-
-    流程：
-      1. 融合边界概率高斯平滑（σ=smooth_sigma，合并双脊避免伪谷）
-      2. 自适应阈值（Otsu 或给定 threshold）-> 边界掩码
-      3. 距离变换 d = dist(1 - bnd_mask)：晶粒内部 d 大、边界处 d=0
-      4. 种子 = d 的 h-maxima（浅峰合并到深峰，控制过分割）
-         + 面积过滤 + 语义约束（种子不跨相界）
-      5. cv2.watershed 以种子为 marker、在距离场梯度上分割
-         -> 分水岭线为相邻种子等距位置（对近凸晶粒接近真实晶界）
-      6. 面积过滤 + 语义投票 -> 实例图/类别映射
-
-    相比旧"距离场直接分水岭"：
-      - h-maxima + 面积 + 语义约束三重建模种子选取（旧痛点）；
-      - 平滑合并双脊，避免双峰产生两个种子把晶粒切成两半（新痛点）。
-    """
-    h, w = semantic_mask.shape[:2]
-    bp = boundary_prob.astype(np.float32)
-    if smooth_sigma > 0:
-        bp = cv2.GaussianBlur(bp, (0, 0), smooth_sigma)
-
-    if otsu:
-        bm8 = np.clip(bp * 255, 0, 255).astype(np.uint8)
-        _, bm = cv2.threshold(bm8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        bm = (bm > 0).astype(np.uint8)
-    else:
-        bm = (bp > threshold).astype(np.uint8)
-
-    d = cv2.distanceTransform(1 - bm, cv2.DIST_L2, 5)
-    dmax = float(d.max())
-    if dmax <= 0:
-        return np.zeros((h, w), dtype=np.uint8), {}
-
-    # h-maxima 种子（浅峰并入深峰，抑制噪声过分割）
-    # 注意：h-maxima 输出的是峰顶单像素（1~5px），必须先膨胀成小种子块，
-    # 否则会被面积过滤误杀；实例级最小面积过滤在分水岭之后进行
-    from skimage.morphology import h_maxima
-    maxima = h_maxima(d, h_ratio * dmax)
-    seed_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-    seeds = cv2.dilate(maxima.astype(np.uint8), seed_kernel)
-    n, labels, stats, _ = cv2.connectedComponentsWithStats(seeds, connectivity=8)
-    markers = np.zeros((h, w), dtype=np.int32)
-    valid = 0
-    seed_min = 1  # 膨胀后的种子块（~49px），仅剔除空块
-    for i in range(1, n):
-        area = int(stats[i, cv2.CC_STAT_AREA])
-        if area < seed_min:
-            continue
-        m = labels == i
-        if seg_prob is not None:
-            ferr = float((semantic_mask[m] > 0).mean())
-            if ferr < 0.05 or ferr > 0.95:
-                pass
-            else:
-                continue  # 种子跨相界，剔除
-        valid += 1
-        markers[m] = valid
-
-    if valid == 0:
-        return np.zeros((h, w), dtype=np.uint8), {}
-
-    # 分水岭：地形 = 距离场（3 通道 uint8），种子为 marker
-    terrain = np.stack([d / dmax * 255.0] * 3, axis=-1).astype(np.uint8)
-    ws = cv2.watershed(terrain, markers.copy())
-    ws[ws < 0] = 0
-
-    # 实例化 + 语义投票（与 boundary_watershed_separation 同款收尾）
-    instances = []
-    for lab in range(1, valid + 1):
-        m = ws == lab
-        area = int(m.sum())
-        if area < min_area:
-            continue
-        ferrite_ratio = float((semantic_mask[m] > 0).sum()) / area
-        cls = CLASS_FERRITE if ferrite_ratio > 0.5 else CLASS_PEARLITE
-        instances.append((area, cls, m))
-    instances.sort(key=lambda x: x[0], reverse=True)
-    inst_map = np.zeros((h, w), dtype=np.uint8)
-    class_map = {}
-    current_id = 1
-    for area, cls, m in instances:
-        if current_id > max_instance_id:
-            current_id = max_instance_id
-        inst_map[m] = current_id
-        class_map[current_id] = int(cls)
-        if current_id < max_instance_id:
-            current_id += 1
-    return inst_map, class_map
-
-
 def semantic_edge_map(seg_prob, mode="gradient", smooth=1.0):
     """语义引导的边界信号图（归一化到 P95 分位数，稳健）。
 
@@ -292,9 +191,6 @@ def post_process_prediction_boundary(
     sem_edge_merge_weight: float = 0.0,
     sem_edge_mode: str = "gradient",
     sem_edge_smooth: float = 1.0,
-    watershed_method: str = "skeleton",
-    marker_smooth_sigma: float = 1.5,
-    marker_h_ratio: float = 0.3,
     watershed_dilate_width: int = 2,
     bridge_width: int = 1,
     save_visualization: bool = True,
@@ -336,30 +232,17 @@ def post_process_prediction_boundary(
         boundary_prob = semantic_edge_boost(
             boundary_prob, seg_prob, alpha=sem_edge_boost_alpha
         )
-    if watershed_method == "marker_distance":
-        # Marker 距离场分水岭：直接用融合后的软边界概率 + 语义概率
-        inst_map, class_map = marker_watershed_separation(
-            semantic_mask,
-            boundary_prob,
-            seg_prob=seg_prob,
-            min_area=min_instance_area,
-            max_instance_id=max_instance_id,
-            smooth_sigma=marker_smooth_sigma,
-            h_ratio=marker_h_ratio,
-            threshold=boundary_threshold,
-        )
-    else:
-        # 单阈值二值化（已移除 Canny 式滞后：边界概率在邻域连续，滞后会把强脊
-        # 的坡脚也纳入，导致边界带宽度沿脊线变化、轮廓崎岖不平）
-        boundary_mask = (boundary_prob > boundary_threshold).astype(np.uint8)
-        inst_map, class_map = boundary_watershed_separation(
-            semantic_mask,
-            boundary_mask,
-            dilate_width=watershed_dilate_width,
-            min_area=min_instance_area,
-            max_instance_id=max_instance_id,
-            bridge_width=bridge_width,
-        )
+    # 单阈值二值化（已移除 Canny 式滞后：边界概率在邻域连续，滞后会把强脊
+    # 的坡脚也纳入，导致边界带宽度沿脊线变化、轮廓崎岖不平）
+    boundary_mask = (boundary_prob > boundary_threshold).astype(np.uint8)
+    inst_map, class_map = boundary_watershed_separation(
+        semantic_mask,
+        boundary_mask,
+        dilate_width=watershed_dilate_width,
+        min_area=min_instance_area,
+        max_instance_id=max_instance_id,
+        bridge_width=bridge_width,
+    )
 
     inst_path = os.path.join(output_dir, f"{image_basename}_inst.png")
     cv2.imwrite(inst_path, inst_map)
