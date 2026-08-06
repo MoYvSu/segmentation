@@ -17,10 +17,14 @@
     - feat_s4: 最低分辨率, 896ch
 """
 
+import logging
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 def _make_group_norm(channels: int) -> nn.GroupNorm:
@@ -125,6 +129,51 @@ class FPNBackbone(nn.Module):
         return top_down
 
 
+class BoundaryRefineHead(nn.Module):
+    """高分辨率边界细化头：256 -> 512 -> 1024 渐进上采样 + 原图高频引导。
+
+    动机：边界头在 1/4 分辨率输出时，1px 晶界是亚像素，位置误差达 ±4~5px
+    （上采样 7~10 倍）。本头把边界预测提到 1024，并用输入图（下采样到 256）
+    作为高频引导，恢复被 stride-4 主干丢弃的细粒度位置信息。
+    参数量 ~1.5M，不加深 trunk/FPN。
+    """
+
+    def __init__(self, fpn_channels: int = 256, img_ch: int = 3, hidden: int = 96):
+        super().__init__()
+        # 原图高频引导 stem（256 分辨率）
+        self.img_stem = nn.Sequential(
+            nn.Conv2d(img_ch, 32, 3, padding=1, bias=False),
+            nn.GroupNorm(8, 32), nn.ReLU(inplace=True),
+            nn.Conv2d(32, 32, 3, padding=1, bias=False),
+            nn.GroupNorm(8, 32), nn.ReLU(inplace=True),
+        )
+        # 256 -> 512
+        self.up1 = nn.Sequential(
+            nn.Conv2d(fpn_channels + 32, hidden, 3, padding=1, bias=False),
+            nn.GroupNorm(16, hidden), nn.ReLU(inplace=True),
+            nn.Conv2d(hidden, hidden, 3, padding=1, bias=False),
+            nn.GroupNorm(16, hidden), nn.ReLU(inplace=True),
+        )
+        # 512 -> 1024
+        self.up2 = nn.Sequential(
+            nn.Conv2d(hidden, hidden // 2, 3, padding=1, bias=False),
+            nn.GroupNorm(16, hidden // 2), nn.ReLU(inplace=True),
+            nn.Conv2d(hidden // 2, hidden // 2, 3, padding=1, bias=False),
+            nn.GroupNorm(16, hidden // 2), nn.ReLU(inplace=True),
+        )
+        self.out = nn.Conv2d(hidden // 2, 1, 1)
+
+    def forward(self, boundary_feat: torch.Tensor, image_low: torch.Tensor) -> torch.Tensor:
+        """boundary_feat: [B, C, 256, 256]；image_low: [B, 3, 256, 256]"""
+        img_feat = self.img_stem(image_low)                       # [B,32,256,256]
+        x = torch.cat([boundary_feat, img_feat], dim=1)           # [B,C+32,256,256]
+        x = F.interpolate(x, scale_factor=2, mode="bilinear", align_corners=True)
+        x = self.up1(x)                                           # 512
+        x = F.interpolate(x, scale_factor=2, mode="bilinear", align_corners=True)
+        x = self.up2(x)                                           # 1024
+        return self.out(x)
+
+
 class FPNDecoder(nn.Module):
     """
     独立双 FPN 解码头（语义 + 边界各自独立）- 边界预测版本。
@@ -146,6 +195,7 @@ class FPNDecoder(nn.Module):
         num_classes: int = 2,
         dropout: float = 0.1,
         use_bn: bool = True,
+        boundary_refine: bool = False,
     ):
         """
         Args:
@@ -155,6 +205,8 @@ class FPNDecoder(nn.Module):
             num_classes: 输出通道数（固定为 2：语义 + 边界）。
             dropout: dropout 概率。
             use_bn: 是否使用归一化层（True=GroupNorm, False=Identity）。
+            boundary_refine: 启用高分辨率边界细化头（256->1024 + 原图引导）。
+                边界通道原生输出 1024，语义保持 256 上采样。
         """
         super().__init__()
         if in_channels is None:
@@ -195,7 +247,7 @@ class FPNDecoder(nn.Module):
             nn.Conv2d(half_channels, 1, kernel_size=1, bias=True),
         )
 
-        # 边界分支输出头：聚焦高频线状特征
+        # 边界分支输出头：聚焦高频线状特征（boundary_refine 启用时保留权重兼容但旁路）
         self.boundary_branch = nn.Sequential(
             nn.Conv2d(fpn_channels, fpn_channels, kernel_size=3, padding=1, bias=False),
             norm_layer(fpn_channels),
@@ -206,6 +258,11 @@ class FPNDecoder(nn.Module):
             nn.Dropout2d(dropout) if dropout > 0 else nn.Identity(),
             nn.Conv2d(half_channels, 1, kernel_size=1, bias=True),
         )
+        self.boundary_refine = boundary_refine
+        if boundary_refine:
+            self.boundary_refine_head = BoundaryRefineHead(
+                fpn_channels=fpn_channels, img_ch=3, hidden=96
+            )
 
         self._init_weights()
 
@@ -220,13 +277,15 @@ class FPNDecoder(nn.Module):
                 nn.init.ones_(m.weight)
                 nn.init.zeros_(m.bias)
 
-    def forward(self, features, output_size=None):
+    def forward(self, features, output_size=None, image=None):
         """
         前向传播：双 FPN 独立提取 + 各自输出头 + 拼接。
 
         Args:
             features: [feat_s1, feat_s2, feat_s3, feat_s4]
             output_size: 可选，最终输出的 (H, W) 尺寸。
+            image: 原始输入图像 [B, 3, H, W]（boundary_refine 启用时提供，
+                   作为高分辨率边界的高频引导）。
 
         Returns:
             output: [B, 2, H, W]
@@ -242,19 +301,35 @@ class FPNDecoder(nn.Module):
         boundary_feat = self.boundary_fpn(features)
 
         # 各自输出头
-        seg_logits = self.seg_branch(seg_feat)            # [B, 1, H, W]
-        boundary_logits = self.boundary_branch(boundary_feat)  # [B, 1, H, W]
-        output = torch.cat([seg_logits, boundary_logits], dim=1)  # [B, 2, H, W]
-
-        # 动态上采样到指定尺寸（推理时对齐原图）
-        if output_size is not None:
-            output = F.interpolate(
-                output,
-                size=output_size,
-                mode="bilinear",
-                align_corners=True,
+        seg_logits = self.seg_branch(seg_feat)            # [B, 1, 256, 256]
+        if self.boundary_refine:
+            # 高分辨率边界细化头：原生输出 1024
+            if image is None:
+                raise ValueError("boundary_refine=True 时 forward 需传入 image")
+            image_low = F.interpolate(
+                image, size=seg_feat.shape[-2:], mode="bilinear", align_corners=True
             )
+            boundary_logits = self.boundary_refine_head(boundary_feat, image_low)
+        else:
+            boundary_logits = self.boundary_branch(boundary_feat)  # [B, 1, 256, 256]
 
+        # 动态上采样到指定尺寸（语义与边界分别处理：边界已 1024 时不再插值）
+        if output_size is not None:
+            seg_logits = F.interpolate(
+                seg_logits, size=output_size, mode="bilinear", align_corners=True
+            )
+            if boundary_logits.shape[-2:] != output_size:
+                boundary_logits = F.interpolate(
+                    boundary_logits, size=output_size, mode="bilinear", align_corners=True
+                )
+        elif seg_logits.shape[-2:] != boundary_logits.shape[-2:]:
+            # 无指定输出尺寸时（监控/推理），把语义对齐到边界原生分辨率，
+            # 保证双通道 cat 尺寸一致
+            seg_logits = F.interpolate(
+                seg_logits, size=boundary_logits.shape[-2:],
+                mode="bilinear", align_corners=True,
+            )
+        output = torch.cat([seg_logits, boundary_logits], dim=1)  # [B, 2, H, W]
         return output
 
     def freeze_seg_branch(self):
@@ -275,8 +350,12 @@ class FPNDecoder(nn.Module):
             param.requires_grad = False
         for param in self.boundary_branch.parameters():
             param.requires_grad = False
+        if self.boundary_refine:
+            for param in self.boundary_refine_head.parameters():
+                param.requires_grad = False
         logger_freeze_info = (
-            f"Boundary branch FROZEN (boundary_fpn + boundary_branch, "
+            f"Boundary branch FROZEN (boundary_fpn + boundary_branch"
+            f"{' + boundary_refine_head' if self.boundary_refine else ''}, "
             f"{sum(p.numel() for p in self.boundary_fpn.parameters()) + sum(p.numel() for p in self.boundary_branch.parameters())} params)"
         )
         print(logger_freeze_info)
@@ -284,6 +363,23 @@ class FPNDecoder(nn.Module):
     def param_count(self):
         """返回解码头的参数总量。"""
         return sum(p.numel() for p in self.parameters())
+
+
+def load_decoder_state(decoder: nn.Module, state_dict: dict, tag: str = "decoder"):
+    """宽容加载 decoder 权重（支持架构演进）。
+
+    新增层（如高分辨率边界细化头）在旧 checkpoint 中不存在 -> 保持随机初始化；
+    旧架构层（如被旁路的输出头）在新模型中存在但 checkpoint 无对应 -> 忽略。
+    缺失/多余键都会打日志，便于排查。
+    """
+    missing, unexpected = decoder.load_state_dict(state_dict, strict=False)
+    if missing:
+        logger.info(f"{tag}: 新增层缺失 {len(missing)} 个键（保持随机初始化）: "
+                    f"{list(missing)[:4]}...")
+    if unexpected:
+        logger.info(f"{tag}: 旧架构多余 {len(unexpected)} 个键（忽略）: "
+                    f"{list(unexpected)[:4]}...")
+    return missing, unexpected
 
 
 class SegmentationModel(nn.Module):
@@ -310,7 +406,7 @@ class SegmentationModel(nn.Module):
                 - output[:, 1] 为边界 logits
         """
         features = self.encoder(x)
-        output = self.decoder(features, output_size=output_size)
+        output = self.decoder(features, output_size=output_size, image=x)
         return output
 
     def total_param_count(self):
