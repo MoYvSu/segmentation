@@ -134,19 +134,23 @@ def boundary_watershed_separation(
     return inst_map, class_map
 
 
-def semantic_edge_map(seg_prob, mode="gradient"):
+def semantic_edge_map(seg_prob, mode="gradient", smooth=1.0):
     """语义引导的边界信号图（归一化到 P95 分位数，稳健）。
 
     mode="gradient": |∇seg|，在相界/凹陷两侧均有响应（双峰）；
     mode="valley":   max(0, -∇²seg)，只在凹陷（晶界线）中心给出单峰响应，
                      可避免把双峰剖面再次放大成两条脊。
+    smooth: 高斯平滑 sigma（二阶算子对噪声极敏感，valley 模式必须平滑）。
     """
+    src = seg_prob
+    if smooth > 0:
+        src = cv2.GaussianBlur(seg_prob, (0, 0), smooth)
     if mode == "valley":
-        lap = cv2.Laplacian(seg_prob, cv2.CV_32F, ksize=3)
+        lap = cv2.Laplacian(src, cv2.CV_32F, ksize=3)
         resp = np.clip(-lap, 0, None)
     else:
-        gx = cv2.Sobel(seg_prob, cv2.CV_32F, 1, 0, ksize=3)
-        gy = cv2.Sobel(seg_prob, cv2.CV_32F, 0, 1, ksize=3)
+        gx = cv2.Sobel(src, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(src, cv2.CV_32F, 0, 1, ksize=3)
         resp = np.sqrt(gx ** 2 + gy ** 2)
     p95 = float(np.percentile(resp, 95))
     if p95 <= 1e-8:
@@ -186,6 +190,7 @@ def post_process_prediction_boundary(
     sem_edge_boost_alpha: float = 0.0,
     sem_edge_merge_weight: float = 0.0,
     sem_edge_mode: str = "gradient",
+    sem_edge_smooth: float = 1.0,
     watershed_dilate_width: int = 2,
     bridge_width: int = 1,
     save_visualization: bool = True,
@@ -218,7 +223,7 @@ def post_process_prediction_boundary(
     #    补缺式保持强边界原样、只补漏检的铁素体内部晶界
     # 2) 乘性升权：bnd × (1 + α·edge)（放大相界处已有响应）
     if sem_edge_merge_weight > 0:
-        edge = semantic_edge_map(seg_prob, mode=sem_edge_mode)
+        edge = semantic_edge_map(seg_prob, mode=sem_edge_mode, smooth=sem_edge_smooth)
         boundary_prob = (
             boundary_prob
             + sem_edge_merge_weight * edge * (1.0 - boundary_prob)
