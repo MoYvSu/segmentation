@@ -120,6 +120,9 @@ inference:
   sem_edge_mode: "gradient"
   # 语义边缘图高斯平滑 sigma（二阶 valley 模式对噪声敏感，必须平滑）
   sem_edge_smooth: 1.0
+  # combined 模式（sem_edge_mode: "combined"）下谷响应/梯度的相对权重
+  sem_edge_valley_weight: 1.0
+  sem_edge_gradient_weight: 1.0
   # 双峰桥接（骨架化前膨胀 boundary_mask，默认 1px）：
   # 把"双脊"边界合成一条带，骨架取中轴 -> 平滑单线（治重影/粗糙骨架）
   bridge_width: 1
