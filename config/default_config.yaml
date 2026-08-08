@@ -1,11 +1,9 @@
 # =============================================================================
-# 低碳钢金相图像无监督相区分割 - 全局配置（边界预测版本）
+# 低碳钢金相图像相区分割 - 主配置
 # =============================================================================
-# python 环境: conda activate sam2_env
-# 架构变更：双通道边界预测（语义掩码 + 晶界掩码）+ 离线边界净化
+# python: conda activate sam2_env
+# 当前主线：协议 C（SSL LoRA 预训练 -> Stage-1 监督(LoRA) -> Stage-2 联合微调）
 
-# -----------------------------------------------------------------------------
-# 路径配置
 # -----------------------------------------------------------------------------
 paths:
   project_root: &project_root "/root/autodl-tmp/segmentationv2"
@@ -13,11 +11,7 @@ paths:
   weights_dir: "weights"
   sam2_ckpt: "sam2_hiera_base_plus.pt"
   output_dir: "outputs/stage1"
-  pseudo_label_dir: "outputs/pseudo_labels"
-  active_learning_log: "outputs/active_learning_log.csv"
 
-# -----------------------------------------------------------------------------
-# SAM 2 Encoder 配置
 # -----------------------------------------------------------------------------
 sam2:
   model_version: "sam2_hiera_base_plus"
@@ -27,61 +21,44 @@ sam2:
   sam2_repo_path: "segment-anything-2"
 
 # -----------------------------------------------------------------------------
-# FPN 解码头配置（边界预测版本：输出 2 通道 = 语义 logits + 边界 logits）
-# -----------------------------------------------------------------------------
 decoder:
   fpn_channels: 256
-  num_classes: 2
+  num_classes: 2          # 通道0=语义(0珠光体/1铁素体), 通道1=边界
   dropout: 0.1
   use_bn: true
-  # 高分辨率边界细化头（256->1024 + 原图引导，治 1px 晶界亚像素/位置误差）
-  boundary_refine: false
 
-# -----------------------------------------------------------------------------
-# 数据管道配置
 # -----------------------------------------------------------------------------
 data:
   image_size: 1024
   crop_size: 512
-  erode_pixels: 5
-  dist_scale_factor: 10.0
   classes:
     0: "pearlite"
     1: "ferrite"
   train_ratio: 0.8
   seed: 42
   batch_size: 4
-  num_workers: 4
+  num_workers: 8
   augmentation:
     horizontal_flip: true
     vertical_flip: true
     rotation: true
 
 # -----------------------------------------------------------------------------
-# 训练配置
-# -----------------------------------------------------------------------------
 train:
   learning_rate: 1.5e-4
   weight_decay: 1.0e-4
   epochs: 100
-  scheduler: "cosine"
   warmup_epochs: 25
   grad_clip: 1.0
   amp: false
   focal_gamma: 2.0
   focal_alpha: 0.75
-  boundary_alpha: 3.0
-  # 语义监督 Dice 权重（0=关闭）：块状低频结构，BCE 对掩码边界易钝；
-  # 已改为两类平均 Dice（对珠光体/铁素体对称，见 utils/loss.py）；
-  # 语义阶段（freeze.seg_branch=false）建议 0.3~0.5
-  seg_dice_weight: 0.3
-  # 复合评分权重（best_model 保存依据）
+  boundary_alpha: 3.0      # 边界监督损失权重（调高=边界梯度更强）
+  seg_dice_weight: 0.3     # 语义 Dice 权重（两类平均；调高=更关注掩码边界）
   composite_sem_weight: 0.2
   composite_boundary_weight: 0.8
   save_checkpoints: true
 
-# -----------------------------------------------------------------------------
-# 边界净化与 EDT 权重配置
 # -----------------------------------------------------------------------------
 boundary:
   gt_dir: "data/purified_gt"
@@ -94,85 +71,34 @@ boundary:
   edt_weight_ceil: 4.0
 
 # -----------------------------------------------------------------------------
-# 推理配置
-# -----------------------------------------------------------------------------
 inference:
   test_dir: "data/test"
   output_dir: "outputs/inference"
   threshold: 0.5
-  min_instance_area: 500
+  min_instance_area: 300
   max_instance_id: 255
-  # 单阈值二值化（已移除 Canny 式滞后）：边界概率在邻域连续，滞后会把强脊
-  # 的坡脚也纳入，导致边界带宽度沿脊线变化、轮廓崎岖不平，影响分水岭防线。
-  # 0.4 为与旧滞后(0.4/0.5)实例密度相当的等效档；想要更细的线可 0.5，
-  # 或配 boundary_logit_scale 1.3 保密度
-  boundary_threshold: 0.4
-  # 推理时对边界 logits 乘系数再 sigmoid（>1 增强弱响应，默认 1.0 不缩放）
-  boundary_logit_scale: 1.0
-  # 语义边缘升权（0=关闭）：边界概率 × (1 + α×|∇语义概率|)，
-  # 相界（铁素体↔珠光体交界）处边界增强，相内噪声不被放大
-  sem_edge_boost_alpha: 0.0
-  # 语义补缺式融合（0=关闭）：final = bnd + λ·edge·(1−bnd)，
-  # 只在边界分支弱处补语义梯度（不增厚强边界，避免小晶粒被吞并），
-  # 补回边界分支漏检的铁素体内部晶界（语义热力图在晶界处凹陷）
-  sem_edge_merge_weight: 0.0
-  # 语义边缘模式：gradient=|∇seg|（双峰，简单）/ valley=-∇²seg（单峰，少重影）
-  sem_edge_mode: "gradient"
-  # 语义边缘图高斯平滑 sigma（二阶 valley 模式对噪声敏感，必须平滑）
-  sem_edge_smooth: 1.0
-  # combined 模式（sem_edge_mode: "combined"）下谷响应/梯度的相对权重
-  sem_edge_valley_weight: 1.0
-  sem_edge_gradient_weight: 1.0
-  # 语义单线为主 + 边界头带内校准（true 启用，替代阈值+融合路径）：
-  # S = P_b × B + λ × L，带外边界响应被乘法掩掉（去雾）
-  semantic_primary: false
-  sem_band_width: 2
-  sem_line_weight: 3.0
-  sem_percentile: 80.0
-  # 双峰桥接（骨架化前膨胀 boundary_mask，默认 1px）：
-  # 把"双脊"边界合成一条带，骨架取中轴 -> 平滑单线（治重影/粗糙骨架）
-  bridge_width: 1
-  # 推理 TTA（hflip/vflip/rot180 平均），提升弱边界召回与稳定性
+  boundary_threshold: 0.4     # 边界单阈值（调低=保留更多边界，防欠分割）
+  boundary_logit_scale: 1.0   # 边界 logits 缩放（>1 增强弱边界）
+  sem_edge_merge_weight: 0.0  # 语义补缺式融合 λ：bnd + λ·|∇seg|·(1-bnd)
+  sem_edge_boost_alpha: 0.0   # 语义乘性升权 α：bnd × (1+α·|∇seg|)
+  sem_edge_smooth: 1.0        # 语义边缘图高斯平滑 sigma
   tta: false
   watershed_dilate_width: 1
+  bridge_width: 1             # 骨架化前膨胀（桥接双线成单线）
   checkpoint_stage: "stage2"
   stage1_checkpoint: "outputs/stage1/best_model.pth"
-  stage2_checkpoint: "outputs/stage2/stage2_epoch100stage1_direct.pth"
+  stage2_checkpoint: "outputs/stage2_v6/best_model_stage2.pth"
 
 # -----------------------------------------------------------------------------
-# LoRA 配置（冻结 trunk 的参数高效适配；语义/边界共享域适配特征）
-# -----------------------------------------------------------------------------
-# 文献背书：LoRA (Hu et al. 2021) / Conv-LoRA (2024) / TopoLoRA-SAM (2026)；
-# 动机：暗域金相上冻结 SAM2 特征可分性不足是边界/语义上限的根因，
-# 低秩适配器让特征适应域，总参数量仍 <500M。
-# 注意：启用后 trunk 前向保留梯度（内存上升），建议 batch 适当调小；
-#       检查点会额外保存 lora_state_dict，推理端自动加载。
 lora:
   enabled: false
   rank: 16
   alpha: 32.0
-  # 注入目标层（模块名子串）：默认注意力 qkv 融合投影 + 输出投影
   target_layers: ["attn.qkv", "attn.proj"]
-  # LoRA 学习率比例（lora lr = base_lr × lr_ratio；LoRA 通常需要比 head 更高的 lr）
-  lr_ratio: 2.0
-  # 自监督预训练 LoRA 状态（tools/pretrain_lora_ssl.py 产物）：
-  # 留空=随机初始化；填路径=加载（如 "outputs/lora_pretrain/lora_state_dict.pth"）
-  init_from: ""
-  # 冻结 LoRA（B1 校准实验用）：加载后把 LoRA 参数 requires_grad=False，
-  # 特征完全固定，只训练边界/语义头（避免"特征动了、头被动适应"）
-  freeze: false
+  lr_ratio: 2.0              # LoRA lr = base_lr × ratio
+  init_from: ""              # 自监督预训练 LoRA 状态路径（留空=随机）
+  freeze: false              # true=加载后冻结 LoRA（特征固定，只训头部）
 
-# -----------------------------------------------------------------------------
-# 主动学习配置
-# -----------------------------------------------------------------------------
-active_learning:
-  strategy: "entropy"
-  sample_size: 10
-  entropy_threshold: 0.5
-  boundary_variance_threshold: 0.1
-
-# -----------------------------------------------------------------------------
-# 后处理配置
 # -----------------------------------------------------------------------------
 post_process:
   interpolate_mode: "bilinear"
@@ -182,251 +108,83 @@ post_process:
   save_visualization: false
 
 # -----------------------------------------------------------------------------
-# 半监督配置（Stage 2: Mean Teacher）
-# -----------------------------------------------------------------------------
 semi_supervised:
-  # 无标注数据目录
   unlabeled_dir: "data/unlabeled"
-  # 输出目录（第二阶段 checkpoints）
   output_dir: "outputs/stage2"
-
-  # 从指定 checkpoint 初始化 decoder 权重（仅加载权重，重置 optimizer/scheduler/epoch）
-  # 用于分支切换：训练完一个分支后，从此 checkpoint 开始训练另一个分支
-  # 也可通过 CLI 参数 --init_from_checkpoint 覆盖
-  # 留空=禁用，填路径=启用（如 "outputs/stage2/best_model_stage2.pth"）
   init_from_checkpoint: ""
-  
-  # EMA 衰减系数（基础值，启用 adaptive_ema 时根据当前 LR 动态调整）
   ema_decay: 0.999
-  # 是否启用自适应 EMA 衰减（LR 高时降低 decay 让教师更快跟随，LR 低时提高 decay 增加稳定性）
   adaptive_ema: true
-  # 边界伪标签源模式（实验对比用）
-  # "ema": EMA 教师伪标签 + Stage-1 锚点混合（默认，当前行为）
-  # "stage1_direct": 直接使用 Stage-1 冻结模型输出作为伪标签（无 EMA 滞后）
-  # "self_consistency": 学生弱增强预测（stop-gradient）作为伪标签（无 EMA 依赖）
-  # "anchor_self": 学生弱增强预测 + Stage-1 锚点混合（anchor_alpha 从 1.0
-  #   退火到 anchor_floor）。自一致性恢复弱边界 recall（学生微调后弱边界
-  #   比 Stage-1 更强），锚点锚定几何防漂移；recall 天花板高于 stage1_direct。
-  boundary_teacher_mode: "stage1_direct"
-  # stage1_direct 离线伪标签缓存（推荐）：
-  # 先运行 tools/precompute_pseudo_labels.py 生成 Stage-1 边界目标缓存，
-  # 训练时直接从缓存读取，免去每 step 的 ref_model 前向，
-  # 并可对无边界响应的低质量无标签图做剔除（exclude.txt）。
+  boundary_teacher_mode: "stage1_direct"   # ema / stage1_direct / self_consistency / anchor_self
   use_cached_pseudo_labels: true
-  pseudo_label_cache_dir: "outputs/pseudo_labels/stage1_boundary"
-  
-  # 无监督损失权重（边界一致性；语义一致性见 unsup_seg_weight，独立控制）
-  unsup_weight: 0.3
-  # 语义一致性损失权重：无标签上的语义伪标签可靠度低于边界，
-  # 且 patch mask 遮挡推断对语义有害；语义阶段建议 0.05~0.1
-  # （0.3 会在 ramp-up 完成后把学生从有标签分布拉偏——见 20260803 运行的
-  #  最佳 mIoU 出现在 epoch 4、之后持续下滑的现象）
-  unsup_seg_weight: 0.0
-  # 语义一致性目标温度锐化（方案 A）：对教师语义概率做 p^(1/T) 锐化，
-  # T<1 推向 0/1，对抗 MSE 软目标把学生输出拉向 0.5（test 集"涌动"根因：
-  # >0.8 高置信从 Stage-1 的 63.5% 掉到 ep60 的 52%、0.4-0.6 模糊带
-  # 从 7.5% 扩到 9.3%）。T=1.0 等价关闭。
-  unsup_seg_sharpen_temperature: 0.5
-  # 无监督权重 sigmoid ramp-up 长度（epoch 数，前 N 个 epoch 从 0 渐进到目标值）
-  # 解决训练初期教师伪标签不可靠的问题
+  pseudo_label_cache_dir: "outputs/pseudo_labels/semantic_boundary"
+  unsup_weight: 0.3          # 边界一致性权重（调高=无标签边界监督更强）
+  unsup_seg_weight: 0.0      # 语义一致性权重（当前语义只走监督）
   unsup_rampup_epochs: 10
-  # 训练轮数
   epochs: 100
-  # 学习率
   learning_rate: 5.0e-5
-  # 语义分支学习率比例（seg lr = seg_lr_ratio * learning_rate）
-  # 语义阶段（freeze.seg_branch=false）建议 0.3~0.5：语义从 Stage-1 出发
-  # 起点较好，但 0.1 过小（seg lr≈5e-6），在无标签一致性压力下会被伪标签
-  # 拖着走（"看起来在训、实际不动/被拉偏"）；0.3 保持温和但有效，
-  # 不要用 1.0（会破坏已有语义，造成均值退化）
   seg_lr_ratio: 0.3
-  # 边界分支学习率比例（boundary lr = boundary_lr_ratio * learning_rate）
-  # 冻结语义分支后，所有可训练参数都在边界组，分层比例只会把唯一训练组
-  # 压到 1e-6 量级，导致边界头"看起来在训、实际不动"（max 逼近1但gap不变）。
-  # 因此置为 1.0（boundary lr = learning_rate = 5e-5）。
   boundary_lr_ratio: 1.0
-  
-  # 学习率调度模式："cosine"（旧余弦退火）或 "flat_decay"（新三阶段：warmup→恒定→温和衰减）
-  lr_schedule: "flat_decay"
-  # warmup 轮数
+  lr_schedule: "flat_decay"  # flat_decay / cosine
   warmup_epochs: 5
-  # warmup 起始学习率比例（lr = warmup_start_factor * base_lr）
   warmup_start_factor: 0.01
-  
-  # cosine 衰减终点学习率比例（lr = cosine_end_factor * base_lr）[仅 lr_schedule=cosine 时生效]
   cosine_end_factor: 0.0
-  # 恒定阶段长度（epoch 数，warmup 之后）[仅 lr_schedule=flat_decay 时生效]
-  # 语义精修放宽到 50：给主学习阶段更长时间，避免过早进入衰减死区
   flat_epochs: 50
-  # 温和衰减终点学习率比例（lr = decay_end_factor * base_lr）[仅 lr_schedule=flat_decay 时生效]
-  # 终点从 0.2 放宽到 0.4：语义阶段后期 LR 不应磨到 ~1e-6 量级
   decay_end_factor: 0.4
-  
-  # 批量大小
-  batch_size_labeled: 5
-  batch_size_unlabeled: 5
-  # 无标签采样限制（0=不限制）
+  batch_size_labeled: 4
+  batch_size_unlabeled: 4
   unlabeled_samples_per_epoch: 250
-  
-  # 保存 checkpoints
   save_checkpoints: true
-  # checkpoint 与监控推理间隔（epoch 数）
   checkpoint_interval: 5
-  
-  # 训练监控推理（保存语义+边界概率图演进）
   monitor:
-    # 监控图像目录（相对 project_root）
     image_dir: "data/test"
-    # 监控图像数量
     num_images: 10
-    # 监控输出目录
     output_dir: "outputs/stage2/monitor"
-    
-  # Random Patch Masking 参数
-  patch_mask_ratio: 0.3
-  patch_mask_size: 64
-  num_patches: 12
-  # 掩码区域损失权重配置（控制遮挡区域在无监督损失中的贡献）
-  # 语义通道：金相语义是外观/灰度驱动的块状结构，遮挡处上下文推断易填错，
-  # 语义阶段不做遮挡推断（=1.0，不加倍也不降权）
+  patch_mask_ratio: 0.2
+  patch_mask_size: 160
+  num_patches: 8
   seg_mask_region_weight: 1.0
-  # 边界通道：高频线状特征，防止圆斑过拟合，默认降权
   boundary_mask_region_weight: 1.0
-  
-  # 边界锚点配置（Stage-1 冻结模型提供稳定边界伪标签，替代硬门控）
   boundary_anchor:
-    # 是否启用 Stage-1 锚点 + EMA 渐进混合（false 时纯教师伪标签）
     enabled: true
-    # Stage-1 锚点权重下限（始终保留锚点防止边界头崩塌）
     anchor_floor: 0.5
-    # 从 1.0 衰减到 anchor_floor 的 epoch 数
     anchor_ramp_epochs: 20
-
-  # 边界一致性损失配置（梯度感知：MSE + Sobel 梯度一致性 + 各向异性 TV）
-  # 动机：旧 BCE 软目标+温度锐化+pos_weight 链路像素级独立，缺乏空间结构约束，
-  # 多轮训练后边界头展现雾状热力图。Sobel 约束空间梯度一致，TV 抑制非边界区噪声。
   boundary_consistency:
-    # Sobel 梯度一致性损失权重（约束学生与教师在空间梯度结构上一致）
-    # 目标在背景区梯度为 0，Sobel 会把学生输出的凸起压平；
-    # 此前权重过高是输出区间被压缩的原因之一，调低以保留边界幅度
     sobel_weight: 0.5
-    # 各向异性 TV 正则化权重（非边界区强惩罚去雾，边界区弱惩罚保锐）
     tv_weight: 0.05
-    # TV 中边界区域膨胀半径（px），用于区分边界区/非边界区
     tv_dilate_radius: 2
-    # 非边界区域 TV 权重（越大越强抑制雾状噪声）
     tv_bg_weight: 1.0
-    # 边界区域 TV 权重（越小越保留锐利边缘）
     tv_boundary_weight: 0.1
-    # 背景抑制损失权重（非边界区学生预测 L1 惩罚，直接压向零）
-    # 过高会把"全零/低值输出"变成稳定吸引子（下压力 > 正样本抬升力），
-    # 这是边界输出区间被压缩的根本原因之一，务必保持低权重
     bg_suppress_weight: 0.2
-    # 背景抑制阈值（目标伪标签低于此值视为背景区域）
     bg_suppress_threshold: 0.05
-    # 正样本像素加权：目标 > 0.5 的像素在一致性损失中额外放大
-    # （直接扭转稀疏正样本 vs 大面积背景的梯度平衡）
-    # 5.0 会把最强的少数像素先推到饱和（max=0.999）而不是抬起整条边界带，
-    # 降到 3.0 配合 margin 的区域级拉升
     pos_weight: 3.0
-    # 边界-背景 margin 损失：约束"边界像素均值 − 背景像素均值 ≥ margin"，
-    # 直接拉开学生输出的边界/背景差值（当前症状为差值 < 0.4）
     margin_loss_weight: 1.0
     margin: 0.4
-    # 边界峰值 hinge：目标边界像素预测概率须 ≥ peak_threshold，否则惩罚
-    # relu(peak_threshold - p)。与 margin 互补（margin 管差距、hinge 管峰值），
-    # 治"边界峰值平台窄（>0.7 占比低）导致分水岭防线弱、欠分割"。
-    peak_hinge_weight: 0.0
+    peak_hinge_weight: 0.5
     peak_threshold: 0.8
-    # 预测正样本占比上限正则：学生预测均值超过"目标占比 + rate_slack"时
-    # 产生 hinge 惩罚，直接阻止边界概率空间扩散（>0.5 占比膨胀到 30%+ 的失效模式）。
-    # 与 margin（往上拉）互补：margin 拉开对比，该正则封住扩散。
-    # 权重随训练退火（start -> end）：早期松让边界学起来，晚期紧压"雾复现"。
-    # 相比"骨架阈值退火"，退火占比上限不会砍掉弱边界 recall（不会出现
-    # "只学会最强边界、弱边界被遗忘"——见 >0.5 占比骤降到 1.8% 的失效模式）。
-    rate_regularizer_weight: 0.1
-    rate_regularizer_weight_end: 0.4
-    rate_regularizer_ramp_epochs: 60
-    rate_slack: 0.05
-
-  # 冻结开关（单独训练某个分支）
-  # 用于解决语义头和边界头统一参数不匹配导致的训练困难
-  # 两个都为 false 时维持联合训练（默认行为）
-  # ---- 两阶段协议（语义从 Stage-1 重新开始，再边界优化）----
-  # Phase S（语义，冻结边界）：
-  #   freeze.seg_branch=false, freeze.boundary_branch=true,
-  #   init_from_checkpoint 指向 Stage-1 最优权重, seg_lr_ratio=0.1~0.3,
-  #   sem_boundary_align_weight=0.0（边界参考仍是雾状时对齐项会抹平语义边缘）
-  # Phase B（边界，冻结语义，当前默认）：
-  #   freeze.seg_branch=true, freeze.boundary_branch=false,
-  #   init_from_checkpoint 指向 Phase S 最优输出, boundary_lr_ratio=1.0,
-  #   boundary_teacher_mode="stage1_direct" + 离线缓存 + margin/占比正则
-  # 每阶段运行都会由 RunRecorder 把生效配置与逐 epoch 指标落盘到
-  # outputs/runs/<时间戳>_<phase>_<tag>/，便于复现与对比。
+    rate_regularizer_weight: 0.2
+    rate_regularizer_weight_end: 0.2
+    rate_regularizer_ramp_epochs: 0
+    rate_slack: 0.03
   freeze:
-    # 冻结语义分支（seg_fpn + seg_branch），仅训练边界分支
     seg_branch: false
-    # 冻结边界分支（boundary_fpn + boundary_branch），仅训练语义分支
-    boundary_branch: true
-  # 边界-语义对齐权重：默认关闭（0.0）。
-  # 注意：边界参考若是雾状宽带（Stage-1 级别 >0.3 占 30-40%），
-  # "惩罚语义梯度出现在边界外"会抹平合法语义边缘，导致语义向均值退化
-  # （铁素体退化为珠光体）。等边界头足够锐利后再考虑开启（如 0.1 起步）。
+    boundary_branch: false
   sem_boundary_align_weight: 0.0
-  # 语义退化预警：验证 mIoU 低于历史最优的该比例时打印 WARNING，
-  # 用于尽早发现语义崩塌（只预警，不自动停止）
   sem_degrade_warn_factor: 0.9
-
-  # 骨架过滤配置（教师边界伪标签形态学精炼）
-  # 在教师输出边界概率后、与 Stage-1 锚点混合前，施加骨架化+膨胀，
-  # 去除弥散噪声和拓扑毛刺，使边界伪标签更锐利、更拓扑合理。
-  # 仍属无监督范畴（形态学先验，不使用 GT 标签）。
   skeleton_filter:
-    # 是否启用骨架过滤
     enabled: true
-    # 二值化阈值（概率图 > threshold 视为边界）
-    # Stage-1 输出为"雾状宽带"（>0.3 约占 30-40%），0.4 会把大片雾判为正样本，
-    # 教出宽边界；提高到 0.5 只保留结构核心，目标带更细更准。
     threshold: 0.5
-    # 阈值随训练逐步提高（threshold -> threshold_end，线性 ramp）：
-    # 早段低阈值多捕获弱边界（保 recall）；晚段模型输出变强后，高阈值
-    # 剔除 Stage-1 伪标签中的噪声分支，治"雾状背景先被抑制后又复现"。
-    # 注意：Stage-1 弱边界本身到不了 0.7，阈值退火会把弱边界从目标中剔除，
-    # 导致模型只学会强边界（>0.5 占比骤降到 ~2% 的失效模式）。
-    # 默认与 threshold 相同（不做退火）；如需试验可自行调高。
     threshold_end: 0.5
     threshold_ramp_epochs: 60
-    # 骨架膨胀宽度（最终边界宽度 = 2*width+1 px）
-    # 在"雾状源头"下目标带越宽学生越容易学到扩散，回归到 1（更细的目标带）
     dilate_width: 1
-    # 高斯模糊 sigma（0=硬二值目标，>0=软目标，保留梯度信息）
     blur_sigma: 0.01
 
 # -----------------------------------------------------------------------------
-# 渐进式外观增强配置（Stage 2: 学生模型输入专用）
-# -----------------------------------------------------------------------------
-# 解决训练集与测试集在清晰度、亮度等方面的域差异。
-# 仅对学生模型输入施加，教师模型始终收到干净数据。
-# 增强概率随 epoch 从 0 线性增长到 max_prob，之后维持高位。
 progressive_aug:
-  # 是否启用渐进式外观增强
   enabled: true
-  # 增强起始 epoch（之前 prob=0）
   start_epoch: 5
-  # 线性增长期长度（epoch 数）
   ramp_epochs: 20
-  # 最终增强概率（达到 ramp_end 后维持）
   max_prob: 0.8
-  # 亮度抖动范围（乘法因子）
-  # 放宽到 0.55~1.45 以覆盖 test 域：实测 test 灰度均值 132.7 ≈ raw 的 0.68×、
-  # 对比度 34.5 ≈ raw 的 0.6×（20260804 统计），收窄的 0.85~1.15 够不到
-  # 暗域，导致语义/边界在 test 上无训练覆盖而出现"涌动/翻转"；
-  # 该增强为师生共享输入，对后续边界阶段同样有效
   brightness_range: [0.55, 1.45]
-  # 对比度抖动范围（乘法因子）：下限 0.45 覆盖 test 的低对比度
   contrast_range: [0.45, 1.45]
-  # 锐度抖动范围（负=模糊, 正=锐化, 基于 unsharp mask）：放宽模糊端，
-  # 增强对低清晰度/低对比度输入的鲁棒性
   sharpness_range: [-0.5, 1.0]
-  # 高斯噪声标准差（0=禁用）：略增噪声，提升暗域/低对比度输入的鲁棒性
   gaussian_noise_std: 0.015
