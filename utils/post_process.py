@@ -177,6 +177,49 @@ def semantic_edge_map(seg_prob, mode="gradient", smooth=1.0,
     return _norm_p95(resp)
 
 
+def _skeletonize_center(binary):
+    """二值掩码 -> 中轴单线（cv2.ximgproc.thinning，缺 contrib 时回退 skimage）。"""
+    b = (binary > 0).astype(np.uint8) * 255
+    try:
+        return cv2.ximgproc.thinning(b, thinningType=cv2.ximgproc.THINNING_ZHANGSUEN)
+    except (AttributeError, cv2.error):
+        from skimage.morphology import skeletonize as sk_skeletonize
+        return (sk_skeletonize(b > 0) * 255).astype(np.uint8)
+
+
+def semantic_primary_barrier(seg_prob, boundary_prob, percentile=80.0,
+                             bridge_dilate=2, band_width=2, line_weight=3.0,
+                             smooth=1.0):
+    """语义单线为主 + 边界头带内校准的屏障图。
+
+    S = P_b × B + λ × L
+      L: |∇seg| 自适应阈值(P80) -> 桥接膨胀 -> 骨架化的单线（位置主源）
+      B: 语义带 = 膨胀(L, band_width)（边界"应该在"的区域）
+      P_b: 边界头概率（带内强度参考）
+      λ × L: 语义线本身始终是屏障（弱边界兜底）
+
+    效果：带外边界头响应（雾状/噪声）被乘法掩掉；位置由语义单线决定；
+    强度由边界头在带内校准。返回 (S, L)。
+    """
+    grad = semantic_edge_map(seg_prob, mode="gradient", smooth=smooth)
+    thr = float(np.percentile(grad, percentile))
+    bm = (grad > thr).astype(np.uint8) * 255
+    if bridge_dilate > 0:
+        k = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (2 * bridge_dilate + 1, 2 * bridge_dilate + 1))
+        bm = cv2.dilate(bm, k)
+    sk = _skeletonize_center(bm > 0)
+    L = (sk > 0).astype(np.float32)
+    if band_width > 0:
+        k = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (2 * band_width + 1, 2 * band_width + 1))
+        B = cv2.dilate(L, k)
+    else:
+        B = L
+    S = boundary_prob * B + line_weight * L
+    return S, L
+
+
 def semantic_edge_boost(boundary_prob, seg_prob, alpha=0.0):
     """语义边缘升权：边界概率 × (1 + α × |∇语义概率|)。
 
@@ -212,6 +255,10 @@ def post_process_prediction_boundary(
     sem_edge_smooth: float = 1.0,
     sem_edge_valley_weight: float = 1.0,
     sem_edge_gradient_weight: float = 1.0,
+    semantic_primary: bool = False,
+    sem_band_width: int = 2,
+    sem_line_weight: float = 3.0,
+    sem_percentile: float = 80.0,
     watershed_dilate_width: int = 2,
     bridge_width: int = 1,
     save_visualization: bool = True,
@@ -234,32 +281,49 @@ def post_process_prediction_boundary(
 
     seg_prob = torch.sigmoid(seg_logits).numpy()
     boundary_prob = torch.sigmoid(boundary_logits).numpy()
+    boundary_prob_raw = boundary_prob.copy()   # 语义单线模式用作带内参考
 
     semantic_mask = (seg_prob > threshold).astype(np.uint8)
-    # 语义引导融合（可选）：
-    # 1) 补缺式加性融合：final = bnd + λ·edge·(1−bnd)
-    #    只在边界分支弱处补语义梯度，不增厚已有强边界——
-    #    加性融合会把相界也放大成厚带，骨架带盖住小晶粒核导致
-    #    小铁素体被吞并（实例数 33→25、中位面积 +35% 的失效模式）；
-    #    补缺式保持强边界原样、只补漏检的铁素体内部晶界
-    # 2) 乘性升权：bnd × (1 + α·edge)（放大相界处已有响应）
-    if sem_edge_merge_weight > 0:
-        edge = semantic_edge_map(
-            seg_prob, mode=sem_edge_mode, smooth=sem_edge_smooth,
-            valley_weight=sem_edge_valley_weight,
-            gradient_weight=sem_edge_gradient_weight,
+    if not semantic_primary:
+        # 语义引导融合（可选）：
+        # 1) 补缺式加性融合：final = bnd + λ·edge·(1−bnd)
+        #    只在边界分支弱处补语义梯度，不增厚已有强边界——
+        #    加性融合会把相界也放大成厚带，骨架带盖住小晶粒核导致
+        #    小铁素体被吞并（实例数 33→25、中位面积 +35% 的失效模式）；
+        #    补缺式保持强边界原样、只补漏检的铁素体内部晶界
+        # 2) 乘性升权：bnd × (1 + α·edge)（放大相界处已有响应）
+        if sem_edge_merge_weight > 0:
+            edge = semantic_edge_map(
+                seg_prob, mode=sem_edge_mode, smooth=sem_edge_smooth,
+                valley_weight=sem_edge_valley_weight,
+                gradient_weight=sem_edge_gradient_weight,
+            )
+            boundary_prob = (
+                boundary_prob
+                + sem_edge_merge_weight * edge * (1.0 - boundary_prob)
+            )
+        if sem_edge_boost_alpha > 0:
+            boundary_prob = semantic_edge_boost(
+                boundary_prob, seg_prob, alpha=sem_edge_boost_alpha
+            )
+    if semantic_primary:
+        # 语义单线为主：S = P_b × B + λ × L，Otsu 自适应阈值
+        S, L = semantic_primary_barrier(
+            seg_prob, boundary_prob_raw,
+            percentile=sem_percentile, band_width=sem_band_width,
+            line_weight=sem_line_weight,
         )
-        boundary_prob = (
-            boundary_prob
-            + sem_edge_merge_weight * edge * (1.0 - boundary_prob)
-        )
-    if sem_edge_boost_alpha > 0:
-        boundary_prob = semantic_edge_boost(
-            boundary_prob, seg_prob, alpha=sem_edge_boost_alpha
-        )
-    # 单阈值二值化（已移除 Canny 式滞后：边界概率在邻域连续，滞后会把强脊
-    # 的坡脚也纳入，导致边界带宽度沿脊线变化、轮廓崎岖不平）
-    boundary_mask = (boundary_prob > boundary_threshold).astype(np.uint8)
+        smax = float(S.max())
+        if smax > 0:
+            s8 = np.clip(S / smax * 255, 0, 255).astype(np.uint8)
+            _, bm8 = cv2.threshold(s8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            boundary_mask = (bm8 > 0).astype(np.uint8)
+        else:
+            boundary_mask = np.zeros_like(semantic_mask)
+    else:
+        # 单阈值二值化（已移除 Canny 式滞后：边界概率在邻域连续，滞后会把强脊
+        # 的坡脚也纳入，导致边界带宽度沿脊线变化、轮廓崎岖不平）
+        boundary_mask = (boundary_prob > boundary_threshold).astype(np.uint8)
     inst_map, class_map = boundary_watershed_separation(
         semantic_mask,
         boundary_mask,
