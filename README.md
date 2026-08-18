@@ -71,7 +71,6 @@ segmentationv2/
 │   ├── test/  smoketest/        # 测试 / 冒烟测试图像
 │   ├── dataset.py               # 在线数据管道（letterbox / 边界权重 / BoundaryDataset）
 │   ├── dataset_semi.py          # 半监督双流数据集（Labeled / Unlabeled）
-│   └── active_learning.py       # 不确定性采样 + mask→Labelme JSON 反向网关
 ├── models/
 │   ├── sam2_encoder.py          # 冻结 SAM 2 Hiera trunk（4 尺度特征）
 │   └── fpn_decoder.py           # 独立双 FPN 解码头（seg_fpn + boundary_fpn）
