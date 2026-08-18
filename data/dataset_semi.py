@@ -21,7 +21,13 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from data.dataset import letterbox, random_crop, split_train_val_indices
+from data.dataset import (
+    center_heatmap_from_points,
+    labelme_instance_centers,
+    letterbox,
+    random_crop,
+    split_train_val_indices,
+)
 
 
 # =============================================================================
@@ -49,6 +55,8 @@ class LabeledDataset(Dataset):
         boundary_scale_factor: float = 10.0,
         boundary_weight_floor: float = 1.0,
         boundary_weight_ceil: float = 4.0,
+        boundary_target_key: str = "boundary_soft",
+        center_sigma: float = 4.0,
     ):
         super().__init__()
         self.data_dir = data_dir
@@ -63,6 +71,8 @@ class LabeledDataset(Dataset):
         self.boundary_scale_factor = boundary_scale_factor
         self.boundary_weight_floor = boundary_weight_floor
         self.boundary_weight_ceil = boundary_weight_ceil
+        self.boundary_target_key = boundary_target_key
+        self.center_sigma = center_sigma
 
         valid_exts = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
         self.samples: List[Tuple[str, str]] = []
@@ -77,6 +87,10 @@ class LabeledDataset(Dataset):
         # 与 BoundaryDataset 使用同一划分函数（同 seed / train_ratio）
         selected = split_train_val_indices(len(self.samples), train_ratio, seed, split)
         self.samples = [self.samples[i] for i in selected]
+        self.instance_centers = {
+            img_path: labelme_instance_centers(os.path.splitext(img_path)[0] + ".json")
+            for img_path, _ in self.samples
+        }
         print(f"[LabeledDataset] {len(self.samples)} samples ({split}) from {data_dir}")
 
     def __len__(self):
@@ -93,33 +107,45 @@ class LabeledDataset(Dataset):
 
         gt_data = np.load(gt_path)
         semantic = gt_data["semantic"]
-        boundary = gt_data["boundary"]
+        boundary_core = gt_data["boundary"]
+        if self.boundary_target_key in gt_data.files:
+            boundary = np.asarray(gt_data[self.boundary_target_key], dtype=np.float32)
+        else:
+            boundary = boundary_core.astype(np.float32)
 
         from data.dataset import letterbox_mask, compute_boundary_weight
         image_lb, scale, pad_h, pad_w = letterbox(image, self.image_size)
         semantic_lb, _, _, _ = letterbox_mask(semantic, self.image_size)
         boundary_lb, _, _, _ = letterbox_mask(boundary, self.image_size)
+        boundary_core_lb, _, _, _ = letterbox_mask(boundary_core, self.image_size)
+        center_lb = center_heatmap_from_points(
+            self.instance_centers.get(img_path, []),
+            scale=scale,
+            target_size=self.image_size,
+            sigma=self.center_sigma,
+        )
         weight_lb = compute_boundary_weight(
-            boundary_lb,
+            boundary_core_lb,
             scale_factor=self.boundary_scale_factor,
             weight_floor=self.boundary_weight_floor,
             weight_ceil=self.boundary_weight_ceil,
         )
 
         if self.augment and self.crop_size > 0:
-            image_lb, semantic_lb, boundary_lb, weight_lb = random_crop(
-                image_lb, semantic_lb, boundary_lb, weight_lb, self.crop_size
+            image_lb, semantic_lb, boundary_lb, weight_lb, center_lb = random_crop(
+                image_lb, semantic_lb, boundary_lb, weight_lb, center_lb, self.crop_size
             )
 
         if self.augment:
-            image_lb, semantic_lb, boundary_lb, weight_lb = self._augment(
-                image_lb, semantic_lb, boundary_lb, weight_lb
+            image_lb, semantic_lb, boundary_lb, weight_lb, center_lb = self._augment(
+                image_lb, semantic_lb, boundary_lb, weight_lb, center_lb
             )
 
         image_tensor = torch.from_numpy(image_lb).float().permute(2, 0, 1) / 255.0
         semantic_tensor = torch.from_numpy(semantic_lb).float().unsqueeze(0)
         boundary_tensor = torch.from_numpy(boundary_lb).float().unsqueeze(0)
-        target_tensor = torch.cat([semantic_tensor, boundary_tensor], dim=0)
+        center_tensor = torch.from_numpy(center_lb).float().unsqueeze(0)
+        target_tensor = torch.cat([semantic_tensor, boundary_tensor, center_tensor], dim=0)
         weight_tensor = torch.from_numpy(weight_lb).float().unsqueeze(0)
 
         return {
@@ -130,25 +156,28 @@ class LabeledDataset(Dataset):
             "image_path": img_path,
         }
 
-    def _augment(self, image, semantic, boundary, weight):
+    def _augment(self, image, semantic, boundary, weight, center):
         cfg = self.augment_config
         if cfg.get("horizontal_flip", False) and np.random.rand() < 0.5:
             image = np.ascontiguousarray(image[:, ::-1])
             semantic = np.ascontiguousarray(semantic[:, ::-1])
             boundary = np.ascontiguousarray(boundary[:, ::-1])
             weight = np.ascontiguousarray(weight[:, ::-1])
+            center = np.ascontiguousarray(center[:, ::-1])
         if cfg.get("vertical_flip", False) and np.random.rand() < 0.5:
             image = np.ascontiguousarray(image[::-1, :])
             semantic = np.ascontiguousarray(semantic[::-1, :])
             boundary = np.ascontiguousarray(boundary[::-1, :])
             weight = np.ascontiguousarray(weight[::-1, :])
+            center = np.ascontiguousarray(center[::-1, :])
         if cfg.get("rotation", False) and np.random.rand() < 0.5:
             k = np.random.choice([1, 2, 3])
             image = np.ascontiguousarray(np.rot90(image, k))
             semantic = np.ascontiguousarray(np.rot90(semantic, k))
             boundary = np.ascontiguousarray(np.rot90(boundary, k))
             weight = np.ascontiguousarray(np.rot90(weight, k))
-        return image, semantic, boundary, weight
+            center = np.ascontiguousarray(np.rot90(center, k))
+        return image, semantic, boundary, weight, center
 
 
 # =============================================================================
@@ -173,6 +202,7 @@ class UnlabeledDataset(Dataset):
         patch_mask_size: int = 64,
         num_patches: int = 8,
         enable_appearance_aug: bool = True,
+        enable_patch_mask: bool = False,
         boundary_cache_dir: Optional[str] = None,
     ):
         super().__init__()
@@ -182,6 +212,7 @@ class UnlabeledDataset(Dataset):
         self.patch_mask_size = patch_mask_size
         self.num_patches = num_patches
         self.enable_appearance_aug = enable_appearance_aug
+        self.enable_patch_mask = enable_patch_mask
         self.boundary_cache_dir = boundary_cache_dir
         self._cache = None
         self._cache_names: List[str] = []
@@ -262,7 +293,9 @@ class UnlabeledDataset(Dataset):
             img_strong = self._apply_appearance_aug(img_strong)
 
         # patch_mask: 随机遮挡
-        patch_mask = self._generate_patch_mask()
+        patch_mask = self._generate_patch_mask() if self.enable_patch_mask else np.zeros(
+            (self.image_size, self.image_size), dtype=np.uint8
+        )
 
         # 应用 patch mask 到 img_strong（用图像通道均值填充，而非置 0）：
         # 置 0 的"黑色圆斑"是强域外线索，模型会学到"黑斑=背景"的捷径

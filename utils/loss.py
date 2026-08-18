@@ -2,9 +2,10 @@
 """
 边界预测损失函数
 ================
-双通道边界预测损失：
+语义、边界和中心热图预测损失：
   - 通道 0（语义）：BCEWithLogitsLoss
   - 通道 1（边界）：Focal Loss × W_boundary（EDT 权重调制）
+  - 通道 2（中心）：稀疏 Gaussian 峰的 focal BCE
 
 L_sup = BCEWithLogitsLoss(pred[:,0], target[:,0])
       + alpha * FocalLoss(pred[:,1], target[:,1]) * W_boundary
@@ -46,6 +47,12 @@ class BoundaryLoss(nn.Module):
         eps: float = 1e-6,
         freeze_seg: bool = False,
         freeze_boundary: bool = False,
+        peak_weight: float = 0.0,
+        peak_logit: float = 2.0,
+        hard_negative_weight: float = 0.0,
+        hard_negative_logit: float = -1.5,
+        center_weight: float = 1.0,
+        center_gamma: float = 2.0,
     ):
         """
         Args:
@@ -57,6 +64,12 @@ class BoundaryLoss(nn.Module):
             eps: 数值稳定常数。
             freeze_seg: 冻结语义分支时为 True，跳过语义损失项。
             freeze_boundary: 冻结边界分支时为 True，跳过边界损失项。
+            peak_weight: 边界正样本高置信度峰值约束权重。
+            peak_logit: 正边界期望达到的最小 logit（2.0≈0.88 概率）。
+            hard_negative_weight: 对负样本高响应区域的抑制权重。
+            hard_negative_logit: 负样本 logit 超过该值时开始抑制。
+            center_weight: 中心热图损失权重；仅在 pred/target 存在第 3 通道时生效。
+            center_gamma: 中心热图 focal BCE 的聚焦参数。
         """
         super(BoundaryLoss, self).__init__()
         self.gamma = gamma
@@ -68,14 +81,20 @@ class BoundaryLoss(nn.Module):
         self.eps = eps
         self.freeze_seg = freeze_seg
         self.freeze_boundary = freeze_boundary
+        self.peak_weight = peak_weight
+        self.peak_logit = peak_logit
+        self.hard_negative_weight = hard_negative_weight
+        self.hard_negative_logit = hard_negative_logit
+        self.center_weight = center_weight
+        self.center_gamma = center_gamma
 
     def forward(self, pred, target, weight=None):
         """
         Args:
-            pred: [B, 2, H, W] 模型输出
+            pred: [B, 2/3, H, W] 模型输出
                   - pred[:, 0] 为语义 logits
                   - pred[:, 1] 为边界 logits
-            target: [B, 2, H, W] 目标
+            target: [B, 2/3, H, W] 目标
                     - target[:, 0] 为二值语义掩码 (0/1)
                     - target[:, 1] 为二值边界掩码 (0/1)
             weight: [B, 1, H, W] 或 [B, H, W] EDT 边界权重图（可选）
@@ -138,11 +157,53 @@ class BoundaryLoss(nn.Module):
                     w = weight  # [B, H, W]
                 # 梯度过载保护：截断 EDT 权重到 [1.0, 4.0]
                 w = torch.clamp(w, min=self.weight_clamp_min, max=self.weight_clamp_max)
-                loss_boundary = (alpha_t * focal_weight * w * bce_boundary).mean()
+                focal_loss = alpha_t * focal_weight * w * bce_boundary
             else:
-                loss_boundary = (alpha_t * focal_weight * bce_boundary).mean()
+                focal_loss = alpha_t * focal_weight * bce_boundary
+
+            loss_boundary = focal_loss.mean()
+
+            # 监督目标允许为 [0, 1] 的软边界。对目标质量最高的边界像素
+            # 单独施加峰值约束，解决“面积大致正确但整张热力图发灰”的问题。
+            if self.peak_weight > 0:
+                positive_mass = boundary_target.detach().clamp(0.0, 1.0).pow(2)
+                positive_den = positive_mass.sum().clamp_min(1.0)
+                peak_hinge = F.relu(self.peak_logit - boundary_logits).pow(2)
+                peak_loss = (peak_hinge * positive_mass).sum() / positive_den
+                loss_boundary = loss_boundary + self.peak_weight * peak_loss
+
+            # 只抑制明显高于背景的负样本，不对普通低概率背景施加额外压力，
+            # 以减少圆斑/雾状响应而不牺牲细边界召回。
+            if self.hard_negative_weight > 0:
+                negative_mass = (boundary_target.detach() < 0.05).float()
+                hard_negative = F.relu(
+                    boundary_logits - self.hard_negative_logit
+                ).pow(2)
+                negative_den = negative_mass.sum().clamp_min(1.0)
+                hard_negative_loss = (hard_negative * negative_mass).sum() / negative_den
+                loss_boundary = loss_boundary + (
+                    self.hard_negative_weight * hard_negative_loss
+                )
+
+        # ---- 中心热图 focal BCE（可选第三通道） ----
+        loss_center = torch.tensor(0.0, device=pred.device, requires_grad=False)
+        if pred.shape[1] >= 3 and target.shape[1] >= 3 and self.center_weight > 0:
+            center_logits = pred[:, 2]
+            center_target = target[:, 2].clamp(0.0, 1.0)
+            bce_center = F.binary_cross_entropy_with_logits(
+                center_logits, center_target, reduction="none"
+            )
+            p_t_center = torch.exp(-bce_center)
+            focal_center = (1.0 - p_t_center).pow(self.center_gamma) * bce_center
+            # Gaussian 峰中心承载主要监督，背景仍保留但不额外放大。
+            center_weight_map = 1.0 + 4.0 * center_target.detach().pow(2)
+            loss_center = (focal_center * center_weight_map).mean()
 
         # ---- 总损失 ----
-        total_loss = loss_seg + self.alpha_boundary * loss_boundary
+        total_loss = (
+            loss_seg
+            + self.alpha_boundary * loss_boundary
+            + self.center_weight * loss_center
+        )
 
         return total_loss, loss_seg.item(), loss_boundary.item()

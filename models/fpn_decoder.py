@@ -17,10 +17,14 @@
     - feat_s4: 最低分辨率, 896ch
 """
 
+import logging
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 def _make_group_norm(channels: int) -> nn.GroupNorm:
@@ -125,6 +129,95 @@ class FPNBackbone(nn.Module):
         return top_down
 
 
+class BoundaryRefineHead(nn.Module):
+    """高分辨率边界细化头：256->512->1024 渐进上采样 + 图像多尺度跳连。
+
+    设计动机（"梨形"）：经典分割网络在下采样路径各尺度有对应的高分辨率特征，
+    上采样路径逐级跳连。SAM2 trunk 最小 stride 为 4（无 512/1024 特征），
+    因此本头以【输入图像金字塔】充当高分辨率编码侧，每个上采样阶段拼接
+    该分辨率下的图像浅层特征——细化头不需要"无中生有"地猜高频细节，
+    只需学会把图像细节映射到边界位置，深度需求保持轻量（每级 2 层卷积）。
+
+    尺度自适应：输出尺寸 = 输入 boundary_feat 的 4 倍（1024 输入 -> 1024 输出；
+    512 裁剪 -> 512 输出）。
+    """
+
+    def __init__(self, fpn_channels: int = 256, img_ch: int = 3, hidden: int = 96):
+        super().__init__()
+        self.img_stem = nn.ModuleList([
+            self._make_stem(img_ch, 32),   # 256 级
+            self._make_stem(img_ch, 24),   # 512 级
+            self._make_stem(img_ch, 16),   # 1024 级
+        ])
+        self.semantic_gate = nn.Sequential(
+            nn.Conv2d(2, 16, 3, padding=1, bias=False),
+            nn.GroupNorm(8, 16),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(16, 1, 1, bias=True),
+        )
+        self.up1 = nn.Sequential(
+            nn.Conv2d(fpn_channels + 32, hidden, 3, padding=1, bias=False),
+            nn.GroupNorm(16, hidden), nn.ReLU(inplace=True),
+            nn.Conv2d(hidden, hidden, 3, padding=1, bias=False),
+            nn.GroupNorm(16, hidden), nn.ReLU(inplace=True),
+        )
+        self.up2 = nn.Sequential(
+            nn.Conv2d(hidden + 24, hidden // 2, 3, padding=1, bias=False),
+            nn.GroupNorm(16, hidden // 2), nn.ReLU(inplace=True),
+            nn.Conv2d(hidden // 2, hidden // 2, 3, padding=1, bias=False),
+            nn.GroupNorm(16, hidden // 2), nn.ReLU(inplace=True),
+        )
+        self.out = nn.Conv2d(hidden // 2 + 16, 1, 1)
+
+    @staticmethod
+    def _make_stem(in_ch: int, out_ch: int) -> nn.Sequential:
+        return nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, 3, padding=1, bias=False),
+            nn.GroupNorm(8, out_ch), nn.ReLU(inplace=True),
+            nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False),
+            nn.GroupNorm(8, out_ch), nn.ReLU(inplace=True),
+        )
+
+    def forward(
+        self,
+        boundary_feat: torch.Tensor,
+        image: torch.Tensor,
+        semantic_logits: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """boundary_feat: [B, C, H, W]；image: [B, 3, H_img, W_img]"""
+        # 256 级：拼接该分辨率图像特征
+        img_cur = F.interpolate(image, size=boundary_feat.shape[-2:],
+                                mode="bilinear", align_corners=True)
+        image_feat = self.img_stem[0](img_cur)
+        if semantic_logits is None:
+            gate = torch.ones(
+                image_feat.shape[0], 1, image_feat.shape[2], image_feat.shape[3],
+                device=image_feat.device, dtype=image_feat.dtype
+            )
+        else:
+            semantic_prob = torch.sigmoid(semantic_logits)
+            local_mean = F.avg_pool2d(semantic_prob, kernel_size=5, stride=1, padding=2)
+            semantic_contrast = (semantic_prob - local_mean).abs()
+            gate = torch.sigmoid(
+                self.semantic_gate(torch.cat([semantic_prob, semantic_contrast], dim=1))
+            )
+            gate = 0.25 + 0.75 * gate
+        x = torch.cat([boundary_feat, image_feat * gate], dim=1)
+        x = F.interpolate(x, scale_factor=2, mode="bilinear", align_corners=True)
+        x = self.up1(x)  # 512 级
+        # 512 级：拼接 512 图像特征
+        img_cur = F.interpolate(image, size=x.shape[-2:],
+                                mode="bilinear", align_corners=True)
+        x = torch.cat([x, self.img_stem[1](img_cur)], dim=1)
+        x = F.interpolate(x, scale_factor=2, mode="bilinear", align_corners=True)
+        x = self.up2(x)  # 1024 级
+        # 1024 级：拼接 1024 图像特征
+        img_cur = F.interpolate(image, size=x.shape[-2:],
+                                mode="bilinear", align_corners=True)
+        x = torch.cat([x, self.img_stem[2](img_cur)], dim=1)
+        return self.out(x)
+
+
 class FPNDecoder(nn.Module):
     """
     独立双 FPN 解码头（语义 + 边界各自独立）- 边界预测版本。
@@ -146,6 +239,8 @@ class FPNDecoder(nn.Module):
         num_classes: int = 2,
         dropout: float = 0.1,
         use_bn: bool = True,
+        boundary_refine: bool = False,
+        center_head: bool = False,
     ):
         """
         Args:
@@ -155,6 +250,9 @@ class FPNDecoder(nn.Module):
             num_classes: 输出通道数（固定为 2：语义 + 边界）。
             dropout: dropout 概率。
             use_bn: 是否使用归一化层（True=GroupNorm, False=Identity）。
+            boundary_refine: 启用高分辨率边界细化头（256->1024 + 原图引导）。
+                边界通道原生输出 1024，语义保持 256 上采样。
+            center_head: 增加轻量中心热图头，复用 boundary FPN。
         """
         super().__init__()
         if in_channels is None:
@@ -195,7 +293,7 @@ class FPNDecoder(nn.Module):
             nn.Conv2d(half_channels, 1, kernel_size=1, bias=True),
         )
 
-        # 边界分支输出头：聚焦高频线状特征
+        # 边界分支输出头：聚焦高频线状特征（boundary_refine 启用时保留权重兼容但旁路）
         self.boundary_branch = nn.Sequential(
             nn.Conv2d(fpn_channels, fpn_channels, kernel_size=3, padding=1, bias=False),
             norm_layer(fpn_channels),
@@ -206,8 +304,31 @@ class FPNDecoder(nn.Module):
             nn.Dropout2d(dropout) if dropout > 0 else nn.Identity(),
             nn.Conv2d(half_channels, 1, kernel_size=1, bias=True),
         )
+        self.boundary_refine = boundary_refine
+        self.center_head_enabled = bool(center_head)
+        self.center_branch = None
+        if self.center_head_enabled:
+            self.center_branch = nn.Sequential(
+                nn.Conv2d(fpn_channels, half_channels, 3, padding=1, bias=False),
+                norm_layer(half_channels),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(half_channels, half_channels // 2, 3, padding=1, bias=False),
+                norm_layer(half_channels // 2),
+                nn.ReLU(inplace=True),
+                nn.Dropout2d(dropout) if dropout > 0 else nn.Identity(),
+                nn.Conv2d(half_channels // 2, 1, 1, bias=True),
+            )
+        if boundary_refine:
+            self.boundary_refine_head = BoundaryRefineHead(
+                fpn_channels=fpn_channels, img_ch=3, hidden=96
+            )
 
         self._init_weights()
+        if self.boundary_refine:
+            # Residual refinement starts as an identity path over the coarse
+            # boundary head, so a new high-resolution head cannot saturate it.
+            nn.init.zeros_(self.boundary_refine_head.out.weight)
+            nn.init.zeros_(self.boundary_refine_head.out.bias)
 
     def _init_weights(self):
         """使用 Kaiming 初始化（随机初始化，不加载预训练权重）。"""
@@ -220,13 +341,15 @@ class FPNDecoder(nn.Module):
                 nn.init.ones_(m.weight)
                 nn.init.zeros_(m.bias)
 
-    def forward(self, features, output_size=None):
+    def forward(self, features, output_size=None, image=None):
         """
         前向传播：双 FPN 独立提取 + 各自输出头 + 拼接。
 
         Args:
             features: [feat_s1, feat_s2, feat_s3, feat_s4]
             output_size: 可选，最终输出的 (H, W) 尺寸。
+            image: 原始输入图像 [B, 3, H, W]（boundary_refine 启用时提供，
+                   作为高分辨率边界的高频引导）。
 
         Returns:
             output: [B, 2, H, W]
@@ -242,19 +365,61 @@ class FPNDecoder(nn.Module):
         boundary_feat = self.boundary_fpn(features)
 
         # 各自输出头
-        seg_logits = self.seg_branch(seg_feat)            # [B, 1, H, W]
-        boundary_logits = self.boundary_branch(boundary_feat)  # [B, 1, H, W]
-        output = torch.cat([seg_logits, boundary_logits], dim=1)  # [B, 2, H, W]
-
-        # 动态上采样到指定尺寸（推理时对齐原图）
-        if output_size is not None:
-            output = F.interpolate(
-                output,
-                size=output_size,
-                mode="bilinear",
-                align_corners=True,
+        seg_logits = self.seg_branch(seg_feat)            # [B, 1, 256, 256]
+        coarse_boundary_logits = self.boundary_branch(boundary_feat)
+        if self.boundary_refine:
+            # 高分辨率边界细化头：原生输出 1024
+            if image is None:
+                raise ValueError("boundary_refine=True 时 forward 需传入 image")
+            image_low = F.interpolate(
+                image, size=seg_feat.shape[-2:], mode="bilinear", align_corners=True
             )
+            refine_logits = self.boundary_refine_head(
+                boundary_feat, image_low, semantic_logits=seg_logits
+            )
+            coarse_boundary_logits = F.interpolate(
+                coarse_boundary_logits, size=refine_logits.shape[-2:],
+                mode="bilinear", align_corners=True
+            )
+            boundary_logits = coarse_boundary_logits + 0.5 * refine_logits
+        else:
+            boundary_logits = coarse_boundary_logits  # [B, 1, 256, 256]
 
+        center_logits = (
+            self.center_branch(boundary_feat)
+            if self.center_branch is not None
+            else None
+        )
+
+        # 动态上采样到指定尺寸（语义与边界分别处理：边界已 1024 时不再插值）
+        if output_size is not None:
+            seg_logits = F.interpolate(
+                seg_logits, size=output_size, mode="bilinear", align_corners=True
+            )
+            if boundary_logits.shape[-2:] != output_size:
+                boundary_logits = F.interpolate(
+                    boundary_logits, size=output_size, mode="bilinear", align_corners=True
+                )
+            if center_logits is not None and center_logits.shape[-2:] != output_size:
+                center_logits = F.interpolate(
+                    center_logits, size=output_size, mode="bilinear", align_corners=True
+                )
+        elif seg_logits.shape[-2:] != boundary_logits.shape[-2:]:
+            # 无指定输出尺寸时（监控/推理），把语义对齐到边界原生分辨率，
+            # 保证双通道 cat 尺寸一致
+            seg_logits = F.interpolate(
+                seg_logits, size=boundary_logits.shape[-2:],
+                mode="bilinear", align_corners=True,
+            )
+        if center_logits is not None and center_logits.shape[-2:] != boundary_logits.shape[-2:]:
+            center_logits = F.interpolate(
+                center_logits, size=boundary_logits.shape[-2:],
+                mode="bilinear", align_corners=True,
+            )
+        outputs = [seg_logits, boundary_logits]
+        if center_logits is not None:
+            outputs.append(center_logits)
+        output = torch.cat(outputs, dim=1)  # [B, 2/3, H, W]
         return output
 
     def freeze_seg_branch(self):
@@ -275,15 +440,56 @@ class FPNDecoder(nn.Module):
             param.requires_grad = False
         for param in self.boundary_branch.parameters():
             param.requires_grad = False
+        if self.boundary_refine:
+            for param in self.boundary_refine_head.parameters():
+                param.requires_grad = False
+        if self.center_branch is not None:
+            for param in self.center_branch.parameters():
+                param.requires_grad = False
         logger_freeze_info = (
-            f"Boundary branch FROZEN (boundary_fpn + boundary_branch, "
+            f"Boundary branch FROZEN (boundary_fpn + boundary_branch"
+            f"{' + boundary_refine_head' if self.boundary_refine else ''}, "
             f"{sum(p.numel() for p in self.boundary_fpn.parameters()) + sum(p.numel() for p in self.boundary_branch.parameters())} params)"
         )
         print(logger_freeze_info)
 
+    def reset_boundary_branch(self):
+        """重新初始化边界路径，保留语义路径和 encoder 权重。"""
+        modules = [self.boundary_fpn, self.boundary_branch]
+        if self.boundary_refine:
+            modules.append(self.boundary_refine_head)
+        if self.center_branch is not None:
+            modules.append(self.center_branch)
+        for module in modules:
+            for m in module.modules():
+                if isinstance(m, nn.Conv2d):
+                    nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+                elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
+                    nn.init.ones_(m.weight)
+                    nn.init.zeros_(m.bias)
+        print("Boundary branch RESET (boundary FPN/head reinitialized)")
     def param_count(self):
         """返回解码头的参数总量。"""
         return sum(p.numel() for p in self.parameters())
+
+
+def load_decoder_state(decoder: nn.Module, state_dict: dict, tag: str = "decoder"):
+    """宽容加载 decoder 权重（支持架构演进）。
+
+    新增层（如高分辨率边界细化头）在旧 checkpoint 中不存在 -> 保持随机初始化；
+    旧架构层（如被旁路的输出头）在新模型中存在但 checkpoint 无对应 -> 忽略。
+    缺失/多余键都会打日志，便于排查。
+    """
+    missing, unexpected = decoder.load_state_dict(state_dict, strict=False)
+    if missing:
+        logger.info(f"{tag}: 新增层缺失 {len(missing)} 个键（保持随机初始化）: "
+                    f"{list(missing)[:4]}...")
+    if unexpected:
+        logger.info(f"{tag}: 旧架构多余 {len(unexpected)} 个键（忽略）: "
+                    f"{list(unexpected)[:4]}...")
+    return missing, unexpected
 
 
 class SegmentationModel(nn.Module):
@@ -310,7 +516,7 @@ class SegmentationModel(nn.Module):
                 - output[:, 1] 为边界 logits
         """
         features = self.encoder(x)
-        output = self.decoder(features, output_size=output_size)
+        output = self.decoder(features, output_size=output_size, image=x)
         return output
 
     def total_param_count(self):
