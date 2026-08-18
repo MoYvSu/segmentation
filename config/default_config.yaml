@@ -2,7 +2,7 @@
 # 低碳钢金相图像无监督相区分割 - 全局配置（边界预测版本）
 # =============================================================================
 # python 环境: conda activate sam2_env
-# 架构变更：双通道边界预测（语义掩码 + 晶界掩码）+ 离线边界净化
+# 架构变更：语义 + 晶界边界预测；可选增加中心热图实例种子 + 离线边界净化
 
 # -----------------------------------------------------------------------------
 # 路径配置
@@ -27,13 +27,14 @@ sam2:
   sam2_repo_path: "segment-anything-2"
 
 # -----------------------------------------------------------------------------
-# FPN 解码头配置（边界预测版本：输出 2 通道 = 语义 logits + 边界 logits）
+# FPN 解码头配置（默认输出 2 通道；center_head=true 时增加中心热图通道）
 # -----------------------------------------------------------------------------
 decoder:
   fpn_channels: 256
   num_classes: 2
   dropout: 0.1
   use_bn: true
+  center_head: false
 
 # -----------------------------------------------------------------------------
 # 数据管道配置
@@ -41,6 +42,7 @@ decoder:
 data:
   image_size: 1024
   crop_size: 512
+  center_sigma: 4.0
   erode_pixels: 5
   dist_scale_factor: 10.0
   classes:
@@ -69,6 +71,8 @@ train:
   focal_gamma: 2.0
   focal_alpha: 0.75
   boundary_alpha: 3.0
+  center_weight: 0.0
+  center_gamma: 2.0
   # 语义监督 Dice 权重（0=关闭）：块状低频结构，BCE 对掩码边界易钝；
   # 已改为两类平均 Dice（对珠光体/铁素体对称，见 utils/loss.py）；
   # 语义阶段（freeze.seg_branch=false）建议 0.3~0.5
@@ -104,7 +108,7 @@ inference:
   # 的坡脚也纳入，导致边界带宽度沿脊线变化、轮廓崎岖不平，影响分水岭防线。
   # 0.4 为与旧滞后(0.4/0.5)实例密度相当的等效档；想要更细的线可 0.5，
   # 或配 boundary_logit_scale 1.3 保密度
-  boundary_threshold: 0.4
+  boundary_threshold: 0.6
   # 推理时对边界 logits 乘系数再 sigmoid（>1 增强弱响应，默认 1.0 不缩放）
   boundary_logit_scale: 1.0
   # 语义边缘升权（0=关闭）：边界概率 × (1 + α×|∇语义概率|)，
@@ -113,9 +117,9 @@ inference:
   # 语义补缺式融合（0=关闭）：final = bnd + λ·edge·(1−bnd)，
   # 只在边界分支弱处补语义梯度（不增厚强边界，避免小晶粒被吞并），
   # 补回边界分支漏检的铁素体内部晶界（语义热力图在晶界处凹陷）
-  sem_edge_merge_weight: 0.0
+  sem_edge_merge_weight: 0.4
   # 语义边缘模式：gradient=|∇seg|（双峰，简单）/ valley=-∇²seg（单峰，少重影）
-  sem_edge_mode: "gradient"
+  sem_edge_mode: "valley"
   # 语义边缘图高斯平滑 sigma（二阶 valley 模式对噪声敏感，必须平滑）
   sem_edge_smooth: 1.0
   # 双峰桥接（骨架化前膨胀 boundary_mask，默认 1px）：
@@ -127,6 +131,9 @@ inference:
   checkpoint_stage: "stage2"
   stage1_checkpoint: "outputs/stage1/best_model.pth"
   stage2_checkpoint: "outputs/stage2/stage2_epoch60_lora_bnd.pth"
+  center_seeds: true
+  center_threshold: 0.25
+  center_nms_kernel: 9
 
 # -----------------------------------------------------------------------------
 # LoRA 配置（冻结 trunk 的参数高效适配；语义/边界共享域适配特征）

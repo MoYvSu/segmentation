@@ -35,7 +35,6 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-import yaml
 from data.dataset import BoundaryDataset, collate_fn
 from models.fpn_decoder import FPNDecoder, SegmentationModel
 from models.lora import (
@@ -47,6 +46,7 @@ from models.lora import (
 from models.sam2_encoder import SAM2Encoder
 from utils.loss import BoundaryLoss
 from utils.metrics import SegMetrics
+from utils.config import load_config as load_yaml_config
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,8 +57,7 @@ logger = logging.getLogger(__name__)
 
 
 def load_config(config_path):
-    with open(config_path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    return load_yaml_config(config_path)
 
 
 def build_model(config, device):
@@ -106,6 +105,7 @@ def build_model(config, device):
         num_classes=decoder_cfg["num_classes"],
         dropout=decoder_cfg["dropout"],
         use_bn=decoder_cfg["use_bn"],
+        center_head=decoder_cfg.get("center_head", False),
     )
 
     model = SegmentationModel(encoder, decoder)
@@ -155,6 +155,7 @@ def build_dataloaders(config):
         boundary_scale_factor=boundary_scale_factor,
         boundary_weight_floor=boundary_weight_floor,
         boundary_weight_ceil=boundary_weight_ceil,
+        center_sigma=data_cfg.get("center_sigma", 4.0),
     )
 
     val_dataset = BoundaryDataset(
@@ -169,6 +170,7 @@ def build_dataloaders(config):
         boundary_scale_factor=boundary_scale_factor,
         boundary_weight_floor=boundary_weight_floor,
         boundary_weight_ceil=boundary_weight_ceil,
+        center_sigma=data_cfg.get("center_sigma", 4.0),
     )
 
     if len(train_dataset) == 0:
@@ -293,7 +295,8 @@ def validate(model, loader, criterion, device):
         # 边界通道 IoU
         bnd_logits = output[:, 1]
         bnd_pred = (torch.sigmoid(bnd_logits) > 0.5).long()
-        bnd_gt = targets[:, 1].long()
+        # boundary_soft 是连续目标，验证二值 IoU 时必须显式阈值，不能直接 long 截断。
+        bnd_gt = (targets[:, 1] > 0.5).long()
         bnd_tp += ((bnd_pred == 1) & (bnd_gt == 1)).sum().item()
         bnd_fp += ((bnd_pred == 1) & (bnd_gt == 0)).sum().item()
         bnd_fn += ((bnd_pred == 0) & (bnd_gt == 1)).sum().item()
@@ -338,6 +341,8 @@ def main():
         gamma=train_cfg.get("focal_gamma", 2.0),
         alpha_boundary=train_cfg.get("boundary_alpha", 1.0),
         alpha_focal=train_cfg.get("focal_alpha", 0.75),
+        center_weight=train_cfg.get("center_weight", 0.0),
+        center_gamma=train_cfg.get("center_gamma", 2.0),
     ).to(device)
     logger.info("损失函数: BoundaryLoss (语义 BCE + 边界 Focal × EDT 权重)")
 
@@ -388,7 +393,15 @@ def main():
     best_composite_score = 0.0
     if args.resume and os.path.exists(args.resume):
         checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
-        model.decoder.load_state_dict(checkpoint["decoder_state_dict"])
+        load_info = model.decoder.load_state_dict(
+            checkpoint["decoder_state_dict"], strict=False
+        )
+        if load_info.missing_keys or load_info.unexpected_keys:
+            logger.info(
+                "Checkpoint compatibility: missing=%s unexpected=%s",
+                load_info.missing_keys,
+                load_info.unexpected_keys,
+            )
         if "lora_state_dict" in checkpoint and checkpoint["lora_state_dict"]:
             n_lora = load_lora_state_dict(model, checkpoint["lora_state_dict"])
             logger.info(f"  LoRA 状态已加载: {n_lora} 个参数张量")

@@ -202,6 +202,8 @@ def build_model(config, device):
         num_classes=decoder_cfg["num_classes"],
         dropout=decoder_cfg["dropout"],
         use_bn=decoder_cfg["use_bn"],
+        boundary_refine=decoder_cfg.get("boundary_refine", False),
+        center_head=decoder_cfg.get("center_head", False),
     )
 
     model = SegmentationModel(encoder, decoder)
@@ -224,7 +226,13 @@ def load_stage1_checkpoint(model, checkpoint_path, device):
         raise FileNotFoundError(f"Stage-1 checkpoint not found: {checkpoint_path}")
 
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    model.decoder.load_state_dict(checkpoint["decoder_state_dict"])
+    from models.fpn_decoder import load_decoder_state
+    load_decoder_state(model.decoder, checkpoint["decoder_state_dict"],
+                       tag=f"Stage-1({os.path.basename(checkpoint_path)})")
+    if checkpoint.get("lora_state_dict"):
+        from models.lora import load_lora_state_dict
+        n_lora = load_lora_state_dict(model, checkpoint["lora_state_dict"])
+        logger.info(f"Stage-1 LoRA state loaded: {n_lora} tensors")
     logger.info(f"Stage-1 checkpoint loaded: {checkpoint_path}")
     # 兼容新旧 checkpoint key
     best_score = checkpoint.get(
@@ -261,6 +269,7 @@ def build_dataloaders(config, disable_unlabeled_appearance_aug=False,
     boundary_scale_factor = boundary_cfg.get("edt_scale_factor", 10.0)
     boundary_weight_floor = boundary_cfg.get("edt_weight_floor", 1.0)
     boundary_weight_ceil = boundary_cfg.get("edt_weight_ceil", 4.0)
+    boundary_target_key = boundary_cfg.get("target_key", "boundary_soft")
     crop_size = data_cfg.get("crop_size", 0)
 
     labeled_dataset = LabeledDataset(
@@ -276,6 +285,8 @@ def build_dataloaders(config, disable_unlabeled_appearance_aug=False,
         boundary_scale_factor=boundary_scale_factor,
         boundary_weight_floor=boundary_weight_floor,
         boundary_weight_ceil=boundary_weight_ceil,
+        boundary_target_key=boundary_target_key,
+        center_sigma=data_cfg.get("center_sigma", 4.0),
     )
 
     val_dataset = BoundaryDataset(
@@ -290,6 +301,8 @@ def build_dataloaders(config, disable_unlabeled_appearance_aug=False,
         boundary_scale_factor=boundary_scale_factor,
         boundary_weight_floor=boundary_weight_floor,
         boundary_weight_ceil=boundary_weight_ceil,
+        boundary_target_key=boundary_target_key,
+        center_sigma=data_cfg.get("center_sigma", 4.0),
     )
 
     if len(labeled_dataset) == 0:
@@ -309,6 +322,7 @@ def build_dataloaders(config, disable_unlabeled_appearance_aug=False,
             patch_mask_size=semi_cfg.get("patch_mask_size", 64),
             num_patches=semi_cfg.get("num_patches", 8),
             enable_appearance_aug=not disable_unlabeled_appearance_aug,
+            enable_patch_mask=semi_cfg.get("enable_patch_mask", False),
             boundary_cache_dir=boundary_cache_dir,
         )
     else:
@@ -622,7 +636,7 @@ def validate(model, loader, criterion, device):
         # 边界通道 IoU
         bnd_logits = output[:, 1]
         bnd_pred = (torch.sigmoid(bnd_logits) > 0.5).long()
-        bnd_gt = targets[:, 1].long()
+        bnd_gt = (targets[:, 1] > 0.5).long()
         bnd_tp += ((bnd_pred == 1) & (bnd_gt == 1)).sum().item()
         bnd_fp += ((bnd_pred == 1) & (bnd_gt == 0)).sum().item()
         bnd_fn += ((bnd_pred == 0) & (bnd_gt == 1)).sum().item()
@@ -692,6 +706,11 @@ def monitor_inference(model, config, epoch, device):
 
         seg_prob = torch.sigmoid(output[0, 0]).cpu().numpy()
         bnd_prob = torch.sigmoid(output[0, 1]).cpu().numpy()
+        center_prob = (
+            torch.sigmoid(output[0, 2]).cpu().numpy()
+            if output.shape[1] >= 3
+            else None
+        )
 
         # 语义概率图：伪彩色（JET），珠光体=蓝，铁素体=红
         seg_vis = (seg_prob * 255).astype(np.uint8)
@@ -702,6 +721,11 @@ def monitor_inference(model, config, epoch, device):
         bnd_vis = (bnd_prob * 255).astype(np.uint8)
         bnd_color = cv2.applyColorMap(bnd_vis, cv2.COLORMAP_HOT)
         cv2.imwrite(os.path.join(epoch_dir, f"{basename}_boundary.png"), bnd_color)
+
+        if center_prob is not None:
+            center_vis = (center_prob * 255).astype(np.uint8)
+            center_color = cv2.applyColorMap(center_vis, cv2.COLORMAP_JET)
+            cv2.imwrite(os.path.join(epoch_dir, f"{basename}_center.png"), center_color)
 
     logger.info(f"  Monitor inference saved: {epoch_dir} ({len(image_paths)} images)")
 
@@ -821,6 +845,10 @@ def main():
     )
     load_stage1_checkpoint(student_model, stage1_ckpt_path, device)
 
+    if semi_cfg.get("reset_boundary_branch", False):
+        student_model.decoder.reset_boundary_branch()
+        logger.info("Reset boundary branch after loading Stage-1 checkpoint")
+
     # 渐进式外观增强配置
     prog_aug_cfg = config.get("progressive_aug", {})
     prog_aug_enabled = prog_aug_cfg.get("enabled", False)
@@ -899,8 +927,14 @@ def main():
         seg_dice_weight=train_cfg.get("seg_dice_weight", 0.0),
         freeze_seg=freeze_seg,
         freeze_boundary=freeze_boundary,
+        peak_weight=train_cfg.get("boundary_peak_weight", 0.0),
+        peak_logit=train_cfg.get("boundary_peak_logit", 2.0),
+        hard_negative_weight=train_cfg.get("boundary_hard_negative_weight", 0.0),
+        hard_negative_logit=train_cfg.get("boundary_hard_negative_logit", -1.5),
+        center_weight=train_cfg.get("center_weight", 0.0),
+        center_gamma=train_cfg.get("center_gamma", 2.0),
     ).to(device)
-    logger.info("Supervised loss: BoundaryLoss (semantic BCE + boundary Focal x EDT)")
+    logger.info("Supervised loss: BoundaryLoss (semantic BCE + boundary Focal x EDT + peak/hard-negative)")
 
     # 分层参数优化器：语义分支和边界分支各自独立学习率（方案 B - 三分组）
     base_lr = semi_cfg.get("learning_rate", train_cfg["learning_rate"])
@@ -916,7 +950,11 @@ def main():
             continue
         if "seg_fpn" in name or "seg_branch" in name:
             seg_params.append(param)
-        elif "boundary_fpn" in name or "boundary_branch" in name:
+        elif (
+            "boundary_fpn" in name
+            or "boundary_branch" in name
+            or "center_branch" in name
+        ):
             boundary_params.append(param)
         else:
             seg_params.append(param)
@@ -1085,11 +1123,20 @@ def main():
                 num_classes=config["decoder"]["num_classes"],
                 dropout=config["decoder"]["dropout"],
                 use_bn=config["decoder"]["use_bn"],
+                center_head=config["decoder"].get("center_head", False),
             )
             ref_checkpoint = torch.load(
                 stage1_ckpt_path, map_location=device, weights_only=False
             )
-            ref_decoder.load_state_dict(ref_checkpoint["decoder_state_dict"])
+            load_info = ref_decoder.load_state_dict(
+                ref_checkpoint["decoder_state_dict"], strict=False
+            )
+            if load_info.missing_keys or load_info.unexpected_keys:
+                logger.info(
+                    "Reference checkpoint compatibility: missing=%s unexpected=%s",
+                    load_info.missing_keys,
+                    load_info.unexpected_keys,
+                )
             ref_decoder = ref_decoder.to(device)
             for param in ref_decoder.parameters():
                 param.requires_grad = False
@@ -1206,7 +1253,8 @@ def main():
     best_val_miou = 0.0
     if args.resume and os.path.exists(args.resume):
         checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
-        student_model.decoder.load_state_dict(checkpoint["decoder_state_dict"])
+        from models.fpn_decoder import load_decoder_state
+        load_decoder_state(student_model.decoder, checkpoint["decoder_state_dict"])
         if "lora_state_dict" in checkpoint and checkpoint["lora_state_dict"]:
             n_lora = load_lora_state_dict(student_model, checkpoint["lora_state_dict"])
             logger.info(f"  LoRA state loaded: {n_lora} 个参数张量")
@@ -1233,7 +1281,8 @@ def main():
         if not os.path.exists(init_ckpt_path):
             raise FileNotFoundError(f"Init checkpoint not found: {init_ckpt_path}")
         init_checkpoint = torch.load(init_ckpt_path, map_location=device, weights_only=False)
-        student_model.decoder.load_state_dict(init_checkpoint["decoder_state_dict"])
+        from models.fpn_decoder import load_decoder_state
+        load_decoder_state(student_model.decoder, init_checkpoint["decoder_state_dict"])
         if "lora_state_dict" in init_checkpoint and init_checkpoint["lora_state_dict"]:
             n_lora = load_lora_state_dict(student_model, init_checkpoint["lora_state_dict"])
             logger.info(f"  LoRA state loaded: {n_lora} 个参数张量")

@@ -1,5 +1,6 @@
 config/*
 !config/default_config.yaml
+!config/stage2_center_heatmap.yaml
 weights
 segment-anything-2
 outputs

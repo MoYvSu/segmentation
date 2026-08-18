@@ -67,6 +67,8 @@ def build_model(config, device, checkpoint_path=None):
         num_classes=decoder_cfg["num_classes"],
         dropout=decoder_cfg["dropout"],
         use_bn=decoder_cfg["use_bn"],
+        boundary_refine=decoder_cfg.get("boundary_refine", False),
+        center_head=decoder_cfg.get("center_head", False),
     )
 
     model = SegmentationModel(encoder, decoder)
@@ -75,7 +77,8 @@ def build_model(config, device, checkpoint_path=None):
     if checkpoint_path and os.path.exists(checkpoint_path):
         logger.info(f"Loading decoder weights: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-        model.decoder.load_state_dict(checkpoint["decoder_state_dict"])
+        from models.fpn_decoder import load_decoder_state
+        load_decoder_state(model.decoder, checkpoint["decoder_state_dict"])
         # 含 lora_state_dict 的检查点：注入并加载 LoRA（trunk 域适配）
         from models.lora import load_lora_from_checkpoint
         load_lora_from_checkpoint(model, checkpoint)
@@ -103,11 +106,11 @@ def predict_single_image(
     boundary_logit_scale=1.0,
     sem_edge_boost_alpha=0.0,
     sem_edge_merge_weight=0.0,
-    sem_edge_mode="gradient",
     sem_edge_smooth=1.0,
     use_tta=False,
     bridge_width=1,
     watershed_dilate_width=2,
+    use_center_seeds=True, center_threshold=0.25, center_nms_kernel=9,
     output_dir=None, save_visualization=True,
 ):
     """Letterbox inference + boundary watershed post-processing."""
@@ -166,10 +169,12 @@ def predict_single_image(
             boundary_logit_scale=boundary_logit_scale,
             sem_edge_boost_alpha=sem_edge_boost_alpha,
             sem_edge_merge_weight=sem_edge_merge_weight,
-            sem_edge_mode=sem_edge_mode,
             sem_edge_smooth=sem_edge_smooth,
             watershed_dilate_width=watershed_dilate_width,
             bridge_width=bridge_width,
+            use_center_seeds=use_center_seeds,
+            center_threshold=center_threshold,
+            center_nms_kernel=center_nms_kernel,
             save_visualization=save_visualization,
         )
     else:
@@ -274,11 +279,13 @@ def main():
             boundary_logit_scale=infer_cfg.get("boundary_logit_scale", 1.0),
             sem_edge_boost_alpha=infer_cfg.get("sem_edge_boost_alpha", 0.0),
             sem_edge_merge_weight=infer_cfg.get("sem_edge_merge_weight", 0.0),
-            sem_edge_mode=infer_cfg.get("sem_edge_mode", "gradient"),
             sem_edge_smooth=infer_cfg.get("sem_edge_smooth", 1.0),
             use_tta=infer_cfg.get("tta", False) or args.tta,
             watershed_dilate_width=infer_cfg.get("watershed_dilate_width", 2),
             bridge_width=infer_cfg.get("bridge_width", 1),
+            use_center_seeds=infer_cfg.get("center_seeds", True),
+            center_threshold=infer_cfg.get("center_threshold", 0.25),
+            center_nms_kernel=infer_cfg.get("center_nms_kernel", 9),
             output_dir=output_dir,
             save_visualization=post_cfg.get("save_visualization", False),
         )

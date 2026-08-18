@@ -3,8 +3,8 @@
 边界预测版后处理（当前推理唯一路径）
 ====================================
 1. Letterbox 输出上采样回原图尺寸
-2. Sigmoid + 阈值 -> 语义掩码 / 边界掩码
-3. 边界骨架化 -> 膨胀骨架带 -> 核心剥离 -> 受阻分水岭 -> 实例 ID + 类别映射
+2. Sigmoid + 阈值 -> 语义掩码 / 边界掩码 / 中心热图
+3. 中心热图峰值提供实例种子，边界骨架带作为分水岭障碍 -> 实例 ID + 类别映射
 
 说明：旧向量场 / 距离场 / Snake 等废弃管线已删除，本文件仅保留
 `boundary_watershed_separation` 与 `post_process_prediction_boundary`。
@@ -26,6 +26,41 @@ CLASS_PEARLITE = 0
 CLASS_FERRITE = 1
 
 
+def center_heatmap_markers(
+    center_prob: np.ndarray,
+    threshold: float = 0.25,
+    nms_kernel: int = 9,
+) -> Tuple[np.ndarray, int]:
+    """Convert a center heatmap into one watershed marker per local peak.
+
+    The heatmap is trained with one Gaussian peak per LabelMe polygon.  NMS is
+    deliberately performed before connected components so a broad Gaussian
+    contributes one seed rather than an area-sized seed.  ``nms_kernel`` is
+    the minimum approximate separation between two seeds in output pixels.
+    """
+    prob = np.asarray(center_prob, dtype=np.float32)
+    if prob.ndim != 2:
+        raise ValueError(f"center_prob must be [H, W], got {prob.shape}")
+    kernel = max(3, int(nms_kernel))
+    if kernel % 2 == 0:
+        kernel += 1
+    local_max = cv2.dilate(prob, np.ones((kernel, kernel), np.uint8))
+    peak_mask = ((prob >= float(threshold)) & (prob >= local_max - 1e-6)).astype(np.uint8)
+    num, _, stats, centroids = cv2.connectedComponentsWithStats(peak_mask, 8)
+    markers = np.zeros(prob.shape, dtype=np.int32)
+    peaks = []
+    for label_id in range(1, num):
+        x, y = np.round(centroids[label_id]).astype(int)
+        x = int(np.clip(x, 0, prob.shape[1] - 1))
+        y = int(np.clip(y, 0, prob.shape[0] - 1))
+        peaks.append((float(prob[y, x]), x, y))
+    # Stable order makes output IDs reproducible across equivalent peaks.
+    peaks.sort(key=lambda item: (-item[0], item[2], item[1]))
+    for marker_id, (_, x, y) in enumerate(peaks, start=1):
+        markers[y, x] = marker_id
+    return markers, len(peaks)
+
+
 # ---------------------------------------------------------------------------
 # Boundary-based Watershed Instance Separation
 # ---------------------------------------------------------------------------
@@ -37,6 +72,9 @@ def boundary_watershed_separation(
     min_area: int = 50,
     max_instance_id: int = 255,
     bridge_width: int = 1,
+    center_prob: Optional[np.ndarray] = None,
+    center_threshold: float = 0.25,
+    center_nms_kernel: int = 9,
 ) -> Tuple[np.ndarray, Dict[int, int]]:
     """
     基于边界预测的受阻分水岭实例分割。
@@ -45,7 +83,7 @@ def boundary_watershed_separation(
     1. 骨架化边界掩码 -> 1px 线条
     2. 膨胀 dilate_width 像素 -> 骨架带（防线）
     3. 全图减去骨架带 -> 独立晶核
-    4. 连通域标记 -> 种子
+    4. 中心热图局部峰值 -> 种子；没有中心热图时回退到空间核心连通域
     5. 受阻分水岭缝合 -> 实例图
     6. 每个实例区域语义投票 -> 晶粒类别
     7. 面积过滤 + ID 分配
@@ -77,19 +115,30 @@ def boundary_watershed_separation(
     else:
         skeleton_belt = skeleton
 
-    # Step 3: 空间核心剥离
-    cores = cv2.bitwise_not(skeleton_belt)
-
-    # Step 4: 连通域标记 -> 种子
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(cores, connectivity=8)
+    # Step 3/4: 生成种子。中心峰避免“一个连通核心=一个实例”的欠分割，
+    # 仍保留旧核心种子作为旧 checkpoint 和低置信中心热图的安全回退。
     markers = np.zeros((h, w), dtype=np.int32)
-    valid_id = 0
-    for label_id in range(1, num_labels):
-        area = int(stats[label_id, cv2.CC_STAT_AREA])
-        if area < min_area:
-            continue
-        valid_id += 1
-        markers[labels == label_id] = valid_id
+    center_count = 0
+    if center_prob is not None:
+        markers, center_count = center_heatmap_markers(
+            center_prob,
+            threshold=center_threshold,
+            nms_kernel=center_nms_kernel,
+        )
+    valid_id = center_count
+
+    if center_count == 0:
+        cores = cv2.bitwise_not(skeleton_belt)
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+            cores, connectivity=8
+        )
+        valid_id = 0
+        for label_id in range(1, num_labels):
+            area = int(stats[label_id, cv2.CC_STAT_AREA])
+            if area < min_area:
+                continue
+            valid_id += 1
+            markers[labels == label_id] = valid_id
 
     if valid_id == 0:
         return np.zeros((h, w), dtype=np.uint8), {}
@@ -193,6 +242,9 @@ def post_process_prediction_boundary(
     sem_edge_smooth: float = 1.0,
     watershed_dilate_width: int = 2,
     bridge_width: int = 1,
+    use_center_seeds: bool = True,
+    center_threshold: float = 0.25,
+    center_nms_kernel: int = 9,
     save_visualization: bool = True,
 ) -> Tuple[Dict[str, str], np.ndarray, Dict[int, int]]:
     """
@@ -208,11 +260,17 @@ def post_process_prediction_boundary(
 
     seg_logits = output[0, 0].cpu()
     boundary_logits = output[0, 1].cpu()
+    center_logits = output[0, 2].cpu() if output.shape[1] >= 3 else None
     if boundary_logit_scale != 1.0:
         boundary_logits = boundary_logits * boundary_logit_scale
 
     seg_prob = torch.sigmoid(seg_logits).numpy()
     boundary_prob = torch.sigmoid(boundary_logits).numpy()
+    center_prob = (
+        torch.sigmoid(center_logits).numpy()
+        if center_logits is not None and use_center_seeds
+        else None
+    )
 
     semantic_mask = (seg_prob > threshold).astype(np.uint8)
     # 语义引导融合（可选）：
@@ -243,6 +301,9 @@ def post_process_prediction_boundary(
         min_area=min_instance_area,
         max_instance_id=max_instance_id,
         bridge_width=bridge_width,
+        center_prob=center_prob,
+        center_threshold=center_threshold,
+        center_nms_kernel=center_nms_kernel,
     )
 
     inst_path = os.path.join(output_dir, f"{image_basename}_inst.png")
@@ -267,5 +328,11 @@ def post_process_prediction_boundary(
         boundary_vis = (boundary_prob * 255).astype(np.uint8)
         cv2.imwrite(boundary_path, boundary_vis)
         output_paths["boundary_path"] = boundary_path
+
+        if center_prob is not None:
+            center_path = os.path.join(output_dir, f"{image_basename}_center.png")
+            center_vis = (np.clip(center_prob, 0.0, 1.0) * 255).astype(np.uint8)
+            cv2.imwrite(center_path, center_vis)
+            output_paths["center_path"] = center_path
 
     return output_paths, inst_map, class_map
