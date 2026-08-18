@@ -105,6 +105,7 @@ def build_model(config, device):
         num_classes=decoder_cfg["num_classes"],
         dropout=decoder_cfg["dropout"],
         use_bn=decoder_cfg["use_bn"],
+        boundary_refine=decoder_cfg.get("boundary_refine", False),
         center_head=decoder_cfg.get("center_head", False),
     )
 
@@ -393,15 +394,8 @@ def main():
     best_composite_score = 0.0
     if args.resume and os.path.exists(args.resume):
         checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
-        load_info = model.decoder.load_state_dict(
-            checkpoint["decoder_state_dict"], strict=False
-        )
-        if load_info.missing_keys or load_info.unexpected_keys:
-            logger.info(
-                "Checkpoint compatibility: missing=%s unexpected=%s",
-                load_info.missing_keys,
-                load_info.unexpected_keys,
-            )
+        from models.fpn_decoder import load_decoder_state
+        load_decoder_state(model.decoder, checkpoint["decoder_state_dict"])
         if "lora_state_dict" in checkpoint and checkpoint["lora_state_dict"]:
             n_lora = load_lora_state_dict(model, checkpoint["lora_state_dict"])
             logger.info(f"  LoRA 状态已加载: {n_lora} 个参数张量")
