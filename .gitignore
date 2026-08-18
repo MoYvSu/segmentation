@@ -1,6 +1,13 @@
 config/*
 !config/default_config.yaml
 !config/stage2_center_heatmap.yaml
+!config/README.md
+!config/inference/
+!config/inference/**
+!config/train/
+!config/train/**
+!config/experiments/
+!config/experiments/**
 weights
 segment-anything-2
 outputs

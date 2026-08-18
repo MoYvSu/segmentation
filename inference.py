@@ -10,10 +10,12 @@
 
 import argparse
 import glob
+import json
 import logging
 import os
 import sys
 import time
+from datetime import datetime
 
 import cv2
 import numpy as np
@@ -24,10 +26,14 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-import yaml
 from data.dataset import letterbox
 from models.fpn_decoder import FPNDecoder, SegmentationModel
 from models.sam2_encoder import SAM2Encoder
+from utils.checkpoint import (
+    checkpoint_architecture,
+    validate_checkpoint_architecture,
+)
+from utils.config import load_config, project_path
 from utils.post_process import post_process_prediction_boundary
 
 logging.basicConfig(
@@ -38,18 +44,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def load_config(config_path):
-    with open(config_path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
-
-
-def build_model(config, device, checkpoint_path=None):
+def build_model(
+    config, device, checkpoint_path=None, *, allow_architecture_mismatch=False
+):
     """Build model and load trained decoder weights."""
     sam2_cfg = config["sam2"]
     decoder_cfg = config["decoder"]
     paths_cfg = config["paths"]
 
-    ckpt_path = os.path.join(paths_cfg["weights_dir"], paths_cfg["sam2_ckpt"])
+    ckpt_path = project_path(config, paths_cfg["weights_dir"], paths_cfg["sam2_ckpt"])
     if not os.path.exists(ckpt_path):
         logger.warning(f"SAM 2 checkpoint not found: {ckpt_path}")
 
@@ -77,6 +80,11 @@ def build_model(config, device, checkpoint_path=None):
     if checkpoint_path and os.path.exists(checkpoint_path):
         logger.info(f"Loading decoder weights: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        validation = validate_checkpoint_architecture(
+            checkpoint, config, allow_mismatch=allow_architecture_mismatch
+        )
+        if validation["mismatches"]:
+            logger.warning("Intentional architecture mismatch: %s", validation["mismatches"])
         from models.fpn_decoder import load_decoder_state
         load_decoder_state(model.decoder, checkpoint["decoder_state_dict"])
         # 含 lora_state_dict 的检查点：注入并加载 LoRA（trunk 域适配）
@@ -214,6 +222,15 @@ def main():
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--tta", action="store_true",
                         help="推理 TTA（hflip/vflip/rot180 平均）")
+    parser.add_argument("--boundary-threshold", type=float, default=None)
+    parser.add_argument("--min-instance-area", type=int, default=None)
+    parser.add_argument("--center-threshold", type=float, default=None)
+    parser.add_argument("--center-seeds", action=argparse.BooleanOptionalAction,
+                        default=None, help="启用/关闭中心热图种子")
+    parser.add_argument("--save-visualization", action=argparse.BooleanOptionalAction,
+                        default=None)
+    parser.add_argument("--allow-architecture-mismatch", action="store_true",
+                        help="仅用于有意消融；允许配置与 checkpoint 架构不一致")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -228,36 +245,62 @@ def main():
         logger.warning("CUDA not available, switching to CPU")
         device = "cpu"
 
-    test_dir = args.test_dir or os.path.join(paths_cfg["project_root"], infer_cfg["test_dir"])
-    output_dir = args.output_dir or os.path.join(paths_cfg["project_root"], infer_cfg["output_dir"])
+    test_dir = project_path(config, args.test_dir or infer_cfg["test_dir"])
+    output_dir = project_path(config, args.output_dir or infer_cfg["output_dir"])
     os.makedirs(output_dir, exist_ok=True)
 
     # Checkpoint path
     if args.checkpoint:
-        checkpoint_path = args.checkpoint
+        checkpoint_path = project_path(config, args.checkpoint)
         logger.info(f"Using checkpoint from CLI: {checkpoint_path}")
     else:
         checkpoint_stage = infer_cfg.get("checkpoint_stage", "stage1")
         if checkpoint_stage == "stage2":
-            checkpoint_path = os.path.join(
-                paths_cfg["project_root"],
-                infer_cfg.get("stage2_checkpoint", "outputs/stage2/best_model_stage2.pth"),
+            checkpoint_path = project_path(
+                config, infer_cfg.get("stage2_checkpoint", "outputs/stage2/best_model_stage2.pth")
             )
         else:
-            checkpoint_path = os.path.join(
-                paths_cfg["project_root"],
-                infer_cfg.get("stage1_checkpoint", "outputs/stage1/best_model.pth"),
+            checkpoint_path = project_path(
+                config, infer_cfg.get("stage1_checkpoint", "outputs/stage1/best_model.pth")
             )
         logger.info(f"Using Stage-1 checkpoint from config: {checkpoint_path}")
 
     if not os.path.exists(checkpoint_path):
         logger.error(f"Checkpoint not found: {checkpoint_path}")
-        return
+        raise SystemExit(2)
 
     logger.info(f"Test dir: {test_dir}")
     logger.info(f"Output dir: {output_dir}")
 
-    model = build_model(config, device, checkpoint_path)
+    model = build_model(
+        config, device, checkpoint_path,
+        allow_architecture_mismatch=args.allow_architecture_mismatch,
+    )
+
+    effective = {
+        "boundary_threshold": (
+            args.boundary_threshold if args.boundary_threshold is not None
+            else infer_cfg.get("boundary_threshold", 0.5)
+        ),
+        "min_instance_area": (
+            args.min_instance_area if args.min_instance_area is not None
+            else infer_cfg.get("min_instance_area", 50)
+        ),
+        "center_seeds": (
+            args.center_seeds if args.center_seeds is not None
+            else infer_cfg.get("center_seeds", False)
+        ),
+        "center_threshold": (
+            args.center_threshold if args.center_threshold is not None
+            else infer_cfg.get("center_threshold", 0.25)
+        ),
+        "tta": bool(infer_cfg.get("tta", False) or args.tta),
+        "save_visualization": (
+            args.save_visualization if args.save_visualization is not None
+            else post_cfg.get("save_visualization", False)
+        ),
+    }
+    logger.info("Effective inference settings: %s", effective)
 
     valid_exts = ("*.jpg", "*.jpeg", "*.png", "*.bmp", "*.tif", "*.tiff")
     image_paths = []
@@ -281,22 +324,22 @@ def main():
         result = predict_single_image(
             model, img_path, device,
             image_size=data_cfg["image_size"],
-            min_instance_area=infer_cfg["min_instance_area"],
+            min_instance_area=effective["min_instance_area"],
             max_instance_id=infer_cfg["max_instance_id"],
             threshold=infer_cfg.get("threshold", 0.5),
-            boundary_threshold=infer_cfg.get("boundary_threshold", 0.5),
+            boundary_threshold=effective["boundary_threshold"],
             boundary_logit_scale=infer_cfg.get("boundary_logit_scale", 1.0),
             sem_edge_boost_alpha=infer_cfg.get("sem_edge_boost_alpha", 0.0),
             sem_edge_merge_weight=infer_cfg.get("sem_edge_merge_weight", 0.0),
             sem_edge_smooth=infer_cfg.get("sem_edge_smooth", 1.0),
-            use_tta=infer_cfg.get("tta", False) or args.tta,
+            use_tta=effective["tta"],
             watershed_dilate_width=infer_cfg.get("watershed_dilate_width", 2),
             bridge_width=infer_cfg.get("bridge_width", 1),
-            use_center_seeds=infer_cfg.get("center_seeds", True),
-            center_threshold=infer_cfg.get("center_threshold", 0.25),
+            use_center_seeds=effective["center_seeds"],
+            center_threshold=effective["center_threshold"],
             center_nms_kernel=infer_cfg.get("center_nms_kernel", 9),
             output_dir=output_dir,
-            save_visualization=post_cfg.get("save_visualization", False),
+            save_visualization=effective["save_visualization"],
         )
 
         elapsed = time.time() - start_time
@@ -316,6 +359,24 @@ def main():
     total_instances = sum(r["num_instances"] for r in all_results)
     total_ferrite = sum(r["num_ferrite"] for r in all_results)
     total_pearlite = sum(r["num_pearlite"] for r in all_results)
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    manifest = {
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "config": os.path.abspath(args.config),
+        "checkpoint": os.path.abspath(checkpoint_path),
+        "checkpoint_epoch": checkpoint.get("epoch"),
+        "checkpoint_architecture": checkpoint_architecture(checkpoint),
+        "effective_inference": effective,
+        "test_dir": os.path.abspath(test_dir),
+        "images": len(all_results),
+        "instances": {
+            "total": total_instances,
+            "ferrite": total_ferrite,
+            "pearlite": total_pearlite,
+        },
+    }
+    with open(os.path.join(output_dir, "inference_manifest.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
     logger.info(f"  Total instances: {total_instances} (ferrite={total_ferrite}, pearlite={total_pearlite})")
     logger.info(f"  Output saved to: {output_dir}")
     logger.info("=" * 60)

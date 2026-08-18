@@ -43,7 +43,6 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-import yaml
 from data.dataset import BoundaryDataset, collate_fn, letterbox
 from data.dataset_semi import (
     LabeledDataset,
@@ -64,6 +63,8 @@ from utils.loss_semi import compute_unsupervised_loss, update_ema
 from utils.metrics import SegMetrics
 from utils.progressive_aug import ProgressiveAppearanceAug
 from utils.run_recorder import RunRecorder
+from utils.checkpoint import build_checkpoint, validate_checkpoint_architecture
+from utils.config import load_config, project_path
 
 logging.basicConfig(
     level=logging.INFO,
@@ -71,11 +72,6 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
-
-
-def load_config(config_path):
-    with open(config_path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
 
 
 def sigmoid_rampup(epoch, rampup_epochs):
@@ -150,7 +146,7 @@ def build_model(config, device):
     decoder_cfg = config["decoder"]
     paths_cfg = config["paths"]
 
-    ckpt_path = os.path.join(paths_cfg["weights_dir"], paths_cfg["sam2_ckpt"])
+    ckpt_path = project_path(config, paths_cfg["weights_dir"], paths_cfg["sam2_ckpt"])
     if not os.path.exists(ckpt_path):
         logger.warning(f"SAM 2 checkpoint not found: {ckpt_path}")
 
@@ -177,6 +173,8 @@ def build_model(config, device):
         )
         # 可选：加载自监督预训练 LoRA 状态（lora.init_from）
         init_from = lora_cfg.get("init_from", "")
+        if init_from:
+            init_from = project_path(config, init_from)
         if init_from and os.path.exists(init_from):
             st = torch.load(init_from, map_location=device, weights_only=False)
             n_load = load_lora_state_dict(encoder, st)
@@ -220,10 +218,10 @@ def build_teacher_model(student_model):
     return teacher_model
 
 
-def load_stage1_checkpoint(model, checkpoint_path, device):
-    """加载第一阶段最优权重到学生模型 decoder。"""
+def load_base_checkpoint(model, checkpoint_path, device):
+    """加载 Stage 2 初始化锚点（可来自 Stage 1 或已验证的 Stage 2）。"""
     if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"Stage-1 checkpoint not found: {checkpoint_path}")
+        raise FileNotFoundError(f"Base checkpoint not found: {checkpoint_path}")
 
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     from models.fpn_decoder import load_decoder_state
@@ -233,7 +231,7 @@ def load_stage1_checkpoint(model, checkpoint_path, device):
         from models.lora import load_lora_state_dict
         n_lora = load_lora_state_dict(model, checkpoint["lora_state_dict"])
         logger.info(f"Stage-1 LoRA state loaded: {n_lora} tensors")
-    logger.info(f"Stage-1 checkpoint loaded: {checkpoint_path}")
+    logger.info(f"Base checkpoint loaded: {checkpoint_path}")
     # 兼容新旧 checkpoint key
     best_score = checkpoint.get(
         "best_composite_score", checkpoint.get("best_val_iou", "?")
@@ -839,11 +837,12 @@ def main():
 
     student_model = build_model(config, device)
 
-    stage1_ckpt_path = os.path.join(
-        paths_cfg["project_root"],
+    base_checkpoint = semi_cfg.get(
+        "base_checkpoint",
         config["inference"].get("stage1_checkpoint", "outputs/stage1/best_model.pth"),
     )
-    load_stage1_checkpoint(student_model, stage1_ckpt_path, device)
+    stage1_ckpt_path = project_path(config, base_checkpoint)
+    load_base_checkpoint(student_model, stage1_ckpt_path, device)
 
     if semi_cfg.get("reset_boundary_branch", False):
         student_model.decoder.reset_boundary_branch()
@@ -1144,11 +1143,12 @@ def main():
             if lora_cfg.get("enabled", False):
                 # LoRA 启用时 ref_model 使用独立的无 LoRA 编码器，
                 # 保证 Stage-1 锚点仍是纯 Stage-1 特征，不被域适配带偏
+                sam2_weight_path = project_path(
+                    config, paths_cfg["weights_dir"], paths_cfg["sam2_ckpt"]
+                )
                 ref_encoder = SAM2Encoder(
                     config_file=sam2_cfg["config_file"],
-                    ckpt_path=os.path.join(paths_cfg["weights_dir"], paths_cfg["sam2_ckpt"])
-                    if os.path.exists(os.path.join(paths_cfg["weights_dir"], paths_cfg["sam2_ckpt"]))
-                    else None,
+                    ckpt_path=sam2_weight_path if os.path.exists(sam2_weight_path) else None,
                     device=device,
                     freeze=sam2_cfg["freeze"],
                     sam2_repo_path=os.path.join(paths_cfg["project_root"], sam2_cfg["sam2_repo_path"]),
@@ -1251,8 +1251,12 @@ def main():
     start_epoch = 0
     best_composite_score = 0.0
     best_val_miou = 0.0
-    if args.resume and os.path.exists(args.resume):
-        checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
+    if args.resume:
+        resume_path = project_path(config, args.resume)
+        if not os.path.exists(resume_path):
+            raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
+        checkpoint = torch.load(resume_path, map_location=device, weights_only=False)
+        validate_checkpoint_architecture(checkpoint, config)
         from models.fpn_decoder import load_decoder_state
         load_decoder_state(student_model.decoder, checkpoint["decoder_state_dict"])
         if "lora_state_dict" in checkpoint and checkpoint["lora_state_dict"]:
@@ -1272,12 +1276,16 @@ def main():
         best_composite_score = checkpoint.get(
             "best_composite_score", checkpoint.get("best_val_iou", 0.0)
         )
-        logger.info(f"Resumed from epoch {start_epoch}, best Composite Score: {best_composite_score:.4f}")
+        logger.info(
+            f"Resumed from {resume_path} at epoch {start_epoch}, "
+            f"best Composite Score: {best_composite_score:.4f}"
+        )
 
     # --init_from_checkpoint: 仅加载 decoder 权重，重置训练状态（用于分支切换）
     # 优先级高于 --resume：如果同时指定，init_from_checkpoint 覆盖 resume
     init_ckpt_path = args.init_from_checkpoint or semi_cfg.get("init_from_checkpoint", "")
     if init_ckpt_path:
+        init_ckpt_path = project_path(config, init_ckpt_path)
         if not os.path.exists(init_ckpt_path):
             raise FileNotFoundError(f"Init checkpoint not found: {init_ckpt_path}")
         init_checkpoint = torch.load(init_ckpt_path, map_location=device, weights_only=False)
@@ -1534,15 +1542,12 @@ def main():
         if composite_score > best_composite_score:
             best_composite_score = composite_score
             best_path = os.path.join(output_dir, "best_model_stage2.pth")
-            torch.save({
-                "epoch": epoch,
-                "decoder_state_dict": student_model.decoder.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "scheduler_state_dict": scheduler.state_dict(),
-                "lora_state_dict": extract_lora_state_dict(student_model),
-                "best_composite_score": best_composite_score,
-                "config": config,
-            }, best_path)
+            torch.save(build_checkpoint(
+                model=student_model, config=config, epoch=epoch,
+                lora_state_dict=extract_lora_state_dict(student_model),
+                best_composite_score=best_composite_score,
+                optimizer=optimizer, scheduler=scheduler,
+            ), best_path)
             logger.info(
                 f"  New best model saved: {best_path} "
                 f"(composite={best_composite_score:.4f}, "
@@ -1553,15 +1558,12 @@ def main():
 
         if (epoch + 1) % checkpoint_interval == 0 and semi_cfg.get("save_checkpoints", True):
             ckpt_path = os.path.join(output_dir, f"stage2_epoch{epoch + 1}.pth")
-            torch.save({
-                "epoch": epoch,
-                "decoder_state_dict": student_model.decoder.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "scheduler_state_dict": scheduler.state_dict(),
-                "lora_state_dict": extract_lora_state_dict(student_model),
-                "best_composite_score": best_composite_score,
-                "config": config,
-            }, ckpt_path)
+            torch.save(build_checkpoint(
+                model=student_model, config=config, epoch=epoch,
+                lora_state_dict=extract_lora_state_dict(student_model),
+                best_composite_score=best_composite_score,
+                optimizer=optimizer, scheduler=scheduler,
+            ), ckpt_path)
             logger.info(f"  Checkpoint saved: {ckpt_path}")
 
         # 监控推理：每 checkpoint_interval 个 epoch 保存概率图
@@ -1569,13 +1571,11 @@ def main():
             monitor_inference(student_model, config, epoch, device)
 
     final_path = os.path.join(output_dir, "final_model_stage2.pth")
-    torch.save({
-        "epoch": total_epochs - 1,
-        "decoder_state_dict": student_model.decoder.state_dict(),
-        "lora_state_dict": extract_lora_state_dict(student_model),
-        "best_composite_score": best_composite_score,
-        "config": config,
-    }, final_path)
+    torch.save(build_checkpoint(
+        model=student_model, config=config, epoch=total_epochs - 1,
+        lora_state_dict=extract_lora_state_dict(student_model),
+        best_composite_score=best_composite_score,
+    ), final_path)
     recorder.copy_checkpoint(final_path, "final_model_stage2.pth")
     logger.info(f"Stage-2 training complete! Final model: {final_path}")
     logger.info(f"Best Composite Score: {best_composite_score:.4f}")

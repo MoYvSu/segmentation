@@ -1,19 +1,16 @@
 # 低碳钢金相图像相区分割
 
-> 技术路线：**冻结 SAM 2 Image Encoder + 自制独立双 FPN 解码头（语义/边界双分支）+ 离线边界净化 GT + 两阶段训练（Stage 1 全监督 → Stage 2 半监督）+ 边界骨架化 + 受阻分水岭实例分割 + LoRA 低秩适配 trunk（协议 C：自监督 LoRA 预训练 → Stage-1(LoRA) → 联合微调）**。
+> 技术路线：冻结 SAM 2 Image Encoder + LoRA 域适配 + 独立语义/边界 FPN + 两阶段训练 +
+> 受阻分水岭实例分割。当前状态、入口与产物约定以 [docs/PIPELINE.md](docs/PIPELINE.md) 为准。
 
 ## 当前进度
 
-- **协议 C（LoRA 全链路）已跑通**：自监督 LoRA 预训练（1000 无标签，MAE 掩码重建）→
-  Stage-1 监督（LoRA）→ Stage-2 联合微调（LoRA）。当前最优
-  `outputs/stage2_lora/best_model_stage2.pth`：**val mIoU 0.8315 / bndIoU 0.5009**
-  （对比 v4.0 基线的 0.7811 / 0.4082，语义 +0.050、边界 +0.093）。
-- **语义头已接近直接可用**：test 域 `>0.8` 高置信 72%、`0.4-0.6` 模糊带 2.9%、
-  掩码碎片化约 35 个连通域（v4.0 时代 86~112）；实例类别由分水岭 + 语义投票产生。
-- **边界头**：bndIoU 0.5009 为历史最高，但 test 目检仍有欠分割（边界高概率平台窄，
-  `>0.7` 仅 ~1%），推理端调参中（`boundary_logit_scale` 1.3~1.8、阈值 0.35 等）。
-- **v4.0 实例分类器已废弃**：语义头已足够，不再需要实例级分类器
-  （git 标签 `v4.0-instance-clf` 可回溯历史实现）。
+- **当前参考模型**：`outputs/stage2_v6/best_model_stage2.pth`。它仍同时存在中心区域
+  碎裂式过分割与外围欠分割，但边界结构完整性明显优于中心多任务模型。
+- **中心热图实验已降级为负面对照**：共享 `boundary_fpn` 的中心辅助任务破坏了边界表征；
+  `outputs/stage2_center_heatmap/best_model_stage2.pth` 不作为后续初始化主线。
+- **当前目标**：保护已经优秀的语义/LoRA 表征，独立增强边界召回、拓扑连续性与高置信输出，
+  再针对黑盒的铁素体平均面积指标进行少量推理参数校准。
 
 ## 环境配置
 
@@ -62,8 +59,9 @@ python tools/preprocess_labels.py --visualize  # 可视化净化结果
 ```
 segmentationv2/
 ├── config/
-│   ├── default_config.yaml      # 主配置（含 Stage 1 + Stage 2 半监督全量参数）
-│   └── stage2_config.yaml       # Stage 2 早期独立配置（已被 default_config.yaml 取代）
+│   ├── default_config.yaml      # 当前 V6 参考基线
+│   ├── inference/               # 同架构推理配置
+│   └── experiments/             # 改架构/训练目标的实验配置
 ├── data/
 │   ├── raw/                     # 有标注图像 + Labelme .json
 │   ├── purified_gt/             # 离线净化 GT（_gt.npz）
@@ -94,75 +92,34 @@ segmentationv2/
 └── visualize_instances.py       # 实例图着色可视化
 ```
 
-## 训练（协议 C：LoRA 全链路，当前主线）
+## 训练
 
-> 架构：**自监督 LoRA 预训练 → Stage-1 监督（LoRA）→ Stage-2 联合微调（LoRA）**。
-> 文献：LoRA (2021) / Conv-LoRA (2024) / TopoLoRA-SAM (2026)。trunk 梯度检查点已启用。
-
-**① 自监督 LoRA 预训练**（1000 张无标签，MAE 掩码重建，只训 LoRA + 重建头）：
+LoRA 自监督预训练仍可复用；新的 Stage 1 与 Stage 2 配置已分开，避免推理配置中的冻结规则
+误用于从头训练：
 
 ```bash
-python tools/pretrain_lora_ssl.py --config config/default_config.yaml --epochs 30 --batch_size 8
+python tools/pretrain_lora_ssl.py --config config/train/stage1_lora.yaml --epochs 30 --batch_size 8
+python train.py --config config/train/stage1_lora.yaml
+python train_stage2.py --config config/train/stage2_boundary_v6.yaml \
+    --phase boundary --tag <experiment-name>
 ```
 
-产物：`outputs/lora_pretrain/lora_state_dict.pth`（Stage-1 的 LoRA 初始化）。
-
-**② Stage-1 监督**（冻结 trunk + LoRA，双 FPN 随机初始化，语义/边界一起学）：
-
-```bash
-python train.py --config config/stage1_lora.yaml
-```
-
-要点：`lora.enabled: true` + `lora.init_from` 加载预训练状态；`lora.lr_ratio: 0.5`
-（26 张有标签图不宜过大）；batch 8（trunk 梯度检查点控显存）。
-
-**③ Stage-2 联合微调**（双分支联合 + LoRA，有标签监督 + 无标签边界一致性）：
-
-```bash
-python tools/precompute_pseudo_labels.py --config config/default_config.yaml   # 边界伪标签缓存（一次性）
-python train_stage2.py --config config/stage2_lora.yaml \
-    --init_from_checkpoint outputs/stage1_lora/best_model.pth --phase joint --tag lora
-```
-
-要点：`freeze.seg_branch / boundary_branch` 均 false（联合）；`unsup_seg_weight=0`
-（语义只走监督）、`unsup_weight=0.3`（边界一致性，stage1_direct 缓存伪标签）；
-LoRA 随训练继续适配，两个头与特征共同收敛，避免"特征动了、头冻结"的漂移。
-
-**当前最优**：`outputs/stage2_lora/best_model_stage2.pth`（val mIoU 0.8315 / bndIoU 0.5009）。
-
-### 半监督机制速览（Stage-2 可选项）
-
-- `boundary_teacher_mode`：`stage1_direct`（当前，Stage-1 伪标签缓存）/ `ema`
-  （EMA 教师+锚点混合）/ `self_consistency`（学生自一致性）/ `anchor_self`
-  （自一致性 + Stage-1 锚点，可突破 recall 天花板）。
-- 边界一致性损失：MSE + Sobel 梯度 + 各向异性 TV + 背景抑制 + margin + 占比上限正则
-  （`rate_regularizer_weight` 0.1→0.4 退火）。
-- 每 epoch 打印 `bnd_output: max/>0.5占比/gap`；每 5 epoch 输出 test 语义置信度
-  （`>0.8` 占比 / `0.4-0.6` 模糊带）与监控图。
-- 运行记录：`outputs/runs/<时间戳>_<phase>_<tag>/`
-  （run_info.json / config_snapshot.yaml / metrics.csv / best_model.pth）。
-
-恢复训练：
-
-```bash
-python train.py --config config/stage1_lora.yaml --resume outputs/stage1_lora/checkpoint_epoch50.pth
-python train_stage2.py --config config/stage2_lora.yaml --resume outputs/stage2_lora/stage2_epoch30.pth
-```
-
-> 历史：v4.0 时代的"两阶段协议（Phase S 冻结边界 / Phase B 冻结语义）"与实例分类器
-> 管线已废弃（见 git 标签 `v4.0-instance-clf`）；当前统一为协议 C 联合训练。
+Stage 2 默认以 V6 checkpoint 为 `base_checkpoint`，冻结语义分支和 LoRA，仅更新边界路径。
+每次运行在 `outputs/runs/` 保存配置、环境和逐 epoch 指标；best 权重使用硬链接，避免重复占盘。
+恢复训练必须使用相同架构，代码会在加载 optimizer 前执行严格检查。
 
 ## 推理
 
 ```bash
 conda activate sam2_env
-python inference.py --config config/default_config.yaml --checkpoint outputs/stage2/best_model_stage2.pth
+python inference.py --config config/inference/v6_reference.yaml
 ```
 
 指定测试目录与输出目录：
 
 ```bash
-python inference.py --config config/default_config.yaml --test_dir data/test --output_dir outputs/inference
+python inference.py --config config/inference/v6_reference.yaml \
+  --test_dir data/test --output_dir outputs/inference/v6_reference
 ```
 
 推理增强选项（配置于 `inference` 段）：

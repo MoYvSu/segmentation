@@ -1,0 +1,27 @@
+# 下一轮边界主线：以 V6 为语义锚点，不启用中心辅助任务。
+_base: ../default_config.yaml
+
+decoder:
+  boundary_refine: false
+  center_head: false
+
+lora:
+  enabled: true
+  freeze: true
+
+train:
+  center_weight: 0.0
+
+semi_supervised:
+  base_checkpoint: outputs/stage2_v6/best_model_stage2.pth
+  output_dir: outputs/stage2_boundary_v7
+  init_from_checkpoint: ""
+  use_cached_pseudo_labels: true
+  pseudo_label_cache_dir: outputs/pseudo_labels/semantic_boundary
+  monitor:
+    image_dir: data/test
+    num_images: 10
+    output_dir: outputs/stage2_boundary_v7/monitor
+  freeze:
+    seg_branch: true
+    boundary_branch: false

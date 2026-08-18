@@ -1,0 +1,14 @@
+# 当前目检参考：V6 边界模型（仍同时存在中心碎裂式过分割与外围欠分割）。
+_base: ../default_config.yaml
+
+inference:
+  output_dir: outputs/inference_v6_reference
+  stage2_checkpoint: outputs/stage2_v6/best_model_stage2.pth
+  boundary_threshold: 0.35
+  min_instance_area: 50
+  bridge_width: 1
+  watershed_dilate_width: 1
+  center_seeds: false
+
+post_process:
+  save_visualization: true

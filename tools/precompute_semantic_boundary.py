@@ -31,10 +31,10 @@ if PROJECT_ROOT not in sys.path:
 import cv2
 import numpy as np
 import torch
-import yaml
 
 from data.dataset import letterbox, letterbox_mask, split_train_val_indices
 from skimage.morphology import skeletonize
+from utils.config import load_config, project_path
 
 CLASS_FERRITE = 1
 
@@ -88,10 +88,11 @@ def main():
                     help="只做 val 质量检查（对比 GT），不生成缓存")
     args = ap.parse_args()
 
-    config = yaml.safe_load(open(args.config))
+    config = load_config(args.config)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     root = config["paths"]["project_root"]
-    model = build_model(config, args.checkpoint, device)
+    checkpoint = project_path(config, args.checkpoint)
+    model = build_model(config, checkpoint, device)
     model.eval()
 
     if args.check_val:

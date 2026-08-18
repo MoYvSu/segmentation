@@ -34,7 +34,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import yaml
 from torch.utils.data import DataLoader, Dataset
 
 from data.dataset import letterbox
@@ -45,6 +44,7 @@ from models.lora import (
     load_lora_state_dict,
 )
 from models.sam2_encoder import SAM2Encoder
+from utils.config import load_config, project_path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -229,9 +229,13 @@ def main():
                     help="下游探针使用的解码头检查点（默认 v4.0 Stage-1）")
     args = ap.parse_args()
 
-    config = yaml.safe_load(open(args.config))
+    config = load_config(args.config)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     root = config["paths"]["project_root"]
+    args.outdir = project_path(config, args.outdir)
+    args.eval_decoder = project_path(config, args.eval_decoder)
+    if args.resume:
+        args.resume = project_path(config, args.resume)
     os.makedirs(args.outdir, exist_ok=True)
 
     encoder = SAM2Encoder(

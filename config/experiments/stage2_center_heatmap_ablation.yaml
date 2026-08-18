@@ -1,0 +1,58 @@
+# 中心热图多任务负面对照
+# 结论：共享 boundary_fpn 后，边界背景雾化、铁素体欠分割、珠光体碎裂及环状嵌套。
+_base: ../default_config.yaml
+
+decoder:
+  boundary_refine: true
+  center_head: true
+
+train:
+  boundary_alpha: 1.0
+  boundary_peak_weight: 0.15
+  boundary_peak_logit: 2.0
+  boundary_hard_negative_weight: 0.03
+  boundary_hard_negative_logit: -1.5
+  center_weight: 1.0
+  center_gamma: 2.0
+
+boundary:
+  gt_dir: data/purified_gt_uncovered_soft_v1
+  target_key: boundary_soft
+
+inference:
+  output_dir: outputs/inference_center_negative
+  min_instance_area: 50
+  stage1_checkpoint: outputs/runs/20260804_155300_joint_lora/best_model.pth
+  stage2_checkpoint: outputs/stage2_center_heatmap/best_model_stage2.pth
+  center_seeds: true
+  center_threshold: 0.43
+
+semi_supervised:
+  base_checkpoint: outputs/runs/20260804_155300_joint_lora/best_model.pth
+  output_dir: outputs/stage2_center_heatmap
+  use_cached_pseudo_labels: false
+  unsup_weight: 0.0
+  epochs: 40
+  flat_epochs: 50
+  batch_size_labeled: 4
+  batch_size_unlabeled: 4
+  checkpoint_interval: 5
+  enable_patch_mask: false
+  patch_mask_ratio: 0.3
+  patch_mask_size: 64
+  num_patches: 12
+  monitor:
+    image_dir: data/test
+    num_images: 10
+    output_dir: outputs/stage2_center_heatmap/monitor
+  boundary_consistency:
+    rate_regularizer_weight: 0.1
+    rate_regularizer_weight_end: 0.4
+    rate_regularizer_ramp_epochs: 60
+    rate_slack: 0.05
+  freeze:
+    seg_branch: true
+    boundary_branch: false
+
+progressive_aug:
+  enabled: false

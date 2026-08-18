@@ -6,7 +6,8 @@
 
 # -----------------------------------------------------------------------------
 paths:
-  project_root: &project_root "d:/MY_PROGRAMME/segmentationv2"
+  # 自动解析为当前仓库根目录；也可用 SEGMENTATION_PROJECT_ROOT 临时覆盖。
+  project_root: auto
   raw_data_dir: "data/raw"
   weights_dir: "weights"
   sam2_ckpt: "sam2_hiera_base_plus.pt"
@@ -28,7 +29,9 @@ decoder:
   num_classes: 2          # 通道0=语义(0珠光体/1铁素体), 通道1=边界
   dropout: 0.1
   use_bn: true
-  boundary_refine: true
+  # 默认使用当前目检更可靠的 V6 双 FPN 基线；实验性高分辨率细化头在
+  # config/experiments/ 下单独开启，避免架构与 checkpoint 隐式错配。
+  boundary_refine: false
   center_head: false
 
 # -----------------------------------------------------------------------------
@@ -94,7 +97,7 @@ inference:
   # 的坡脚也纳入，导致边界带宽度沿脊线变化、轮廓崎岖不平，影响分水岭防线。
   # 0.4 为与旧滞后(0.4/0.5)实例密度相当的等效档；想要更细的线可 0.5，
   # 或配 boundary_logit_scale 1.3 保密度
-  boundary_threshold: 0.6
+  boundary_threshold: 0.35
   # 推理时对边界 logits 乘系数再 sigmoid（>1 增强弱响应，默认 1.0 不缩放）
   boundary_logit_scale: 1.0
   # 语义边缘升权（0=关闭）：边界概率 × (1 + α×|∇语义概率|)，
@@ -103,34 +106,33 @@ inference:
   # 语义补缺式融合（0=关闭）：final = bnd + λ·edge·(1−bnd)，
   # 只在边界分支弱处补语义梯度（不增厚强边界，避免小晶粒被吞并），
   # 补回边界分支漏检的铁素体内部晶界（语义热力图在晶界处凹陷）
-  sem_edge_merge_weight: 0.4
+  sem_edge_merge_weight: 0.0
   # 语义边缘模式：gradient=|∇seg|（双峰，简单）/ valley=-∇²seg（单峰，少重影）
   sem_edge_mode: "valley"
   # 语义边缘图高斯平滑 sigma（二阶 valley 模式对噪声敏感，必须平滑）
   sem_edge_smooth: 1.0
   # 双峰桥接（骨架化前膨胀 boundary_mask，默认 1px）：
   # 把"双脊"边界合成一条带，骨架取中轴 -> 平滑单线（治重影/粗糙骨架）
-  bridge_width: 1
   # 推理 TTA（hflip/vflip/rot180 平均），提升弱边界召回与稳定性
   tta: false
   watershed_dilate_width: 1
   bridge_width: 1             # 骨架化前膨胀（桥接双线成单线）
   checkpoint_stage: "stage2"
   stage1_checkpoint: "outputs/stage1/best_model.pth"
-  stage2_checkpoint: "outputs/stage2/stage2_epoch60_lora_bnd.pth"
-  center_seeds: true
+  stage2_checkpoint: "outputs/stage2_v6/best_model_stage2.pth"
+  center_seeds: false
   center_threshold: 0.25
   center_nms_kernel: 9
 
 # -----------------------------------------------------------------------------
 lora:
-  enabled: false
+  enabled: true
   rank: 16
   alpha: 32.0
   target_layers: ["attn.qkv", "attn.proj"]
   lr_ratio: 2.0              # LoRA lr = base_lr × ratio
   init_from: ""              # 自监督预训练 LoRA 状态路径（留空=随机）
-  freeze: false              # true=加载后冻结 LoRA（特征固定，只训头部）
+  freeze: true               # V6 参考权重中的 LoRA 保持冻结
 
 # -----------------------------------------------------------------------------
 post_process:
@@ -142,6 +144,8 @@ post_process:
 
 # -----------------------------------------------------------------------------
 semi_supervised:
+  # Stage 2 的明确初始化锚点；优先于历史 inference.stage1_checkpoint。
+  base_checkpoint: "outputs/stage2_v6/best_model_stage2.pth"
   unlabeled_dir: "data/unlabeled"
   output_dir: "outputs/stage2"
   init_from_checkpoint: ""
