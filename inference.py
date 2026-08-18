@@ -263,7 +263,9 @@ def main():
             checkpoint_path = project_path(
                 config, infer_cfg.get("stage1_checkpoint", "outputs/stage1/best_model.pth")
             )
-        logger.info(f"Using Stage-1 checkpoint from config: {checkpoint_path}")
+        logger.info(
+            f"Using {checkpoint_stage} checkpoint from config: {checkpoint_path}"
+        )
 
     if not os.path.exists(checkpoint_path):
         logger.error(f"Checkpoint not found: {checkpoint_path}")
