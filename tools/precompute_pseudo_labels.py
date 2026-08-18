@@ -31,9 +31,9 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-import yaml
 from data.dataset import letterbox
 from inference import build_model
+from utils.config import load_config, project_path
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,11 +41,6 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
-
-
-def load_config(config_path):
-    with open(config_path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
 
 
 def predict_tta(model, image_lb, device, use_tta: bool) -> np.ndarray:
@@ -107,22 +102,23 @@ def main():
         logger.warning("CUDA not available, switching to CPU")
         device = "cpu"
 
-    unlabeled_dir = os.path.join(
-        paths_cfg["project_root"],
-        semi_cfg.get("unlabeled_dir", "data/unlabeled"),
+    unlabeled_dir = project_path(
+        config, semi_cfg.get("unlabeled_dir", "data/unlabeled")
     )
-    checkpoint_path = args.checkpoint or os.path.join(
-        paths_cfg["project_root"],
-        config["inference"].get("stage1_checkpoint", "outputs/stage1/best_model.pth"),
+    checkpoint_path = project_path(config, args.checkpoint) if args.checkpoint else project_path(
+        config,
+        semi_cfg.get(
+            "base_checkpoint",
+            config["inference"].get("stage1_checkpoint", "outputs/stage1/best_model.pth"),
+        ),
     )
     if args.output_dir:
-        output_dir = args.output_dir
+        output_dir = project_path(config, args.output_dir)
     else:
-        output_dir = os.path.join(
-            paths_cfg["project_root"],
-            semi_cfg.get(
+        output_dir = project_path(
+            config, semi_cfg.get(
                 "pseudo_label_cache_dir", "outputs/pseudo_labels/stage1_boundary"
-            ),
+            )
         )
 
     if not os.path.exists(checkpoint_path):

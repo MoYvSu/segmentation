@@ -1,5 +1,7 @@
+# 历史完整快照：中心热图多任务负面对照。新实验配置见
+# config/experiments/stage2_center_heatmap_ablation.yaml。
 paths:
-  project_root: /root/autodl-tmp/segmentationv2
+  project_root: auto
   raw_data_dir: data/raw
   weights_dir: weights
   sam2_ckpt: sam2_hiera_base_plus.pt

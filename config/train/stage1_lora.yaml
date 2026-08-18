@@ -1,0 +1,13 @@
+# 新 Stage 1 训练配置：LoRA 可训练，输出与参考 checkpoint 隔离。
+_base: ../default_config.yaml
+
+paths:
+  output_dir: outputs/stage1_lora_next
+
+lora:
+  enabled: true
+  freeze: false
+  init_from: outputs/lora_pretrain/lora_state_dict.pth
+
+train:
+  save_checkpoints: true

@@ -7,7 +7,7 @@
 - ``run_info.json``：命令、git 提交/分支/工作区脏文件、Python/Torch/CUDA 版本；
 - ``config_snapshot.yaml``：本次训练生效的完整配置快照；
 - ``metrics.csv``：逐 epoch 训练/验证指标；
-- ``best_model.pth``：最优权重副本（与上面三者同目录，可直接复现）。
+- ``best_model.pth``：最优权重硬链接（文件系统不支持时回退为副本）。
 
 用法（在 train_stage2.py 内部自动调用）：
 
@@ -122,9 +122,14 @@ class RunRecorder:
             writer.writerow(row)
 
     def copy_checkpoint(self, src_path, name="best_model.pth"):
-        """把最优权重复制到运行目录，返回目标路径（源不存在时返回 None）。"""
+        """把最优权重链接到运行目录，避免每个 run 重复占用数百 MB。"""
         if src_path and os.path.exists(src_path):
             dst = os.path.join(self.run_dir, name)
-            shutil.copy2(src_path, dst)
+            if os.path.lexists(dst):
+                os.unlink(dst)
+            try:
+                os.link(src_path, dst)
+            except OSError:
+                shutil.copy2(src_path, dst)
             return dst
         return None
