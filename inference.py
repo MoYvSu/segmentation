@@ -150,9 +150,18 @@ def predict_single_image(
         with torch.no_grad():
             output = model(image_tensor)
 
-    # Inverse Letterbox: crop padding, upsample to original size
-    content_h = int(round(h_orig * scale / 4))
-    content_w = int(round(w_orig * scale / 4))
+    # Inverse Letterbox: crop the bottom/right padding in the model's actual
+    # output resolution.  The legacy decoder emitted at stride 4 (256 for a
+    # 1024 input), while boundary_refine emits at full resolution.  A fixed
+    # ``/4`` therefore crops a full-resolution prediction down to its top-left
+    # quarter and causes severe under-segmentation after it is stretched back.
+    out_h, out_w = output.shape[-2:]
+    resized_h = image_size - pad_h
+    resized_w = image_size - pad_w
+    content_h = int(round(resized_h * out_h / image_size))
+    content_w = int(round(resized_w * out_w / image_size))
+    content_h = max(1, min(content_h, out_h))
+    content_w = max(1, min(content_w, out_w))
     output = output[:, :, :content_h, :content_w]
     output = F.interpolate(output, size=(h_orig, w_orig), mode="bilinear", align_corners=True)
 

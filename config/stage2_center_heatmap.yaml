@@ -83,10 +83,11 @@ inference:
   watershed_dilate_width: 1
   checkpoint_stage: stage2
   stage1_checkpoint: outputs/runs/20260804_155300_joint_lora/best_model.pth
-  stage2_checkpoint: outputs/stage2_uncovered_v2_soft_gate/best_model_stage2.pth
+  stage2_checkpoint: outputs/stage2_center_heatmap/best_model_stage2.pth
   center_seeds: true
-  # 0.25 在本轮最佳模型上产生约 800 峰/图，明显过分割；0.40 作为下一轮初始校准值。
-  center_threshold: 0.40
+  # 修复全分辨率反 Letterbox 后：0.40 -> 7538，0.45 -> 3373；
+  # 0.43 取两者之间，目标约 5000 个测试实例。
+  center_threshold: 0.43
   center_nms_kernel: 9
 lora:
   enabled: true
