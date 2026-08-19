@@ -1,0 +1,34 @@
+# Stage-0 Continue-15：从 Long-20 的最佳 B2 权重继续纯 refine 收敛。
+# 学习率从 Long-20 最后一轮的 2e-5 接续，前 8 轮保持，后 7 轮衰减至 5e-6。
+# 本实验仍冻结语义、LoRA 和 coarse boundary，以隔离延长训练本身的收益与风险。
+_base: stage2_refine_v6_stage0_long.yaml
+
+inference:
+  output_dir: outputs/inference_refine_v6_stage0_continue15
+  stage2_checkpoint: outputs/stage2_refine_v6_stage0_continue15/best_model_stage2.pth
+
+semi_supervised:
+  output_dir: outputs/stage2_refine_v6_stage0_continue15
+  init_from_checkpoint: outputs/stage2_refine_v6_stage0_long/best_model_stage2.pth
+  epochs: 15
+  learning_rate: 2.0e-5
+  warmup_epochs: 0
+  flat_epochs: 8
+  decay_end_factor: 0.25
+  labeled_steps_per_epoch: 62
+  checkpoint_interval: 5
+  monitor:
+    image_dir: data/raw
+    num_images: 10
+    output_dir: outputs/stage2_refine_v6_stage0_continue15/monitor
+  refine_training:
+    enabled: true
+    refine_only_epochs: 15
+    refine_lr_ratio: 1.0
+    boundary_base_lr_ratio: 0.15
+  diagnostics:
+    enabled: true
+    save_initial_monitor: true
+
+progressive_aug:
+  enabled: false
