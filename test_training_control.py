@@ -13,6 +13,7 @@ from train_stage2 import (
     resolve_epoch_steps,
     seed_everything,
     set_student_train_modes,
+    validate,
 )
 from utils.config import load_config
 
@@ -43,6 +44,26 @@ class _ToyStudent(nn.Module):
             boundary_refine=True,
             boundary_refine_version="v2_fullres_isolated",
         )
+
+
+class _FixedPredictionModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        semantic_prob = torch.tensor([[0.2, 0.8], [0.2, 0.8]])
+        boundary_prob = torch.tensor([[0.8, 0.4], [0.6, 0.2]])
+        output = torch.stack(
+            [torch.logit(semantic_prob), torch.logit(boundary_prob)], dim=0
+        )
+        self.register_buffer("fixed_output", output.unsqueeze(0))
+
+    def forward(self, images, output_size=None):
+        del output_size
+        return self.fixed_output.expand(images.shape[0], -1, -1, -1)
+
+
+def _zero_criterion(prediction, target, weight):
+    del target, weight
+    return prediction.sum() * 0.0, 0.0, 0.0
 
 
 class Stage0TrainingControlTest(unittest.TestCase):
@@ -96,6 +117,41 @@ class Stage0TrainingControlTest(unittest.TestCase):
         self.assertFalse(config["progressive_aug"]["enabled"])
         self.assertEqual(config["train"]["seed"], 42)
         self.assertTrue(config["train"]["deterministic"])
+
+    def test_stage0_long_config_invariants(self):
+        config = load_config(
+            "config/train/stage2_refine_v6_stage0_long.yaml"
+        )
+        semi = config["semi_supervised"]
+        self.assertEqual(semi["epochs"], 20)
+        self.assertEqual(semi["labeled_steps_per_epoch"], 62)
+        self.assertEqual(semi["refine_training"]["refine_only_epochs"], 20)
+        self.assertEqual(semi["checkpoint_interval"], 5)
+        self.assertFalse(config["progressive_aug"]["enabled"])
+        self.assertFalse(semi["use_unlabeled"])
+
+    def test_validation_reports_boundary_haze_metrics(self):
+        target = torch.tensor(
+            [[
+                [[0.0, 1.0], [0.0, 1.0]],
+                [[1.0, 0.0], [1.0, 0.0]],
+            ]]
+        )
+        loader = [{
+            "image": torch.zeros(1, 3, 2, 2),
+            "target": target,
+            "weight": torch.ones(1, 1, 2, 2),
+        }]
+        metrics = validate(
+            _FixedPredictionModel(), loader, _zero_criterion, torch.device("cpu")
+        )
+        self.assertAlmostEqual(metrics["boundary_pos_mean"], 0.7, places=6)
+        self.assertAlmostEqual(metrics["boundary_bg_mean"], 0.3, places=6)
+        self.assertAlmostEqual(metrics["boundary_prob_gap"], 0.4, places=6)
+        self.assertAlmostEqual(metrics["boundary_recall_035"], 1.0, places=6)
+        self.assertAlmostEqual(
+            metrics["boundary_bg_fp_rate_035"], 0.5, places=6
+        )
 
 
 if __name__ == "__main__":

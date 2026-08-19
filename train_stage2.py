@@ -780,6 +780,12 @@ def validate(model, loader, criterion, device):
     bnd_tp = 0
     bnd_fp = 0
     bnd_fn = 0
+    bnd_pos_prob_sum = 0.0
+    bnd_bg_prob_sum = 0.0
+    bnd_pos_count = 0
+    bnd_bg_count = 0
+    bnd_pos_recalled_035 = 0
+    bnd_bg_false_positive_035 = 0
 
     for batch in loader:
         images = batch["image"].to(device)
@@ -797,11 +803,22 @@ def validate(model, loader, criterion, device):
 
         # 边界通道 IoU
         bnd_logits = output[:, 1]
-        bnd_pred = (torch.sigmoid(bnd_logits) > 0.5).long()
+        bnd_prob = torch.sigmoid(bnd_logits)
+        bnd_pred = (bnd_prob > 0.5).long()
         bnd_gt = (targets[:, 1] > 0.5).long()
         bnd_tp += ((bnd_pred == 1) & (bnd_gt == 1)).sum().item()
         bnd_fp += ((bnd_pred == 1) & (bnd_gt == 0)).sum().item()
         bnd_fn += ((bnd_pred == 0) & (bnd_gt == 1)).sum().item()
+        positive = bnd_gt == 1
+        background = ~positive
+        bnd_pos_prob_sum += float(bnd_prob[positive].sum())
+        bnd_bg_prob_sum += float(bnd_prob[background].sum())
+        bnd_pos_count += int(positive.sum())
+        bnd_bg_count += int(background.sum())
+        bnd_pos_recalled_035 += int(((bnd_prob > 0.35) & positive).sum())
+        bnd_bg_false_positive_035 += int(
+            ((bnd_prob > 0.35) & background).sum()
+        )
 
     val_metrics = metrics.get_metrics()
     val_metrics["loss"] = total_loss / max(n_batches, 1)
@@ -809,6 +826,17 @@ def validate(model, loader, criterion, device):
     # Boundary IoU = TP / (TP + FP + FN + eps)
     eps = 1e-7
     val_metrics["boundary_iou"] = bnd_tp / (bnd_tp + bnd_fp + bnd_fn + eps)
+    val_metrics["boundary_pos_mean"] = bnd_pos_prob_sum / max(bnd_pos_count, 1)
+    val_metrics["boundary_bg_mean"] = bnd_bg_prob_sum / max(bnd_bg_count, 1)
+    val_metrics["boundary_prob_gap"] = (
+        val_metrics["boundary_pos_mean"] - val_metrics["boundary_bg_mean"]
+    )
+    val_metrics["boundary_recall_035"] = (
+        bnd_pos_recalled_035 / max(bnd_pos_count, 1)
+    )
+    val_metrics["boundary_bg_fp_rate_035"] = (
+        bnd_bg_false_positive_035 / max(bnd_bg_count, 1)
+    )
 
     return val_metrics
 
@@ -1585,6 +1613,13 @@ def main():
             "val_loss": initial_val_metrics["loss"],
             "mIoU": initial_val_metrics["mean_iou"],
             "boundary_iou": initial_val_metrics["boundary_iou"],
+            "boundary_pos_mean": initial_val_metrics["boundary_pos_mean"],
+            "boundary_bg_mean": initial_val_metrics["boundary_bg_mean"],
+            "boundary_prob_gap": initial_val_metrics["boundary_prob_gap"],
+            "boundary_recall_035": initial_val_metrics["boundary_recall_035"],
+            "boundary_bg_fp_rate_035": initial_val_metrics[
+                "boundary_bg_fp_rate_035"
+            ],
             "mean_dice": initial_val_metrics["mean_dice"],
             "composite": initial_composite,
         }
@@ -1836,6 +1871,14 @@ def main():
             f"  pearlite_iou={val_metrics['pearlite_iou']:.4f} "
             f"ferrite_iou={val_metrics['ferrite_iou']:.4f}"
         )
+        logger.info(
+            "  Val boundary confidence: "
+            f"pos={val_metrics['boundary_pos_mean']:.4f} "
+            f"bg={val_metrics['boundary_bg_mean']:.4f} "
+            f"gap={val_metrics['boundary_prob_gap']:.4f} "
+            f"recall@0.35={val_metrics['boundary_recall_035']:.4f} "
+            f"bg_fp@0.35={val_metrics['boundary_bg_fp_rate_035']:.4f}"
+        )
 
         # 语义退化预警：验证 mIoU 明显低于历史最优时提示（语义崩塌的早期信号）
         sem_warn_factor = semi_cfg.get("sem_degrade_warn_factor", 0.9)
@@ -1889,6 +1932,11 @@ def main():
             "val_loss": val_metrics["loss"],
             "mIoU": val_metrics["mean_iou"],
             "boundary_iou": val_metrics["boundary_iou"],
+            "boundary_pos_mean": val_metrics["boundary_pos_mean"],
+            "boundary_bg_mean": val_metrics["boundary_bg_mean"],
+            "boundary_prob_gap": val_metrics["boundary_prob_gap"],
+            "boundary_recall_035": val_metrics["boundary_recall_035"],
+            "boundary_bg_fp_rate_035": val_metrics["boundary_bg_fp_rate_035"],
             "mean_dice": val_metrics["mean_dice"],
             "composite": composite_score,
         })

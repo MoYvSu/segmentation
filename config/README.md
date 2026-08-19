@@ -29,3 +29,8 @@ refine residual，关闭中心头并保持原后处理不变。
 固定 seed 42、每 epoch 62 个监督 step、共 5 epoch（310 次更新），关闭无标签流和
 物理增强，只训练零初始化 B2 refine。运行指标会额外记录 refine 梯度/残差/权重变化，
 并验证 coarse、语义与冻结 LoRA 的最大参数变化严格为 0。
+
+`train/stage2_refine_v6_stage0_long.yaml` 将同一控制实验延长至 20 epoch/1240 次更新，
+前段保持 refine LR `5e-5`、末段衰减至 `2e-5`，每 5 epoch 保存一次 checkpoint 和
+monitor。验证指标额外记录边界正/背景概率、概率间隔，以及阈值 0.35 下的召回与背景
+假阳性率，用于区分真实边界增强和雾状背景同步抬升。
