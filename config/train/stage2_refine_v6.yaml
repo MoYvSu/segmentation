@@ -20,9 +20,10 @@ train:
 inference:
   output_dir: outputs/inference_refine_v6
   stage2_checkpoint: outputs/stage2_refine_v6/best_model_stage2.pth
-  # 保持当前后处理机制，不在 B2 中引入额外变量。
-  boundary_threshold: 0.4
-  min_instance_area: 500
+  # 与 config/inference/v6_reference.yaml 使用同一目检参数，避免 B2 对比
+  # 混入后处理变量；正式提交前仍可在固定 checkpoint 上独立扫描阈值。
+  boundary_threshold: 0.35
+  min_instance_area: 50
   sem_edge_boost_alpha: 0.0
   sem_edge_merge_weight: 0.0
   bridge_width: 1
