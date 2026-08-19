@@ -35,6 +35,12 @@ from utils.checkpoint import (
 )
 from utils.config import load_config, project_path
 from utils.post_process import post_process_prediction_boundary
+from utils.quality_aware import (
+    assess_image_quality,
+    classify_quality,
+    effective_boundary_threshold,
+    enhance_weak_image,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -109,6 +115,29 @@ def build_model(
     return model
 
 
+@torch.no_grad()
+def _predict_with_tta(model, image_tensor, use_tta=False):
+    """固定几何视角平均；不更新模型或归一化统计。"""
+    if not use_tta:
+        return model(image_tensor)
+    views = torch.cat(
+        [
+            image_tensor,
+            torch.flip(image_tensor, dims=[3]),
+            torch.flip(image_tensor, dims=[2]),
+            torch.rot90(image_tensor, 2, dims=[2, 3]),
+        ],
+        dim=0,
+    )
+    outs = model(views)
+    return (
+        outs[0:1]
+        + torch.flip(outs[1:2], dims=[3])
+        + torch.flip(outs[2:3], dims=[2])
+        + torch.rot90(outs[3:4], 2, dims=[2, 3])
+    ) / 4.0
+
+
 def predict_single_image(
     model, image_path, device,
     image_size=1024,
@@ -122,6 +151,7 @@ def predict_single_image(
     bridge_width=1,
     watershed_dilate_width=2,
     use_center_seeds=True, center_threshold=0.25, center_nms_kernel=9,
+    quality_aware_config=None,
     output_dir=None, save_visualization=True,
 ):
     """Letterbox inference + boundary watershed post-processing."""
@@ -130,6 +160,15 @@ def predict_single_image(
         raise FileNotFoundError(f"Cannot read image: {image_path}")
     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     h_orig, w_orig = image_rgb.shape[:2]
+    quality_cfg = quality_aware_config or {}
+    quality_enabled = bool(quality_cfg.get("enabled", False))
+    quality_metrics = assess_image_quality(image_rgb) if quality_enabled else {}
+    if quality_enabled:
+        quality_profile, quality_reasons = classify_quality(
+            quality_metrics, quality_cfg
+        )
+    else:
+        quality_profile, quality_reasons = "disabled", []
 
     basename = os.path.splitext(os.path.basename(image_path))[0]
 
@@ -138,28 +177,29 @@ def predict_single_image(
     image_tensor = torch.from_numpy(image_lb).float().permute(2, 0, 1).unsqueeze(0) / 255.0
     image_tensor = image_tensor.to(device)
 
-    if use_tta:
-        # 4 视角 TTA：hflip / vflip / rot180，logits 平均后逆变换回原方向
-        views = torch.cat(
-            [
-                image_tensor,
-                torch.flip(image_tensor, dims=[3]),
-                torch.flip(image_tensor, dims=[2]),
-                torch.rot90(image_tensor, 2, dims=[2, 3]),
-            ],
-            dim=0,
+    output = _predict_with_tta(model, image_tensor, use_tta=use_tta)
+    enhanced_applied = []
+    if quality_enabled and quality_profile == "weak":
+        enhanced_rgb, enhanced_applied = enhance_weak_image(
+            image_rgb, quality_metrics, quality_cfg
         )
-        with torch.no_grad():
-            outs = model(views)  # [4, 2, H, W]
-        output = (
-            outs[0:1]
-            + torch.flip(outs[1:2], dims=[3])
-            + torch.flip(outs[2:3], dims=[2])
-            + torch.rot90(outs[3:4], 2, dims=[2, 3])
-        ) / 4.0
-    else:
-        with torch.no_grad():
-            output = model(image_tensor)
+        enhanced_lb, _, _, _ = letterbox(enhanced_rgb, image_size)
+        enhanced_tensor = (
+            torch.from_numpy(enhanced_lb)
+            .float().permute(2, 0, 1).unsqueeze(0).to(device) / 255.0
+        )
+        enhanced_output = _predict_with_tta(
+            model,
+            enhanced_tensor,
+            use_tta=bool(quality_cfg.get("enhanced_tta", False)),
+        )
+        enhanced_weight = float(quality_cfg.get("enhanced_weight", 0.35))
+        enhanced_weight = float(np.clip(enhanced_weight, 0.0, 1.0))
+        output = output * (1.0 - enhanced_weight) + enhanced_output * enhanced_weight
+
+    selected_boundary_threshold = effective_boundary_threshold(
+        boundary_threshold, quality_profile, quality_cfg
+    ) if quality_enabled else float(boundary_threshold)
 
     # Inverse Letterbox: crop the bottom/right padding in the model's actual
     # output resolution.  The legacy decoder emitted at stride 4 (256 for a
@@ -185,7 +225,7 @@ def predict_single_image(
             min_instance_area=min_instance_area,
             max_instance_id=max_instance_id,
             threshold=threshold,
-            boundary_threshold=boundary_threshold,
+            boundary_threshold=selected_boundary_threshold,
             boundary_logit_scale=boundary_logit_scale,
             sem_edge_boost_alpha=sem_edge_boost_alpha,
             sem_edge_merge_weight=sem_edge_merge_weight,
@@ -204,6 +244,10 @@ def predict_single_image(
 
     n_ferrite = sum(1 for v in class_map.values() if v == 1)
     n_pearlite = sum(1 for v in class_map.values() if v == 0)
+    if len(class_map) > min(int(max_instance_id), 255):
+        raise RuntimeError(
+            f"Instance cap violated: {len(class_map)} > {min(int(max_instance_id), 255)}"
+        )
 
     return {
         "image_path": image_path,
@@ -212,6 +256,11 @@ def predict_single_image(
         "num_ferrite": n_ferrite,
         "num_pearlite": n_pearlite,
         "output_paths": output_paths,
+        "quality_profile": quality_profile,
+        "quality_reasons": quality_reasons,
+        "quality_metrics": quality_metrics,
+        "enhanced_applied": enhanced_applied,
+        "effective_boundary_threshold": selected_boundary_threshold,
     }
 
 
@@ -225,6 +274,10 @@ def main():
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--tta", action="store_true",
                         help="推理 TTA（hflip/vflip/rot180 平均）")
+    parser.add_argument(
+        "--quality-aware", action=argparse.BooleanOptionalAction, default=None,
+        help="启用/关闭单图质量感知增强与小幅边界阈值档位选择",
+    )
     parser.add_argument("--boundary-threshold", type=float, default=None)
     parser.add_argument("--min-instance-area", type=int, default=None)
     parser.add_argument("--center-threshold", type=float, default=None)
@@ -282,6 +335,10 @@ def main():
         allow_architecture_mismatch=args.allow_architecture_mismatch,
     )
 
+    quality_cfg = dict(infer_cfg.get("quality_aware", {}))
+    if args.quality_aware is not None:
+        quality_cfg["enabled"] = bool(args.quality_aware)
+
     effective = {
         "boundary_threshold": (
             args.boundary_threshold if args.boundary_threshold is not None
@@ -300,6 +357,7 @@ def main():
             else infer_cfg.get("center_threshold", 0.25)
         ),
         "tta": bool(infer_cfg.get("tta", False) or args.tta),
+        "quality_aware": bool(quality_cfg.get("enabled", False)),
         "save_visualization": (
             args.save_visualization if args.save_visualization is not None
             else post_cfg.get("save_visualization", False)
@@ -343,6 +401,7 @@ def main():
             use_center_seeds=effective["center_seeds"],
             center_threshold=effective["center_threshold"],
             center_nms_kernel=infer_cfg.get("center_nms_kernel", 9),
+            quality_aware_config=quality_cfg,
             output_dir=output_dir,
             save_visualization=effective["save_visualization"],
         )
@@ -354,7 +413,9 @@ def main():
         logger.info(
             f"  Done ({elapsed:.2f}s): "
             f"instances={result['num_instances']} "
-            f"(ferrite={result['num_ferrite']}, pearlite={result['num_pearlite']})"
+            f"(ferrite={result['num_ferrite']}, pearlite={result['num_pearlite']}) "
+            f"quality={result['quality_profile']} "
+            f"bnd_th={result['effective_boundary_threshold']:.3f}"
         )
 
     logger.info("=" * 60)
@@ -379,6 +440,18 @@ def main():
             "ferrite": total_ferrite,
             "pearlite": total_pearlite,
         },
+        "quality_aware_results": [
+            {
+                "image": os.path.basename(result["image_path"]),
+                "profile": result["quality_profile"],
+                "reasons": result["quality_reasons"],
+                "metrics": result["quality_metrics"],
+                "enhanced_applied": result["enhanced_applied"],
+                "boundary_threshold": result["effective_boundary_threshold"],
+                "instances": result["num_instances"],
+            }
+            for result in all_results
+        ],
     }
     with open(os.path.join(output_dir, "inference_manifest.json"), "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)

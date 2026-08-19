@@ -1,0 +1,25 @@
+# B2 低复杂度质量感知推理：固定 TTA + standard/weak 两档。
+# 不使用实例数、平均面积、薄环或嵌套拓扑作为选择目标。
+_base: ../train/stage2_refine_v6_physaug.yaml
+
+inference:
+  output_dir: outputs/inference_b2_quality_aware
+  stage2_checkpoint: outputs/stage2_refine_v6_physaug/best_model_stage2.pth
+  max_instance_id: 255
+  tta: true
+  quality_aware:
+    enabled: true
+    weak_min_flags: 2
+    # 阈值按允许的 labeled/unlabeled 域统计设定，不从测试集聚合拟合。
+    thresholds:
+      brightness_low: 0.58
+      contrast_low: 0.14
+      sharpness_low: 0.02
+      sharpness_critical: 0.008
+      color_cast_high: 0.04
+    enhanced_weight: 0.35
+    enhanced_tta: false
+    boundary_threshold_offsets:
+      standard: 0.0
+      weak: -0.02
+    boundary_threshold_limits: [0.25, 0.50]

@@ -30,6 +30,13 @@ python train.py --config config/train/stage1_lora.yaml
 # Stage 2 B2；V6 作为冻结语义锚点，落地独立高分辨率 refine head
 python train_stage2.py --config config/train/stage2_refine_v6.yaml \
   --phase boundary --tag refine_v6_b2
+
+# B2 单变量重试：V6 初始化 + refine-only + 物理显微增强（5 epoch）
+python train_stage2.py --config config/train/stage2_refine_v6_physaug.yaml \
+  --phase boundary --tag refine_v6_b2_physaug
+
+# 对应的两档质量感知 TTA（训练完成后）
+python inference.py --config config/inference/b2_quality_aware.yaml
 ```
 
 推理常用参数可直接从 CLI 覆盖，不再复制临时 YAML：
@@ -41,6 +48,18 @@ python inference.py --config config/inference/v6_reference.yaml \
 ```
 
 每个推理目录都会生成 `inference_manifest.json`，记录 checkpoint、架构、实际阈值和三类实例统计。
+
+## 物理增强与质量感知推理边界
+
+- 训练增强只模拟显微成像中可解释的曝光/白平衡变化、轻度失焦、采样分辨率下降、低频照明和
+  低对比抛光划痕；单张图只组合 1~2 项，保留足够干净样本。
+- 划痕保持原 GT，作为“图像强线条不一定是晶界”的 hard negative；不再使用规则圆形遮罩。
+- 推理只分 `standard`/`weak` 两档。弱档保留原图 logits，并融合一张确定性校正视图；所有
+  阈值偏移由配置显式给出，便于逐项关闭和复现。
+- 分档不以预测实例数、铁素体平均面积、薄环或嵌套现象为目标，也不会跨测试集拟合统计量。
+- 实例图使用 `uint8`，每图最多 255 个非零 ID。候选超过上限时保留 254 个最大区域，其余
+  区域汇入 ID 255，并对全部汇入像素重新进行语义投票；该保护仅处理输出格式上限，不反向
+  改变分水岭参数。
 
 ## Checkpoint 契约
 

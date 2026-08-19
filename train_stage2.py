@@ -314,8 +314,11 @@ def build_dataloaders(config, disable_unlabeled_appearance_aug=False,
         logger.warning("Validation dataset is empty, using labeled dataset for validation.")
         val_dataset = labeled_dataset
 
+    use_unlabeled = bool(semi_cfg.get("use_unlabeled", True))
     unlabeled_dataset = None
-    if os.path.exists(unlabeled_dir) and len(os.listdir(unlabeled_dir)) > 0:
+    if not use_unlabeled:
+        logger.info("Unlabeled training: DISABLED by semi_supervised.use_unlabeled")
+    elif os.path.exists(unlabeled_dir) and len(os.listdir(unlabeled_dir)) > 0:
         unlabeled_dataset = UnlabeledDataset(
             data_dir=unlabeled_dir,
             image_size=image_size,
