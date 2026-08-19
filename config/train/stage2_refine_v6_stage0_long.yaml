@@ -1,0 +1,32 @@
+# Stage-0 Long：在 E0 已证明可学习后，观察纯 refine 的中期收敛与雾状背景趋势。
+# 20 epoch × 62 supervised steps = 1240 updates；不启用物理增强或无标签损失。
+_base: stage2_refine_v6_stage0_control.yaml
+
+inference:
+  output_dir: outputs/inference_refine_v6_stage0_long
+  stage2_checkpoint: outputs/stage2_refine_v6_stage0_long/best_model_stage2.pth
+
+semi_supervised:
+  output_dir: outputs/stage2_refine_v6_stage0_long
+  epochs: 20
+  learning_rate: 5.0e-5
+  warmup_epochs: 0
+  flat_epochs: 15
+  decay_end_factor: 0.4
+  labeled_steps_per_epoch: 62
+  checkpoint_interval: 5
+  monitor:
+    image_dir: data/raw
+    num_images: 10
+    output_dir: outputs/stage2_refine_v6_stage0_long/monitor
+  refine_training:
+    enabled: true
+    refine_only_epochs: 20
+    refine_lr_ratio: 1.0
+    boundary_base_lr_ratio: 0.15
+  diagnostics:
+    enabled: true
+    save_initial_monitor: true
+
+progressive_aug:
+  enabled: false

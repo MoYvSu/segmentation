@@ -39,6 +39,10 @@ python train_stage2.py --config config/train/stage2_refine_v6_physaug.yaml \
 python train_stage2.py --config config/train/stage2_refine_v6_stage0_control.yaml \
   --phase boundary --tag refine_v6_stage0_control
 
+# Stage-0 Long：20 epoch/1240 更新，观察纯 refine 收敛与背景雾化趋势
+python train_stage2.py --config config/train/stage2_refine_v6_stage0_long.yaml \
+  --phase boundary --tag refine_v6_stage0_long
+
 # 对应的两档质量感知 TTA（训练完成后）
 python inference.py --config config/inference/b2_quality_aware.yaml
 ```
