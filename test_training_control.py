@@ -148,6 +148,28 @@ class Stage0TrainingControlTest(unittest.TestCase):
         self.assertFalse(config["progressive_aug"]["enabled"])
         self.assertFalse(semi["use_unlabeled"])
 
+    def test_e1_physaug15_config_invariants(self):
+        config = load_config(
+            "config/train/stage2_refine_v6_e1_physaug15.yaml"
+        )
+        semi = config["semi_supervised"]
+        aug = config["progressive_aug"]
+        self.assertEqual(semi["epochs"], 15)
+        self.assertEqual(semi["learning_rate"], 1.0e-5)
+        self.assertEqual(semi["labeled_steps_per_epoch"], 62)
+        self.assertEqual(semi["refine_training"]["refine_only_epochs"], 15)
+        self.assertEqual(
+            semi["init_from_checkpoint"],
+            "outputs/stage2_refine_v6_stage0_continue15/best_model_stage2.pth",
+        )
+        self.assertFalse(semi["use_unlabeled"])
+        self.assertTrue(aug["enabled"])
+        self.assertEqual(aug["policy"], "physical_v1")
+        self.assertEqual(aug["max_prob"], 0.60)
+        self.assertEqual((aug["min_ops"], aug["max_ops"]), (1, 2))
+        self.assertEqual(aug["op_weights"]["noise"], 0.0)
+        self.assertEqual(aug["gaussian_noise_std"], 0.0)
+
     def test_validation_reports_boundary_haze_metrics(self):
         target = torch.tensor(
             [[
