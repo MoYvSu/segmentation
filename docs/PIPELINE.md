@@ -35,6 +35,10 @@ python train_stage2.py --config config/train/stage2_refine_v6.yaml \
 python train_stage2.py --config config/train/stage2_refine_v6_physaug.yaml \
   --phase boundary --tag refine_v6_b2_physaug
 
+# Stage-0 / E0：先验证 B2 在 310 次纯监督更新下确实能够学动
+python train_stage2.py --config config/train/stage2_refine_v6_stage0_control.yaml \
+  --phase boundary --tag refine_v6_stage0_control
+
 # 对应的两档质量感知 TTA（训练完成后）
 python inference.py --config config/inference/b2_quality_aware.yaml
 ```

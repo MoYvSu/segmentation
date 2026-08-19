@@ -1,0 +1,40 @@
+# Stage-0 / E0：B2 可学习性控制实验。
+# 目的仅是验证 refine head 在与历史 B2 相当的 310 次更新下能否明显离开零残差初始化。
+# 本配置关闭物理增强与无标签损失；通过独立监督步数避免训练量随无标签 loader 消失。
+_base: stage2_refine_v6_physaug.yaml
+
+train:
+  seed: 42
+  deterministic: true
+
+inference:
+  output_dir: outputs/inference_refine_v6_stage0_control
+  stage2_checkpoint: outputs/stage2_refine_v6_stage0_control/best_model_stage2.pth
+
+semi_supervised:
+  output_dir: outputs/stage2_refine_v6_stage0_control
+  use_unlabeled: false
+  use_cached_pseudo_labels: false
+  unsup_weight: 0.0
+  unsup_seg_weight: 0.0
+  epochs: 5
+  learning_rate: 5.0e-5
+  warmup_epochs: 0
+  flat_epochs: 5
+  labeled_steps_per_epoch: 62
+  checkpoint_interval: 1
+  monitor:
+    image_dir: data/raw
+    num_images: 10
+    output_dir: outputs/stage2_refine_v6_stage0_control/monitor
+  refine_training:
+    enabled: true
+    refine_only_epochs: 5
+    refine_lr_ratio: 1.0
+    boundary_base_lr_ratio: 0.15
+  diagnostics:
+    enabled: true
+    save_initial_monitor: true
+
+progressive_aug:
+  enabled: false

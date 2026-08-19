@@ -8,7 +8,7 @@
 1. 加载第一阶段最优权重到学生模型
 2. 可选创建教师模型（学生权重的 EMA 副本，仅 ema 模式需要）
 3. 仅冻结 encoder，全量训练 decoder
-4. 双流混合 Batch：itertools.cycle(labeled_loader) + unlabeled_loader
+4. 双流混合 Batch：有标签 DataLoader 耗尽后重新创建 iterator，不缓存旧 batch
 5. 有标签流：BoundaryLoss（语义 BCE + 边界 Focal x EDT 权重）
 6. 无标签流：一致性损失（MSE + Sobel + TV + 背景抑制）
    - boundary_teacher_mode 决定边界伪标签源：
@@ -25,10 +25,11 @@
 import argparse
 import copy
 import glob
-import itertools
+import json
 import logging
 import math
 import os
+import random
 import sys
 import time
 
@@ -72,6 +73,105 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+
+def seed_everything(seed: int, deterministic: bool = False):
+    """固定模型初始化与数据采样随机源，支持成对消融复现。"""
+    seed = int(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    if deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    logger.info(
+        f"Random seed: {seed} "
+        f"(cudnn_deterministic={'on' if deterministic else 'off'})"
+    )
+
+
+def seed_dataloader_worker(worker_id: int):
+    """使每个 DataLoader worker 的 NumPy/Python 随机流可复现。"""
+    del worker_id
+    worker_seed = torch.initial_seed() % (2 ** 32)
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
+def resolve_epoch_steps(
+    labeled_loader_length: int,
+    unlabeled_steps: int = 0,
+    labeled_steps_per_epoch: int = 0,
+) -> int:
+    """独立解析监督训练步数，避免关闭无标签流时隐式缩短训练。"""
+    labeled_steps = (
+        int(labeled_steps_per_epoch)
+        if int(labeled_steps_per_epoch) > 0
+        else int(labeled_loader_length)
+    )
+    return max(labeled_steps, int(unlabeled_steps))
+
+
+def next_restarting_batch(loader, iterator):
+    """取下一 batch；耗尽时重建 iterator，而不是缓存并重放旧 batch。"""
+    try:
+        return next(iterator), iterator
+    except StopIteration:
+        iterator = iter(loader)
+        return next(iterator), iterator
+
+
+def set_student_train_modes(student_model):
+    """训练可学习模块，同时让所有完全冻结的子模块保持 eval 模式。"""
+    student_model.train()
+    student_model.encoder.eval()
+    decoder = student_model.decoder
+    modules = [
+        decoder.seg_fpn,
+        decoder.seg_branch,
+        decoder.boundary_fpn,
+        decoder.boundary_branch,
+    ]
+    if getattr(decoder, "boundary_refine", False):
+        modules.append(decoder.boundary_refine_head)
+    if getattr(decoder, "center_branch", None) is not None:
+        modules.append(decoder.center_branch)
+    for module in modules:
+        params = list(module.parameters())
+        if params and not any(param.requires_grad for param in params):
+            module.eval()
+
+
+def snapshot_parameters(named_parameters):
+    """把少量实验关注参数复制到 CPU，用于逐 epoch 变化量审计。"""
+    return {
+        name: param.detach().cpu().clone()
+        for name, param in named_parameters
+    }
+
+
+def parameter_delta_stats(named_parameters, initial_state):
+    """返回相对实验初始化的 L2 与最大绝对参数变化。"""
+    squared_sum = 0.0
+    max_abs = 0.0
+    for name, param in named_parameters:
+        if name not in initial_state:
+            continue
+        delta = param.detach().cpu().float() - initial_state[name].float()
+        squared_sum += float(delta.square().sum())
+        if delta.numel() > 0:
+            max_abs = max(max_abs, float(delta.abs().max()))
+    return math.sqrt(squared_sum), max_abs
+
+
+def gradient_l2_norm(parameters) -> float:
+    squared_sum = 0.0
+    for param in parameters:
+        if param.grad is not None:
+            squared_sum += float(param.grad.detach().float().square().sum())
+    return math.sqrt(squared_sum)
 
 
 def sigmoid_rampup(epoch, rampup_epochs):
@@ -256,6 +356,7 @@ def build_dataloaders(config, disable_unlabeled_appearance_aug=False,
     """
     paths_cfg = config["paths"]
     data_cfg = config["data"]
+    train_cfg = config.get("train", {})
     boundary_cfg = config.get("boundary", {})
     semi_cfg = config.get("semi_supervised", {})
 
@@ -340,16 +441,23 @@ def build_dataloaders(config, disable_unlabeled_appearance_aug=False,
     if unlabeled_dataset is not None:
         bs_unlabeled = min(bs_unlabeled, len(unlabeled_dataset))
 
+    train_seed = int(train_cfg.get("seed", data_cfg.get("seed", 42)))
+    labeled_generator = torch.Generator()
+    labeled_generator.manual_seed(train_seed)
+    unlabeled_generator = torch.Generator()
+    unlabeled_generator.manual_seed(train_seed + 1)
+
     labeled_loader = DataLoader(
         labeled_dataset, batch_size=bs_labeled, shuffle=True,
         num_workers=num_workers, collate_fn=labeled_collate_fn,
         pin_memory=True, drop_last=False,
+        worker_init_fn=seed_dataloader_worker, generator=labeled_generator,
     )
 
     val_loader = DataLoader(
         val_dataset, batch_size=bs_labeled, shuffle=False,
         num_workers=num_workers, collate_fn=collate_fn,
-        pin_memory=True,
+        pin_memory=True, worker_init_fn=seed_dataloader_worker,
     )
 
     unlabeled_loader = None
@@ -358,6 +466,7 @@ def build_dataloaders(config, disable_unlabeled_appearance_aug=False,
             unlabeled_dataset, batch_size=bs_unlabeled, shuffle=True,
             num_workers=num_workers, collate_fn=unlabeled_collate_fn,
             pin_memory=True, drop_last=True,
+            worker_init_fn=seed_dataloader_worker, generator=unlabeled_generator,
         )
 
     logger.info(f"Labeled batch size: {bs_labeled}")
@@ -383,6 +492,7 @@ def train_one_epoch(
     peak_hinge_weight=0.0, peak_threshold=0.8,
     rate_regularizer_weight=0.0, rate_slack=0.05,
     sem_boundary_align_weight=0.0,
+    diagnostics_enabled=False,
 ):
     """训练一个 epoch（双流混合 Batch + 可选 EMA 更新）。
 
@@ -412,8 +522,7 @@ def train_one_epoch(
         bg_suppress_weight: 背景抑制损失权重。
         bg_suppress_threshold: 背景抑制阈值，低于此值视为背景区域。
     """
-    student_model.train()
-    student_model.encoder.eval()
+    set_student_train_modes(student_model)
     if teacher_model is not None:
         teacher_model.eval()
 
@@ -428,13 +537,48 @@ def train_one_epoch(
     total_bnd_pos = 0.0
     total_bnd_gap = 0.0
     total_bnd_rate = 0.0
+    total_refine_grad_norm = 0.0
+    refine_residual_sum_abs = 0.0
+    refine_residual_sum_std = 0.0
+    refine_residual_max_abs = 0.0
+    refine_residual_calls = 0
     n_steps = 0
 
     clip_params = list(student_model.decoder.parameters())
-    labeled_iter_cycle = itertools.cycle(labeled_loader)
+    refine_params = (
+        list(student_model.decoder.boundary_refine_head.parameters())
+        if getattr(student_model.decoder, "boundary_refine", False)
+        else []
+    )
+
+    refine_hook = None
+    if diagnostics_enabled and refine_params:
+        def _capture_refine_output(module, inputs, output):
+            del module, inputs
+            nonlocal refine_residual_sum_abs
+            nonlocal refine_residual_sum_std
+            nonlocal refine_residual_max_abs
+            nonlocal refine_residual_calls
+            value = output.detach().float()
+            refine_residual_sum_abs += float(value.abs().mean())
+            refine_residual_sum_std += float(value.std(unbiased=False))
+            refine_residual_max_abs = max(
+                refine_residual_max_abs, float(value.abs().max())
+            )
+            refine_residual_calls += 1
+
+        refine_hook = student_model.decoder.boundary_refine_head.register_forward_hook(
+            _capture_refine_output
+        )
+
+    # 不使用 itertools.cycle：它会缓存第一轮已增强 batch，之后只重复旧张量。
+    # DataLoader 耗尽后重新创建 iterator，重新洗牌并重新采样数据集增强。
+    labeled_iter = iter(labeled_loader)
 
     for step_idx in range(num_steps):
-        labeled_batch = next(labeled_iter_cycle)
+        labeled_batch, labeled_iter = next_restarting_batch(
+            labeled_loader, labeled_iter
+        )
         images_labeled = labeled_batch["image"].to(device)
         targets_labeled = labeled_batch["target"].to(device)
         weights_labeled = labeled_batch["weight"].to(device)
@@ -558,13 +702,18 @@ def train_one_epoch(
 
         if use_amp:
             scaler.scale(total_loss).backward()
-            if grad_clip > 0:
+            if grad_clip > 0 or diagnostics_enabled:
                 scaler.unscale_(optimizer)
+            if diagnostics_enabled:
+                total_refine_grad_norm += gradient_l2_norm(refine_params)
+            if grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(clip_params, grad_clip)
             scaler.step(optimizer)
             scaler.update()
         else:
             total_loss.backward()
+            if diagnostics_enabled:
+                total_refine_grad_norm += gradient_l2_norm(refine_params)
             if grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(clip_params, grad_clip)
             optimizer.step()
@@ -594,7 +743,11 @@ def train_one_epoch(
                 f"unsup={unsup_loss.item():.4f} (s_c={seg_consist_val:.4f} b_c={boundary_consist_val:.4f})"
             )
 
+    if refine_hook is not None:
+        refine_hook.remove()
+
     n = max(n_steps, 1)
+    refine_n = max(refine_residual_calls, 1)
     return {
         "loss": total_loss_sum / n,
         "sup_loss": total_sup_loss / n,
@@ -607,6 +760,11 @@ def train_one_epoch(
         "bnd_pos_frac": total_bnd_pos / n,
         "bnd_gap": total_bnd_gap / n,
         "bnd_pred_rate": total_bnd_rate / n,
+        "optimizer_steps": n_steps,
+        "refine_grad_norm": total_refine_grad_norm / n,
+        "refine_residual_mean_abs": refine_residual_sum_abs / refine_n,
+        "refine_residual_std": refine_residual_sum_std / refine_n,
+        "refine_residual_max_abs": refine_residual_max_abs,
     }
 
 
@@ -815,6 +973,10 @@ def main():
     train_cfg = config["train"]
     semi_cfg = config.get("semi_supervised", {})
     lora_cfg = config.get("lora", {})
+
+    train_seed = int(train_cfg.get("seed", config.get("data", {}).get("seed", 42)))
+    deterministic = bool(train_cfg.get("deterministic", False))
+    seed_everything(train_seed, deterministic=deterministic)
 
     device = sam2_cfg["device"]
     if not torch.cuda.is_available() and device == "cuda":
@@ -1372,6 +1534,72 @@ def main():
             "(freeze_seg=True and boundary_teacher_mode != 'ema')"
         )
 
+    diagnostics_cfg = semi_cfg.get("diagnostics", {})
+    diagnostics_enabled = bool(diagnostics_cfg.get("enabled", False))
+    refine_named_parameters = [
+        (name, param)
+        for name, param in student_model.decoder.named_parameters()
+        if name.startswith("boundary_refine_head.")
+    ]
+    frozen_decoder_named_parameters = [
+        (name, param)
+        for name, param in student_model.decoder.named_parameters()
+        if not param.requires_grad
+    ]
+    frozen_lora_named_parameters = [
+        (name, param)
+        for name, param in student_model.encoder.trunk.named_parameters()
+        if ("lora_A" in name or "lora_B" in name) and not param.requires_grad
+    ]
+    if diagnostics_enabled:
+        initial_refine_state = snapshot_parameters(refine_named_parameters)
+        initial_frozen_decoder_state = snapshot_parameters(
+            frozen_decoder_named_parameters
+        )
+        initial_frozen_lora_state = snapshot_parameters(
+            frozen_lora_named_parameters
+        )
+        logger.info(
+            "Stage-0 diagnostics: ENABLED "
+            f"(refine={len(refine_named_parameters)} tensors, "
+            f"frozen_decoder={len(frozen_decoder_named_parameters)}, "
+            f"frozen_lora={len(frozen_lora_named_parameters)})"
+        )
+    else:
+        initial_refine_state = {}
+        initial_frozen_decoder_state = {}
+        initial_frozen_lora_state = {}
+
+    if diagnostics_enabled:
+        initial_val_metrics = validate(student_model, val_loader, criterion, device)
+        initial_composite = (
+            sem_w * initial_val_metrics["mean_iou"]
+            + bnd_w * initial_val_metrics["boundary_iou"]
+        )
+        initial_diagnostics = {
+            "optimizer_steps": 0,
+            "refine_out_weight_norm": float(
+                student_model.decoder.boundary_refine_head.out.weight
+                .detach().float().norm()
+            ),
+            "val_loss": initial_val_metrics["loss"],
+            "mIoU": initial_val_metrics["mean_iou"],
+            "boundary_iou": initial_val_metrics["boundary_iou"],
+            "mean_dice": initial_val_metrics["mean_dice"],
+            "composite": initial_composite,
+        }
+        initial_path = os.path.join(recorder.run_dir, "initial_diagnostics.json")
+        with open(initial_path, "w", encoding="utf-8") as f:
+            json.dump(initial_diagnostics, f, ensure_ascii=False, indent=2)
+        logger.info(
+            "Stage-0 initial validation: "
+            f"mIoU={initial_val_metrics['mean_iou']:.4f} "
+            f"Bnd IoU={initial_val_metrics['boundary_iou']:.4f} "
+            f"Composite={initial_composite:.4f}"
+        )
+        if bool(diagnostics_cfg.get("save_initial_monitor", True)):
+            monitor_inference(student_model, config, -1, device)
+
     logger.info("=" * 60)
     logger.info("Stage-2 Semi-Supervised Fine-tuning")
     logger.info(f"  Epochs: {total_epochs}")
@@ -1388,6 +1616,7 @@ def main():
     logger.info("=" * 60)
 
     unlabeled_samples_per_epoch = semi_cfg.get("unlabeled_samples_per_epoch", 0)
+    labeled_steps_per_epoch = int(semi_cfg.get("labeled_steps_per_epoch", 0))
     bs_unlabeled = semi_cfg.get("batch_size_unlabeled", 4)
     checkpoint_interval = semi_cfg.get("checkpoint_interval", 5)
 
@@ -1433,11 +1662,20 @@ def main():
                 num_unlabeled_steps = min(full_unlabeled_steps, max_unlabeled_steps)
             else:
                 num_unlabeled_steps = full_unlabeled_steps
-            num_steps = max(num_unlabeled_steps, len(labeled_loader))
             logger.info(f"  Unlabeled steps: {num_unlabeled_steps}/{full_unlabeled_steps}")
         else:
             unlabeled_iter = None
-            num_steps = len(labeled_loader)
+            num_unlabeled_steps = 0
+
+        num_steps = resolve_epoch_steps(
+            labeled_loader_length=len(labeled_loader),
+            unlabeled_steps=num_unlabeled_steps,
+            labeled_steps_per_epoch=labeled_steps_per_epoch,
+        )
+        logger.info(
+            f"  Supervised steps: {num_steps} "
+            f"(loader={len(labeled_loader)}, configured={labeled_steps_per_epoch or 'auto'})"
+        )
 
         # 计算 Stage-1 锚点权重（从 1.0 渐进衰减到 anchor_floor）
         anchor_alpha = 1.0
@@ -1515,9 +1753,40 @@ def main():
             rate_regularizer_weight=rate_regularizer_weight,
             rate_slack=rate_slack,
             sem_boundary_align_weight=sem_boundary_align_weight,
+            diagnostics_enabled=diagnostics_enabled,
         )
         val_metrics = validate(student_model, val_loader, criterion, device)
         scheduler.step()
+
+        refine_delta_l2 = 0.0
+        frozen_decoder_max_delta = 0.0
+        frozen_lora_max_delta = 0.0
+        refine_out_weight_norm = 0.0
+        refine_out_weight_max = 0.0
+        if diagnostics_enabled:
+            refine_delta_l2, _ = parameter_delta_stats(
+                refine_named_parameters, initial_refine_state
+            )
+            _, frozen_decoder_max_delta = parameter_delta_stats(
+                frozen_decoder_named_parameters, initial_frozen_decoder_state
+            )
+            _, frozen_lora_max_delta = parameter_delta_stats(
+                frozen_lora_named_parameters, initial_frozen_lora_state
+            )
+            refine_out = student_model.decoder.boundary_refine_head.out.weight
+            refine_out_weight_norm = float(refine_out.detach().float().norm())
+            refine_out_weight_max = float(refine_out.detach().abs().max())
+            logger.info(
+                "  Refine diagnostics: "
+                f"steps={train_metrics['optimizer_steps']} "
+                f"grad_l2={train_metrics['refine_grad_norm']:.3e} "
+                f"residual_abs={train_metrics['refine_residual_mean_abs']:.3e} "
+                f"residual_std={train_metrics['refine_residual_std']:.3e} "
+                f"out_norm={refine_out_weight_norm:.3e} "
+                f"delta_l2={refine_delta_l2:.3e} "
+                f"frozen_max_delta={frozen_decoder_max_delta:.3e} "
+                f"lora_max_delta={frozen_lora_max_delta:.3e}"
+            )
 
         # test 语义置信度监控（新日志参数）：无需 GT，统计概率分布
         # >0.8 高置信占比 / 0.4-0.6 模糊带占比
@@ -1607,6 +1876,16 @@ def main():
             "bnd_pos_frac": train_metrics["bnd_pos_frac"],
             "bnd_gap": train_metrics["bnd_gap"],
             "bnd_pred_rate": train_metrics["bnd_pred_rate"],
+            "optimizer_steps": train_metrics["optimizer_steps"],
+            "refine_grad_norm": train_metrics["refine_grad_norm"],
+            "refine_residual_mean_abs": train_metrics["refine_residual_mean_abs"],
+            "refine_residual_std": train_metrics["refine_residual_std"],
+            "refine_residual_max_abs": train_metrics["refine_residual_max_abs"],
+            "refine_out_weight_norm": refine_out_weight_norm,
+            "refine_out_weight_max": refine_out_weight_max,
+            "refine_delta_l2": refine_delta_l2,
+            "frozen_decoder_max_delta": frozen_decoder_max_delta,
+            "frozen_lora_max_delta": frozen_lora_max_delta,
             "val_loss": val_metrics["loss"],
             "mIoU": val_metrics["mean_iou"],
             "boundary_iou": val_metrics["boundary_iou"],

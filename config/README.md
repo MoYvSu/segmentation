@@ -24,3 +24,8 @@ refine residual，关闭中心头并保持原后处理不变。
 亮度、对比度、清晰度和偏色分为 `standard`/`weak` 两档。弱档只融合一张确定性增强视图并
 应用固定的小幅边界阈值偏移；不读取跨图统计，不按实例数、平均面积或环形拓扑闭环调参。
 所有推理配置均要求 `max_instance_id <= 255`。
+
+`train/stage2_refine_v6_stage0_control.yaml` 是物理增强消融之前的 E0 可学习性控制：
+固定 seed 42、每 epoch 62 个监督 step、共 5 epoch（310 次更新），关闭无标签流和
+物理增强，只训练零初始化 B2 refine。运行指标会额外记录 refine 梯度/残差/权重变化，
+并验证 coarse、语义与冻结 LoRA 的最大参数变化严格为 0。
