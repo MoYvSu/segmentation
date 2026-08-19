@@ -100,11 +100,12 @@ LoRA 自监督预训练仍可复用；新的 Stage 1 与 Stage 2 配置已分开
 ```bash
 python tools/pretrain_lora_ssl.py --config config/train/stage1_lora.yaml --epochs 30 --batch_size 8
 python train.py --config config/train/stage1_lora.yaml
-python train_stage2.py --config config/train/stage2_boundary_v6.yaml \
-    --phase boundary --tag <experiment-name>
+python train_stage2.py --config config/train/stage2_refine_v6.yaml \
+    --phase boundary --tag refine_v6_b2
 ```
 
-Stage 2 默认以 V6 checkpoint 为 `base_checkpoint`，冻结语义分支和 LoRA，仅更新边界路径。
+Stage 2 B2 以 V6 checkpoint 为 `base_checkpoint`，冻结语义分支和 LoRA；前 5 epoch
+只训练零初始化高分辨率 refine head，随后以低学习率解冻 V6 coarse boundary 基座。
 每次运行在 `outputs/runs/` 保存配置、环境和逐 epoch 指标；best 权重使用硬链接，避免重复占盘。
 恢复训练必须使用相同架构，代码会在加载 optimizer 前执行严格检查。
 

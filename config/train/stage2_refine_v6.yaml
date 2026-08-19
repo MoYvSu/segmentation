@@ -1,0 +1,71 @@
+# B2：在历史 V6 coarse boundary 上增加独立高分辨率 residual refine head。
+# 后处理保持 V6 边界分水岭 + 语义辅助方案不变；center head 完全关闭。
+_base: ../default_config.yaml
+
+decoder:
+  boundary_refine: true
+  boundary_refine_version: v2_fullres_isolated
+  center_head: false
+
+lora:
+  enabled: true
+  rank: 16
+  alpha: 32.0
+  freeze: true
+
+train:
+  boundary_alpha: 4.0
+  center_weight: 0.0
+
+inference:
+  output_dir: outputs/inference_refine_v6
+  stage2_checkpoint: outputs/stage2_refine_v6/best_model_stage2.pth
+  # 保持当前后处理机制，不在 B2 中引入额外变量。
+  boundary_threshold: 0.4
+  min_instance_area: 500
+  sem_edge_boost_alpha: 0.0
+  sem_edge_merge_weight: 0.0
+  bridge_width: 1
+  watershed_dilate_width: 1
+  center_seeds: false
+
+semi_supervised:
+  base_checkpoint: outputs/stage2_v6/best_model_stage2.pth
+  output_dir: outputs/stage2_refine_v6
+  init_from_checkpoint: ""
+  boundary_teacher_mode: stage1_direct
+  use_cached_pseudo_labels: true
+  pseudo_label_cache_dir: outputs/pseudo_labels/semantic_boundary
+  unsup_weight: 0.4
+  unsup_seg_weight: 0.0
+  unsup_seg_sharpen_temperature: 0.5
+  unsup_rampup_epochs: 10
+  epochs: 60
+  learning_rate: 5.0e-5
+  seg_lr_ratio: 0.3
+  boundary_lr_ratio: 1.0
+  lr_schedule: flat_decay
+  warmup_epochs: 5
+  warmup_start_factor: 0.01
+  flat_epochs: 50
+  decay_end_factor: 0.4
+  batch_size_labeled: 4
+  batch_size_unlabeled: 4
+  unlabeled_samples_per_epoch: 250
+  checkpoint_interval: 5
+  monitor:
+    image_dir: data/test
+    num_images: 10
+    output_dir: outputs/stage2_refine_v6/monitor
+  freeze:
+    seg_branch: true
+    boundary_branch: false
+  refine_training:
+    enabled: true
+    # epoch 1-5 只训练零初始化 refine；epoch 6 起低 LR 解冻 V6 边界基座。
+    refine_only_epochs: 5
+    refine_lr_ratio: 1.0
+    boundary_base_lr_ratio: 0.15
+
+progressive_aug:
+  enabled: true

@@ -109,6 +109,9 @@ def build_model(config, device):
         dropout=decoder_cfg["dropout"],
         use_bn=decoder_cfg["use_bn"],
         boundary_refine=decoder_cfg.get("boundary_refine", False),
+        boundary_refine_version=decoder_cfg.get(
+            "boundary_refine_version", "legacy_lowres"
+        ),
         center_head=decoder_cfg.get("center_head", False),
     )
 

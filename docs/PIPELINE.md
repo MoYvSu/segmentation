@@ -9,10 +9,10 @@
 Labelme polygon 生成一个种子，polygon 与物理晶粒并不等价；同时中心损失和边界损失共享
 `boundary_fpn`，实测造成背景雾化、铁素体大块欠分割、珠光体碎裂及薄环嵌套。
 
-下一轮架构实验应以 V6 权重为语义锚点，并满足：
+当前 B2 架构实验以 V6 权重为语义锚点，并满足：
 
 1. 语义路径冻结或低学习率保护；
-2. 边界路径独立训练，不接收不可靠中心标签的梯度；
+2. 边界 refine 路径独立训练，不接收不可靠中心标签的梯度；
 3. 若重试辅助任务，使用独立 FPN/stop-gradient，并先验证 GT 与物理实例的一致性；
 4. 后处理把高置信边界作为硬障碍，而不是仅改变分水岭可视化灰度。
 
@@ -27,8 +27,9 @@ python inference.py --config config/inference/v6_reference.yaml
 # Stage 1 全监督（LoRA 可训练）
 python train.py --config config/train/stage1_lora.yaml
 
-# Stage 2 边界主线；V6 作为冻结语义锚点
-python train_stage2.py --config config/train/stage2_boundary_v6.yaml --phase boundary --tag <name>
+# Stage 2 B2；V6 作为冻结语义锚点，落地独立高分辨率 refine head
+python train_stage2.py --config config/train/stage2_refine_v6.yaml \
+  --phase boundary --tag refine_v6_b2
 ```
 
 推理常用参数可直接从 CLI 覆盖，不再复制临时 YAML：
