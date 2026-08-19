@@ -115,6 +115,35 @@ inference:
   # 把"双脊"边界合成一条带，骨架取中轴 -> 平滑单线（治重影/粗糙骨架）
   # 推理 TTA（hflip/vflip/rot180 平均），提升弱边界召回与稳定性
   tta: false
+  # 单图质量感知推理（固定规则、无参数更新、无跨测试集统计）。默认关闭；
+  # 实验配置只在 standard/weak 两档间选择，不以实例数或平均面积为目标。
+  quality_aware:
+    enabled: false
+    weak_min_flags: 2
+    thresholds:
+      brightness_low: 0.58
+      contrast_low: 0.14
+      sharpness_low: 0.02
+      sharpness_critical: 0.008
+      color_cast_high: 0.04
+    enhanced_weight: 0.35
+    enhanced_tta: false
+    boundary_threshold_offsets:
+      standard: 0.0
+      weak: -0.02
+    boundary_threshold_limits: [0.25, 0.50]
+    enhance:
+      white_balance: true
+      white_balance_gain_limit: 0.12
+      gamma: true
+      target_brightness: 0.65
+      gamma_min: 0.75
+      gamma_max: 1.25
+      clahe: true
+      clahe_clip: 1.5
+      unsharp: true
+      unsharp_sigma: 1.0
+      unsharp_amount: 0.35
   watershed_dilate_width: 1
   bridge_width: 1             # 骨架化前膨胀（桥接双线成单线）
   checkpoint_stage: "stage2"

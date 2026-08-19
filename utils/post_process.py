@@ -88,6 +88,11 @@ def boundary_watershed_separation(
     6. 每个实例区域语义投票 -> 晶粒类别
     7. 面积过滤 + ID 分配
     """
+    max_instance_id = int(max_instance_id)
+    if not 1 <= max_instance_id <= 255:
+        raise ValueError(
+            f"max_instance_id must be within [1, 255], got {max_instance_id}"
+        )
     h, w = semantic_mask.shape[:2]
 
     # Step 1: 骨架化边界（可选先膨胀桥接"双峰/双线"输出：
@@ -99,13 +104,16 @@ def boundary_watershed_separation(
             cv2.MORPH_ELLIPSE, (2 * bridge_width + 1, 2 * bridge_width + 1)
         )
         boundary_binary = cv2.dilate(boundary_binary, k)
-    try:
-        skeleton = cv2.ximgproc.thinning(
-            boundary_binary, thinningType=cv2.ximgproc.THINNING_ZHANGSUEN
-        )
-    except (AttributeError, cv2.error):
-        from skimage.morphology import skeletonize as sk_skeletonize
-        skeleton = (sk_skeletonize(boundary_binary > 0) * 255).astype(np.uint8)
+    if not np.any(boundary_binary):
+        skeleton = boundary_binary
+    else:
+        try:
+            skeleton = cv2.ximgproc.thinning(
+                boundary_binary, thinningType=cv2.ximgproc.THINNING_ZHANGSUEN
+            )
+        except (AttributeError, cv2.error):
+            from skimage.morphology import skeletonize as sk_skeletonize
+            skeleton = (sk_skeletonize(boundary_binary > 0) * 255).astype(np.uint8)
 
     # Step 2: 膨胀骨架带
     if dilate_width > 0:
@@ -167,19 +175,42 @@ def boundary_watershed_separation(
         cls = CLASS_FERRITE if ferrite_ratio > 0.5 else CLASS_PEARLITE
         instances.append((area, cls, inst_mask))
 
-    # Step 7: 按面积降序分配 ID
+    # Step 7: 按面积降序分配 ID。若候选超过 8-bit 提交格式上限，
+    # 保留最大的 max_instance_id-1 个，剩余区域统一写入最后一个 ID。
+    # 最后一个 ID 的类别由全部溢出像素重新投票，避免历史逻辑中类别被
+    # 最后一个小碎片覆盖。这里不以目标实例数或平均面积反向调节分割参数。
     instances.sort(key=lambda x: x[0], reverse=True)
     inst_map = np.zeros((h, w), dtype=np.uint8)
     class_map = {}
-    current_id = 1
-    for area, cls, inst_mask in instances:
-        if current_id > max_instance_id:
-            current_id = max_instance_id
-        inst_map[inst_mask] = current_id
-        class_map[current_id] = int(cls)
-        if current_id < max_instance_id:
-            current_id += 1
+    if len(instances) <= max_instance_id:
+        for current_id, (_, cls, inst_mask) in enumerate(instances, start=1):
+            inst_map[inst_mask] = current_id
+            class_map[current_id] = int(cls)
+    else:
+        keep_count = max_instance_id - 1
+        for current_id, (_, cls, inst_mask) in enumerate(
+            instances[:keep_count], start=1
+        ):
+            inst_map[inst_mask] = current_id
+            class_map[current_id] = int(cls)
 
+        overflow_mask = np.zeros((h, w), dtype=bool)
+        for _, _, inst_mask in instances[keep_count:]:
+            overflow_mask |= inst_mask
+        overflow_area = int(overflow_mask.sum())
+        if overflow_area > 0:
+            overflow_ferrite = int((semantic_mask[overflow_mask] > 0).sum())
+            inst_map[overflow_mask] = max_instance_id
+            class_map[max_instance_id] = int(
+                CLASS_FERRITE
+                if overflow_ferrite / overflow_area > 0.5
+                else CLASS_PEARLITE
+            )
+
+    if int(inst_map.max()) > max_instance_id or len(class_map) > max_instance_id:
+        raise RuntimeError(
+            "Internal error: watershed output exceeded the configured instance cap"
+        )
     return inst_map, class_map
 
 

@@ -1,0 +1,61 @@
+# B2-PhysAug：先验证 refine head + 物理显微成像增强的纯监督收益。
+# 单变量约束：V6 coarse boundary 全程冻结，不使用无标签一致性，不改变损失。
+_base: stage2_refine_v6.yaml
+
+inference:
+  output_dir: outputs/inference_refine_v6_physaug
+  stage2_checkpoint: outputs/stage2_refine_v6_physaug/best_model_stage2.pth
+
+semi_supervised:
+  output_dir: outputs/stage2_refine_v6_physaug
+  use_unlabeled: false
+  use_cached_pseudo_labels: false
+  boundary_teacher_mode: self_consistency
+  unsup_weight: 0.0
+  unsup_seg_weight: 0.0
+  epochs: 5
+  learning_rate: 1.0e-5
+  warmup_epochs: 0
+  flat_epochs: 5
+  checkpoint_interval: 1
+  boundary_anchor:
+    enabled: false
+  monitor:
+    # 只使用允许训练数据做可视化；best 仍仅由固定 val split 指标选择。
+    image_dir: data/raw
+    num_images: 10
+    output_dir: outputs/stage2_refine_v6_physaug/monitor
+  refine_training:
+    enabled: true
+    # 总 epoch 与 refine-only 相同，coarse base 在本实验中永不解冻。
+    refine_only_epochs: 5
+    refine_lr_ratio: 1.0
+    boundary_base_lr_ratio: 0.15
+
+progressive_aug:
+  enabled: true
+  policy: physical_v1
+  start_epoch: 0
+  ramp_epochs: 2
+  max_prob: 0.60
+  min_ops: 1
+  max_ops: 2
+  op_weights:
+    gamma: 1.0
+    white_balance: 0.7
+    gaussian_blur: 1.2
+    downsample: 1.0
+    illumination: 0.8
+    scratch: 0.35
+    noise: 0.0
+  gamma_range: [0.75, 1.35]
+  white_balance_range: [0.92, 1.08]
+  blur_sigma_range: [0.3, 2.0]
+  blur_kernel_size: 9
+  downsample_scale_range: [0.50, 0.95]
+  illumination_strength: 0.15
+  illumination_grid: 3
+  scratch_count_range: [1, 3]
+  scratch_width_range: [0.6, 1.8]
+  scratch_opacity_range: [0.02, 0.10]
+  gaussian_noise_std: 0.0
