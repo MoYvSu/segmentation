@@ -201,6 +201,9 @@ def build_model(config, device):
         dropout=decoder_cfg["dropout"],
         use_bn=decoder_cfg["use_bn"],
         boundary_refine=decoder_cfg.get("boundary_refine", False),
+        boundary_refine_version=decoder_cfg.get(
+            "boundary_refine_version", "legacy_lowres"
+        ),
         center_head=decoder_cfg.get("center_head", False),
     )
 
@@ -904,6 +907,30 @@ def main():
     if not freeze_seg and not freeze_boundary:
         logger.info("Freeze: DISABLED (joint training, both branches active)")
 
+    # B2 staged refine：先只训练零初始化的高分辨率 residual head，随后再以
+    # 较低学习率解冻 V6 coarse boundary 基座。语义分支与 LoRA 由各自的
+    # freeze 配置保护，center head 必须关闭，确保这是单变量架构实验。
+    refine_training_cfg = semi_cfg.get("refine_training", {})
+    refine_training_enabled = bool(refine_training_cfg.get("enabled", False))
+    refine_only_epochs = int(refine_training_cfg.get("refine_only_epochs", 0))
+    if refine_training_enabled:
+        if not student_model.decoder.boundary_refine:
+            raise ValueError(
+                "refine_training.enabled=True requires decoder.boundary_refine=True"
+            )
+        if student_model.decoder.center_head_enabled:
+            raise ValueError("B2 refine training requires decoder.center_head=False")
+        if freeze_boundary:
+            raise ValueError(
+                "B2 refine training requires freeze.boundary_branch=False; "
+                "the coarse base is staged by refine_training.refine_only_epochs"
+            )
+        student_model.decoder.set_boundary_base_trainable(refine_only_epochs <= 0)
+        logger.info(
+            "B2 refine training: ENABLED "
+            f"(refine_only_epochs={refine_only_epochs})"
+        )
+
     # 边界伪标签源模式配置
     boundary_teacher_mode = semi_cfg.get("boundary_teacher_mode", "ema")
     logger.info(f"Boundary teacher mode: {boundary_teacher_mode}")
@@ -939,24 +966,36 @@ def main():
     base_lr = semi_cfg.get("learning_rate", train_cfg["learning_rate"])
     seg_lr_ratio = semi_cfg.get("seg_lr_ratio", 0.1)
     boundary_lr_ratio = semi_cfg.get("boundary_lr_ratio", 0.1)
+    boundary_base_lr_ratio = refine_training_cfg.get(
+        "boundary_base_lr_ratio", boundary_lr_ratio
+    )
+    refine_lr_ratio = refine_training_cfg.get("refine_lr_ratio", boundary_lr_ratio)
     seg_lr = base_lr * seg_lr_ratio
-    boundary_lr = base_lr * boundary_lr_ratio
+    boundary_lr = base_lr * boundary_base_lr_ratio
+    refine_lr = base_lr * refine_lr_ratio
 
     seg_params = []
     boundary_params = []
+    refine_params = []
     for name, param in student_model.decoder.named_parameters():
-        if not param.requires_grad:
-            continue
         if "seg_fpn" in name or "seg_branch" in name:
-            seg_params.append(param)
+            if param.requires_grad:
+                seg_params.append(param)
+        elif "boundary_refine_head" in name:
+            if param.requires_grad:
+                refine_params.append(param)
         elif (
             "boundary_fpn" in name
             or "boundary_branch" in name
             or "center_branch" in name
         ):
-            boundary_params.append(param)
+            # B2 refine-only 阶段的 base 参数暂时 requires_grad=False，但必须
+            # 预先进入 optimizer，后续 epoch 解冻时才能直接开始更新。
+            if param.requires_grad or refine_training_enabled:
+                boundary_params.append(param)
         else:
-            seg_params.append(param)
+            if param.requires_grad:
+                seg_params.append(param)
 
     # LoRA 参数组（trunk 中仅 lora_A/lora_B 可训练）
     lora_params = []
@@ -974,11 +1013,20 @@ def main():
     # 构建优化器参数组列表（跳过空组，冻结分支的参数已被排除）
     param_groups = []
     if len(seg_params) > 0:
-        param_groups.append({"params": seg_params, "lr": seg_lr})
+        param_groups.append({"params": seg_params, "lr": seg_lr, "name": "semantic"})
     if len(boundary_params) > 0:
-        param_groups.append({"params": boundary_params, "lr": boundary_lr})
+        param_groups.append({
+            "params": boundary_params, "lr": boundary_lr, "name": "boundary_base"
+        })
+    if len(refine_params) > 0:
+        param_groups.append({
+            "params": refine_params, "lr": refine_lr, "name": "boundary_refine"
+        })
     if len(lora_params) > 0:
-        param_groups.append({"params": lora_params, "lr": lora_lr})
+        param_groups.append({"params": lora_params, "lr": lora_lr, "name": "lora"})
+
+    if not param_groups:
+        raise RuntimeError("No trainable parameter groups were configured")
 
     optimizer = torch.optim.AdamW(
         param_groups,
@@ -986,10 +1034,13 @@ def main():
         weight_decay=train_cfg["weight_decay"],
         eps=1e-4,
     )
-    logger.info(f"Layered optimizer (dual FPN): "
-                f"Seg lr={seg_lr:.2e} ({len(seg_params)} params), "
-                f"Boundary lr={boundary_lr:.2e} ({len(boundary_params)} params), "
-                f"LoRA lr={lora_lr:.2e} ({len(lora_params)} params, ratio={lora_lr_ratio})")
+    logger.info(
+        "Layered optimizer (dual FPN): "
+        f"Seg lr={seg_lr:.2e} ({len(seg_params)} tensors), "
+        f"Boundary base lr={boundary_lr:.2e} ({len(boundary_params)} tensors), "
+        f"Refine lr={refine_lr:.2e} ({len(refine_params)} tensors), "
+        f"LoRA lr={lora_lr:.2e} ({len(lora_params)} tensors, ratio={lora_lr_ratio})"
+    )
 
     # 记录每个参数组创建时的峰值 LR（LambdaLR 会原地改写 group['lr']，
     # 必须在调度器第一次 step 前保存，供自适应 EMA ratio 计算使用）
@@ -1341,6 +1392,20 @@ def main():
         epoch_start = time.time()
         logger.info(f"\nEpoch {epoch + 1}/{total_epochs}")
 
+        refine_stage = "disabled"
+        if refine_training_enabled:
+            boundary_base_trainable = epoch >= refine_only_epochs
+            refine_stage = (
+                "refine_plus_boundary_base"
+                if boundary_base_trainable
+                else "refine_only"
+            )
+            if epoch == start_epoch or epoch == refine_only_epochs:
+                student_model.decoder.set_boundary_base_trainable(
+                    boundary_base_trainable
+                )
+                logger.info(f"  B2 stage: {refine_stage}")
+
         # 骨架过滤阈值逐步提高：早段低阈值保 recall，晚段高阈值剔除
         # 伪标签噪声分支（治"雾状背景先被抑制后又复现"）
         if skeleton_filter_cfg.get("enabled", False) and sk_th_ramp > 0:
@@ -1517,8 +1582,15 @@ def main():
                 )
 
         # 逐 epoch 指标落盘（与配置快照同目录，便于复现/对比）
+        lr_by_group = {
+            group.get("name", f"group_{idx}"): group["lr"]
+            for idx, group in enumerate(optimizer.param_groups)
+        }
         recorder.append_metrics({
             "epoch": epoch + 1,
+            "refine_stage": refine_stage,
+            "lr_boundary_base": lr_by_group.get("boundary_base", 0.0),
+            "lr_boundary_refine": lr_by_group.get("boundary_refine", 0.0),
             "train_loss": train_metrics["loss"],
             "sup_loss": train_metrics["sup_loss"],
             "unsup_loss": train_metrics["unsup_loss"],

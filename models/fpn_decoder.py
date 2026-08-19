@@ -240,6 +240,7 @@ class FPNDecoder(nn.Module):
         dropout: float = 0.1,
         use_bn: bool = True,
         boundary_refine: bool = False,
+        boundary_refine_version: str = "legacy_lowres",
         center_head: bool = False,
     ):
         """
@@ -252,6 +253,8 @@ class FPNDecoder(nn.Module):
             use_bn: 是否使用归一化层（True=GroupNorm, False=Identity）。
             boundary_refine: 启用高分辨率边界细化头（256->1024 + 原图引导）。
                 边界通道原生输出 1024，语义保持 256 上采样。
+            boundary_refine_version: ``legacy_lowres`` 保持旧 checkpoint 行为；
+                ``v2_fullres_isolated`` 使用原始分辨率图像并切断语义梯度。
             center_head: 增加轻量中心热图头，复用 boundary FPN。
         """
         super().__init__()
@@ -305,6 +308,13 @@ class FPNDecoder(nn.Module):
             nn.Conv2d(half_channels, 1, kernel_size=1, bias=True),
         )
         self.boundary_refine = boundary_refine
+        valid_refine_versions = {"legacy_lowres", "v2_fullres_isolated"}
+        if boundary_refine_version not in valid_refine_versions:
+            raise ValueError(
+                f"Unsupported boundary_refine_version={boundary_refine_version!r}; "
+                f"expected one of {sorted(valid_refine_versions)}"
+            )
+        self.boundary_refine_version = boundary_refine_version
         self.center_head_enabled = bool(center_head)
         self.center_branch = None
         if self.center_head_enabled:
@@ -371,11 +381,22 @@ class FPNDecoder(nn.Module):
             # 高分辨率边界细化头：原生输出 1024
             if image is None:
                 raise ValueError("boundary_refine=True 时 forward 需传入 image")
-            image_low = F.interpolate(
-                image, size=seg_feat.shape[-2:], mode="bilinear", align_corners=True
-            )
+            if self.boundary_refine_version == "v2_fullres_isolated":
+                # B2：直接传入原始分辨率图像。旧实现先降到 FPN 分辨率再
+                # 重新放大，使 512/1024 两级 image stem 看不到高频细节。
+                # semantic logits 仅作为只读门控上下文。
+                refine_image = image
+                refine_semantic = seg_logits.detach()
+            else:
+                # 保留旧 center/refine checkpoint 的历史行为，避免同一权重
+                # 在代码升级后静默改变推理语义。
+                refine_image = F.interpolate(
+                    image, size=seg_feat.shape[-2:],
+                    mode="bilinear", align_corners=True,
+                )
+                refine_semantic = seg_logits
             refine_logits = self.boundary_refine_head(
-                boundary_feat, image_low, semantic_logits=seg_logits
+                boundary_feat, refine_image, semantic_logits=refine_semantic
             )
             coarse_boundary_logits = F.interpolate(
                 coarse_boundary_logits, size=refine_logits.shape[-2:],
@@ -452,6 +473,24 @@ class FPNDecoder(nn.Module):
             f"{sum(p.numel() for p in self.boundary_fpn.parameters()) + sum(p.numel() for p in self.boundary_branch.parameters())} params)"
         )
         print(logger_freeze_info)
+
+    def set_boundary_base_trainable(self, trainable: bool):
+        """切换 V6 coarse boundary 基座，保持 refine head 状态不变。
+
+        B2 训练前段只更新 ``boundary_refine_head``；稳定后再以较低学习率
+        解冻 ``boundary_fpn + boundary_branch``。该接口不会触碰语义分支、
+        center head 或 refine head，避免多任务梯度重新污染 V6 表征。
+        """
+        for module in (self.boundary_fpn, self.boundary_branch):
+            for param in module.parameters():
+                param.requires_grad_(trainable)
+        state = "TRAINABLE" if trainable else "FROZEN"
+        count = sum(
+            param.numel()
+            for module in (self.boundary_fpn, self.boundary_branch)
+            for param in module.parameters()
+        )
+        print(f"Boundary base {state} (boundary_fpn + boundary_branch, {count} params)")
 
     def reset_boundary_branch(self):
         """重新初始化边界路径，保留语义路径和 encoder 权重。"""

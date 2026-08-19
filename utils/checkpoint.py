@@ -15,13 +15,18 @@ def architecture_from_config(config: Dict[str, Any]) -> Dict[str, Any]:
     decoder = config.get("decoder", {})
     lora = config.get("lora", {})
     sam2 = config.get("sam2", {})
+    boundary_refine = bool(decoder.get("boundary_refine", False))
     return {
         "model": "SegmentationModel",
         "encoder": sam2.get("model_version", "sam2_hiera_base_plus"),
         "decoder": "FPNDecoder",
         "fpn_channels": int(decoder.get("fpn_channels", 256)),
         "num_classes": int(decoder.get("num_classes", 2)),
-        "boundary_refine": bool(decoder.get("boundary_refine", False)),
+        "boundary_refine": boundary_refine,
+        "boundary_refine_version": (
+            decoder.get("boundary_refine_version", "legacy_lowres")
+            if boundary_refine else "none"
+        ),
         "center_head": bool(decoder.get("center_head", False)),
         "lora_enabled": bool(lora.get("enabled", False)),
         "lora_rank": int(lora.get("rank", 0)) if lora.get("enabled", False) else 0,
@@ -75,7 +80,7 @@ def architecture_mismatches(
     expected: Dict[str, Any], actual: Dict[str, Any],
     fields: Iterable[str] = (
         "encoder", "decoder", "fpn_channels", "num_classes", "boundary_refine",
-        "center_head", "lora_enabled", "lora_rank",
+        "boundary_refine_version", "center_head", "lora_enabled", "lora_rank",
     ),
 ) -> Dict[str, tuple[Any, Any]]:
     mismatches = {}

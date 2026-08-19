@@ -2,6 +2,7 @@
 """Print compact checkpoint provenance and architecture without building SAM2."""
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -15,6 +16,17 @@ if PROJECT_ROOT not in sys.path:
 from utils.checkpoint import checkpoint_architecture
 
 
+def sha256_file(path, chunk_size=8 * 1024 * 1024):
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("checkpoints", nargs="+")
@@ -25,6 +37,7 @@ def main():
         info = {
             "path": os.path.abspath(path),
             "size_mb": round(os.path.getsize(path) / 1024 ** 2, 2),
+            "sha256": sha256_file(path),
             "format_version": checkpoint.get("format_version", 1),
             "epoch": checkpoint.get("epoch"),
             "best_composite_score": checkpoint.get(

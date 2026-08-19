@@ -11,3 +11,6 @@
 
 推理会严格比较配置和 checkpoint 的 `boundary_refine`、`center_head`、LoRA 等架构字段。
 只有明确进行消融时才使用 `--allow-architecture-mismatch`。
+
+当前 B2 主线使用 `train/stage2_refine_v6.yaml`：从 V6 best 初始化，只增加独立高分辨率
+refine residual，关闭中心头并保持原后处理不变。
