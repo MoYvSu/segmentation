@@ -1,0 +1,25 @@
+# Appearance-diverse unlabeled holdout; excluded from GDA/semi-supervised training.
+train_024.jpg
+train_032.jpg
+train_113.jpg
+train_162.jpg
+train_268.jpg
+train_281.jpg
+train_326.jpg
+train_441.jpg
+train_459.jpg
+train_469.jpg
+train_489.jpg
+train_492.jpg
+train_510.jpg
+train_529.jpg
+train_595.jpg
+train_599.jpg
+train_669.jpg
+train_672.jpg
+train_679.jpg
+train_770.jpg
+train_798.jpg
+train_806.jpg
+train_838.jpg
+train_931.jpg
