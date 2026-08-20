@@ -16,6 +16,7 @@ from train_stage2 import (
     validate,
 )
 from utils.config import load_config
+from utils.loss import BoundaryLoss
 
 
 class _CountingDataset(Dataset):
@@ -202,6 +203,48 @@ class Stage0TrainingControlTest(unittest.TestCase):
         self.assertEqual(refine["boundary_base_lr_ratio"], 0.05)
         self.assertTrue(config["progressive_aug"]["enabled"])
         self.assertFalse(semi["use_unlabeled"])
+
+    def test_e3_ridge10_config_invariants(self):
+        config = load_config("config/train/stage2_refine_v6_e3_ridge10.yaml")
+        semi = config["semi_supervised"]
+        refine = semi["refine_training"]
+        train = config["train"]
+        self.assertEqual(semi["epochs"], 10)
+        self.assertEqual(semi["learning_rate"], 5.0e-6)
+        self.assertEqual(
+            semi["init_from_checkpoint"],
+            "outputs/stage2_refine_v6_e1_physaug15/best_model_stage2.pth",
+        )
+        self.assertEqual(refine["refine_only_epochs"], 10)
+        self.assertEqual(train["boundary_ridge_weight"], 0.05)
+        self.assertEqual(train["boundary_ridge_tolerance"], 1)
+        self.assertEqual(train["boundary_ridge_ring_radius"], 5)
+        self.assertTrue(config["progressive_aug"]["enabled"])
+        self.assertFalse(semi["use_unlabeled"])
+
+    def test_boundary_ridge_loss_prefers_thin_complete_ridge(self):
+        criterion = BoundaryLoss(
+            ridge_weight=1.0,
+            ridge_positive_logit=1.0,
+            ridge_negative_logit=-1.5,
+            ridge_tolerance=1,
+            ridge_ring_radius=2,
+        )
+        target = torch.zeros(1, 9, 9)
+        target[:, 4, 1:8] = 1.0
+
+        narrow = torch.full_like(target, -3.0)
+        narrow[:, 4, 1:8] = 2.0
+        diffuse = torch.full_like(target, -3.0)
+        diffuse[:, 2:7, 1:8] = 2.0
+        broken = torch.full_like(target, -3.0)
+        broken[:, 4, 4] = 2.0
+
+        narrow_loss = criterion.boundary_ridge_loss(narrow, target)
+        diffuse_loss = criterion.boundary_ridge_loss(diffuse, target)
+        broken_loss = criterion.boundary_ridge_loss(broken, target)
+        self.assertLess(float(narrow_loss), float(diffuse_loss))
+        self.assertLess(float(narrow_loss), float(broken_loss))
 
     def test_validation_reports_boundary_haze_metrics(self):
         target = torch.tensor(

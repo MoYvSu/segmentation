@@ -1150,10 +1150,34 @@ def main():
         peak_logit=train_cfg.get("boundary_peak_logit", 2.0),
         hard_negative_weight=train_cfg.get("boundary_hard_negative_weight", 0.0),
         hard_negative_logit=train_cfg.get("boundary_hard_negative_logit", -1.5),
+        ridge_weight=train_cfg.get("boundary_ridge_weight", 0.0),
+        ridge_positive_logit=train_cfg.get("boundary_ridge_positive_logit", 1.0),
+        ridge_negative_logit=train_cfg.get("boundary_ridge_negative_logit", -1.5),
+        ridge_core_threshold=train_cfg.get("boundary_ridge_core_threshold", 0.5),
+        ridge_background_threshold=train_cfg.get(
+            "boundary_ridge_background_threshold", 0.05
+        ),
+        ridge_tolerance=train_cfg.get("boundary_ridge_tolerance", 1),
+        ridge_ring_radius=train_cfg.get("boundary_ridge_ring_radius", 5),
+        ridge_ring_weight=train_cfg.get("boundary_ridge_ring_weight", 1.0),
         center_weight=train_cfg.get("center_weight", 0.0),
         center_gamma=train_cfg.get("center_gamma", 2.0),
     ).to(device)
-    logger.info("Supervised loss: BoundaryLoss (semantic BCE + boundary Focal x EDT + peak/hard-negative)")
+    logger.info(
+        "Supervised loss: BoundaryLoss "
+        "(semantic BCE + boundary Focal x EDT + peak/hard-negative/ridge)"
+    )
+    if criterion.ridge_weight > 0:
+        logger.info(
+            "  Boundary ridge: weight=%.4f, peak_logit=%.2f, "
+            "ring_logit=%.2f, tolerance=%dpx, ring_radius=%dpx, ring_weight=%.2f",
+            criterion.ridge_weight,
+            criterion.ridge_positive_logit,
+            criterion.ridge_negative_logit,
+            criterion.ridge_tolerance,
+            criterion.ridge_ring_radius,
+            criterion.ridge_ring_weight,
+        )
 
     # 分层参数优化器：语义分支和边界分支各自独立学习率（方案 B - 三分组）
     base_lr = semi_cfg.get("learning_rate", train_cfg["learning_rate"])
