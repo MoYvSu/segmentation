@@ -1,0 +1,40 @@
+# E3 Ridge-10：回到 E1 best，不采用 E2 coarse 解冻。
+# 保持 E1 物理增强，仅新增局部边界脊线损失，严格冻结 coarse/semantic/LoRA。
+_base: stage2_refine_v6_e1_physaug15.yaml
+
+inference:
+  output_dir: outputs/inference_refine_v6_e3_ridge10
+  stage2_checkpoint: outputs/stage2_refine_v6_e3_ridge10/best_model_stage2.pth
+
+train:
+  boundary_ridge_weight: 0.05
+  boundary_ridge_positive_logit: 1.0
+  boundary_ridge_negative_logit: -1.5
+  boundary_ridge_core_threshold: 0.5
+  boundary_ridge_background_threshold: 0.05
+  boundary_ridge_tolerance: 1
+  boundary_ridge_ring_radius: 5
+  boundary_ridge_ring_weight: 1.0
+
+semi_supervised:
+  output_dir: outputs/stage2_refine_v6_e3_ridge10
+  init_from_checkpoint: outputs/stage2_refine_v6_e1_physaug15/best_model_stage2.pth
+  epochs: 10
+  learning_rate: 5.0e-6
+  warmup_epochs: 0
+  flat_epochs: 6
+  decay_end_factor: 0.25
+  labeled_steps_per_epoch: 62
+  checkpoint_interval: 5
+  monitor:
+    image_dir: data/raw
+    num_images: 10
+    output_dir: outputs/stage2_refine_v6_e3_ridge10/monitor
+  refine_training:
+    enabled: true
+    refine_only_epochs: 10
+    refine_lr_ratio: 1.0
+    boundary_base_lr_ratio: 0.05
+  diagnostics:
+    enabled: true
+    save_initial_monitor: true

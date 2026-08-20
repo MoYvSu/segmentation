@@ -51,6 +51,14 @@ class BoundaryLoss(nn.Module):
         peak_logit: float = 2.0,
         hard_negative_weight: float = 0.0,
         hard_negative_logit: float = -1.5,
+        ridge_weight: float = 0.0,
+        ridge_positive_logit: float = 1.0,
+        ridge_negative_logit: float = -1.5,
+        ridge_core_threshold: float = 0.5,
+        ridge_background_threshold: float = 0.05,
+        ridge_tolerance: int = 1,
+        ridge_ring_radius: int = 5,
+        ridge_ring_weight: float = 1.0,
         center_weight: float = 1.0,
         center_gamma: float = 2.0,
     ):
@@ -68,6 +76,14 @@ class BoundaryLoss(nn.Module):
             peak_logit: 正边界期望达到的最小 logit（2.0≈0.88 概率）。
             hard_negative_weight: 对负样本高响应区域的抑制权重。
             hard_negative_logit: 负样本 logit 超过该值时开始抑制。
+            ridge_weight: 局部边界脊线约束权重。
+            ridge_positive_logit: GT 核心附近的局部峰值最小 logit。
+            ridge_negative_logit: GT 外环背景允许的最大 logit。
+            ridge_core_threshold: 软边界中视为高质量核心的阈值。
+            ridge_background_threshold: 软边界中视为背景的阈值。
+            ridge_tolerance: 核心峰值允许的像素定位误差。
+            ridge_ring_radius: 在 GT 核心外构造背景抑制环的半径。
+            ridge_ring_weight: 外环背景项相对于核心命中项的权重。
             center_weight: 中心热图损失权重；仅在 pred/target 存在第 3 通道时生效。
             center_gamma: 中心热图 focal BCE 的聚焦参数。
         """
@@ -85,8 +101,57 @@ class BoundaryLoss(nn.Module):
         self.peak_logit = peak_logit
         self.hard_negative_weight = hard_negative_weight
         self.hard_negative_logit = hard_negative_logit
+        self.ridge_weight = ridge_weight
+        self.ridge_positive_logit = ridge_positive_logit
+        self.ridge_negative_logit = ridge_negative_logit
+        self.ridge_core_threshold = ridge_core_threshold
+        self.ridge_background_threshold = ridge_background_threshold
+        self.ridge_tolerance = int(ridge_tolerance)
+        self.ridge_ring_radius = int(ridge_ring_radius)
+        self.ridge_ring_weight = ridge_ring_weight
         self.center_weight = center_weight
         self.center_gamma = center_gamma
+
+        if self.ridge_tolerance < 0 or self.ridge_ring_radius < 0:
+            raise ValueError("ridge tolerance and ring radius must be non-negative")
+
+    def boundary_ridge_loss(self, boundary_logits, boundary_target):
+        """Favor a confident, narrow ridge near GT without demanding exact pixels.
+
+        Polygon-derived targets can be slightly displaced or doubled.  The positive
+        term therefore asks for one local peak inside a small tolerance window,
+        while the ring term suppresses elevated responses in the nearby true
+        background.  Together they distinguish a useful thin ridge from diffuse
+        haze without globally driving every negative pixel down.
+        """
+        target = boundary_target.detach().clamp(0.0, 1.0)
+        core_mask = (target >= self.ridge_core_threshold).to(boundary_logits.dtype)
+        core_mass = core_mask * target.pow(2)
+
+        tolerance_kernel = 2 * self.ridge_tolerance + 1
+        local_peak = F.max_pool2d(
+            boundary_logits.unsqueeze(1),
+            kernel_size=tolerance_kernel,
+            stride=1,
+            padding=self.ridge_tolerance,
+        ).squeeze(1)
+        missed_core = F.relu(self.ridge_positive_logit - local_peak).pow(2)
+        core_loss = (missed_core * core_mass).sum() / core_mass.sum().clamp_min(1.0)
+
+        ring_kernel = 2 * self.ridge_ring_radius + 1
+        dilated_core = F.max_pool2d(
+            core_mask.unsqueeze(1),
+            kernel_size=ring_kernel,
+            stride=1,
+            padding=self.ridge_ring_radius,
+        ).squeeze(1)
+        ring_mask = (
+            (dilated_core > 0)
+            & (target <= self.ridge_background_threshold)
+        ).to(boundary_logits.dtype)
+        raised_ring = F.relu(boundary_logits - self.ridge_negative_logit).pow(2)
+        ring_loss = (raised_ring * ring_mask).sum() / ring_mask.sum().clamp_min(1.0)
+        return core_loss + self.ridge_ring_weight * ring_loss
 
     def forward(self, pred, target, weight=None):
         """
@@ -183,6 +248,11 @@ class BoundaryLoss(nn.Module):
                 hard_negative_loss = (hard_negative * negative_mass).sum() / negative_den
                 loss_boundary = loss_boundary + (
                     self.hard_negative_weight * hard_negative_loss
+                )
+
+            if self.ridge_weight > 0:
+                loss_boundary = loss_boundary + self.ridge_weight * (
+                    self.boundary_ridge_loss(boundary_logits, boundary_target)
                 )
 
         # ---- 中心热图 focal BCE（可选第三通道） ----
