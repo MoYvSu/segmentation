@@ -1,0 +1,30 @@
+# G0a: generative masked-image pretraining for boundary-only domain adapters.
+# The E1 encoder/LoRA is frozen; the temporary reconstruction decoder is
+# discarded after pretraining.  Twenty-four fixed unlabeled images are held out.
+_base: stage2_refine_v6_e1_physaug15.yaml
+
+gda_mim:
+  base_checkpoint: outputs/stage2_refine_v6_e1_physaug15/best_model_stage2.pth
+  unlabeled_dir: data/unlabeled
+  holdout_manifest: config/monitor/unlabeled_holdout_v1.txt
+  output_dir: outputs/gda_mim_g0a
+  seed: 42
+  crop_size: 512
+  mask_ratio_range: [0.50, 0.65]
+  mask_patch_range: [16, 64]
+  physical_aug_probability: 0.80
+  bottleneck_ratio: 8
+  decoder_channels: 96
+  rgb_weight: 0.50
+  low_frequency_weight: 0.25
+  gradient_weight: 0.25
+  epochs: 20
+  batch_size: 2
+  num_workers: 8
+  learning_rate: 1.0e-4
+  min_learning_rate: 1.0e-6
+  weight_decay: 0.05
+  grad_clip: 1.0
+  amp: true
+  checkpoint_interval: 5
+  monitor_images: 6

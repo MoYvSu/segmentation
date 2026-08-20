@@ -8,6 +8,8 @@ config/*
 !config/train/**
 !config/experiments/
 !config/experiments/**
+!config/monitor/
+!config/monitor/**
 weights
 segment-anything-2
 outputs
