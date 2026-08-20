@@ -1,0 +1,30 @@
+# E2 Coarse-Unfreeze-10：测试纯 refine 平台是否来自冻结 coarse boundary 的表征瓶颈。
+# 从 E1 best 初始化，保持物理增强和损失不变；仅以 refine LR 的 5% 解冻 coarse boundary。
+_base: stage2_refine_v6_e1_physaug15.yaml
+
+inference:
+  output_dir: outputs/inference_refine_v6_e2_coarse_unfreeze10
+  stage2_checkpoint: outputs/stage2_refine_v6_e2_coarse_unfreeze10/best_model_stage2.pth
+
+semi_supervised:
+  output_dir: outputs/stage2_refine_v6_e2_coarse_unfreeze10
+  init_from_checkpoint: outputs/stage2_refine_v6_e1_physaug15/best_model_stage2.pth
+  epochs: 10
+  learning_rate: 5.0e-6
+  warmup_epochs: 0
+  flat_epochs: 6
+  decay_end_factor: 0.25
+  labeled_steps_per_epoch: 62
+  checkpoint_interval: 5
+  monitor:
+    image_dir: data/raw
+    num_images: 10
+    output_dir: outputs/stage2_refine_v6_e2_coarse_unfreeze10/monitor
+  refine_training:
+    enabled: true
+    refine_only_epochs: 0
+    refine_lr_ratio: 1.0
+    boundary_base_lr_ratio: 0.05
+  diagnostics:
+    enabled: true
+    save_initial_monitor: true

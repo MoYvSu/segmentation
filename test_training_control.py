@@ -96,6 +96,19 @@ class Stage0TrainingControlTest(unittest.TestCase):
         self.assertFalse(student.decoder.boundary_branch.training)
         self.assertTrue(student.decoder.boundary_refine_head.training)
 
+    def test_trainable_boundary_base_stays_in_train_mode(self):
+        student = _ToyStudent()
+        student.decoder.freeze_seg_branch()
+        student.decoder.set_boundary_base_trainable(True)
+        set_student_train_modes(student)
+
+        self.assertFalse(student.encoder.training)
+        self.assertFalse(student.decoder.seg_fpn.training)
+        self.assertFalse(student.decoder.seg_branch.training)
+        self.assertTrue(student.decoder.boundary_fpn.training)
+        self.assertTrue(student.decoder.boundary_branch.training)
+        self.assertTrue(student.decoder.boundary_refine_head.training)
+
     def test_seed_repeats_torch_initialization(self):
         seed_everything(42)
         first = torch.randn(8)
@@ -169,6 +182,26 @@ class Stage0TrainingControlTest(unittest.TestCase):
         self.assertEqual((aug["min_ops"], aug["max_ops"]), (1, 2))
         self.assertEqual(aug["op_weights"]["noise"], 0.0)
         self.assertEqual(aug["gaussian_noise_std"], 0.0)
+
+    def test_e2_coarse_unfreeze10_config_invariants(self):
+        config = load_config(
+            "config/train/stage2_refine_v6_e2_coarse_unfreeze10.yaml"
+        )
+        semi = config["semi_supervised"]
+        refine = semi["refine_training"]
+        self.assertEqual(semi["epochs"], 10)
+        self.assertEqual(semi["learning_rate"], 5.0e-6)
+        self.assertEqual(semi["flat_epochs"], 6)
+        self.assertEqual(semi["labeled_steps_per_epoch"], 62)
+        self.assertEqual(
+            semi["init_from_checkpoint"],
+            "outputs/stage2_refine_v6_e1_physaug15/best_model_stage2.pth",
+        )
+        self.assertEqual(refine["refine_only_epochs"], 0)
+        self.assertEqual(refine["refine_lr_ratio"], 1.0)
+        self.assertEqual(refine["boundary_base_lr_ratio"], 0.05)
+        self.assertTrue(config["progressive_aug"]["enabled"])
+        self.assertFalse(semi["use_unlabeled"])
 
     def test_validation_reports_boundary_haze_metrics(self):
         target = torch.tensor(

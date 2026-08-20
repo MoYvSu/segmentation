@@ -1569,6 +1569,11 @@ def main():
         for name, param in student_model.decoder.named_parameters()
         if name.startswith("boundary_refine_head.")
     ]
+    boundary_base_named_parameters = [
+        (name, param)
+        for name, param in student_model.decoder.named_parameters()
+        if name.startswith("boundary_fpn.") or name.startswith("boundary_branch.")
+    ]
     frozen_decoder_named_parameters = [
         (name, param)
         for name, param in student_model.decoder.named_parameters()
@@ -1581,6 +1586,9 @@ def main():
     ]
     if diagnostics_enabled:
         initial_refine_state = snapshot_parameters(refine_named_parameters)
+        initial_boundary_base_state = snapshot_parameters(
+            boundary_base_named_parameters
+        )
         initial_frozen_decoder_state = snapshot_parameters(
             frozen_decoder_named_parameters
         )
@@ -1590,11 +1598,13 @@ def main():
         logger.info(
             "Stage-0 diagnostics: ENABLED "
             f"(refine={len(refine_named_parameters)} tensors, "
+            f"boundary_base={len(boundary_base_named_parameters)}, "
             f"frozen_decoder={len(frozen_decoder_named_parameters)}, "
             f"frozen_lora={len(frozen_lora_named_parameters)})"
         )
     else:
         initial_refine_state = {}
+        initial_boundary_base_state = {}
         initial_frozen_decoder_state = {}
         initial_frozen_lora_state = {}
 
@@ -1794,6 +1804,8 @@ def main():
         scheduler.step()
 
         refine_delta_l2 = 0.0
+        boundary_base_delta_l2 = 0.0
+        boundary_base_delta_max = 0.0
         frozen_decoder_max_delta = 0.0
         frozen_lora_max_delta = 0.0
         refine_out_weight_norm = 0.0
@@ -1801,6 +1813,11 @@ def main():
         if diagnostics_enabled:
             refine_delta_l2, _ = parameter_delta_stats(
                 refine_named_parameters, initial_refine_state
+            )
+            boundary_base_delta_l2, boundary_base_delta_max = (
+                parameter_delta_stats(
+                    boundary_base_named_parameters, initial_boundary_base_state
+                )
             )
             _, frozen_decoder_max_delta = parameter_delta_stats(
                 frozen_decoder_named_parameters, initial_frozen_decoder_state
@@ -1819,6 +1836,8 @@ def main():
                 f"residual_std={train_metrics['refine_residual_std']:.3e} "
                 f"out_norm={refine_out_weight_norm:.3e} "
                 f"delta_l2={refine_delta_l2:.3e} "
+                f"base_delta_l2={boundary_base_delta_l2:.3e} "
+                f"base_delta_max={boundary_base_delta_max:.3e} "
                 f"frozen_max_delta={frozen_decoder_max_delta:.3e} "
                 f"lora_max_delta={frozen_lora_max_delta:.3e}"
             )
@@ -1927,6 +1946,8 @@ def main():
             "refine_out_weight_norm": refine_out_weight_norm,
             "refine_out_weight_max": refine_out_weight_max,
             "refine_delta_l2": refine_delta_l2,
+            "boundary_base_delta_l2": boundary_base_delta_l2,
+            "boundary_base_delta_max": boundary_base_delta_max,
             "frozen_decoder_max_delta": frozen_decoder_max_delta,
             "frozen_lora_max_delta": frozen_lora_max_delta,
             "val_loss": val_metrics["loss"],
