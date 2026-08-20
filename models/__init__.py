@@ -3,5 +3,13 @@
 
 from .sam2_encoder import SAM2Encoder
 from .fpn_decoder import FPNDecoder, FPNBackbone, SegmentationModel
+from .gda_mim import GDAMaskedAutoencoder, GenerativeDomainAdapterPyramid
 
-__all__ = ["SAM2Encoder", "FPNDecoder", "FPNBackbone", "SegmentationModel"]
+__all__ = [
+    "SAM2Encoder",
+    "FPNDecoder",
+    "FPNBackbone",
+    "SegmentationModel",
+    "GDAMaskedAutoencoder",
+    "GenerativeDomainAdapterPyramid",
+]

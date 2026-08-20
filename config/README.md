@@ -63,3 +63,7 @@ E1 best 独立初始化。正边界峰值目标提高至 logit `2.0`（概率约
 GT 附近的边界峰值比 5px 内最强真背景高 `1.5` logit。该损失对全图统一
 加减 logit 严格不变，不能像 E3/E3b 一样通过整体变暗或变亮来获利。
 仍从 E1 best 开始，其余训练和物理增强保持不变。
+
+`train/gda_mim_g0a.yaml` 使用赛方无标签图进行生成式掩码重建预训练。
+冻结 E1 SAM2/LoRA，只训练四尺度 GDA 和临时重建解码器；预训练后丢弃解码器。
+`config/monitor/unlabeled_holdout_v1.txt` 中的 24 张图不进入训练，专用于固定无标签 monitor。
