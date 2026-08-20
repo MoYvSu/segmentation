@@ -222,6 +222,48 @@ class Stage0TrainingControlTest(unittest.TestCase):
         self.assertTrue(config["progressive_aug"]["enabled"])
         self.assertFalse(semi["use_unlabeled"])
 
+    def test_e3b_balanced_ridge10_config_invariants(self):
+        config = load_config(
+            "config/train/stage2_refine_v6_e3b_balanced_ridge10.yaml"
+        )
+        semi = config["semi_supervised"]
+        refine = semi["refine_training"]
+        train = config["train"]
+        self.assertEqual(semi["epochs"], 10)
+        self.assertEqual(semi["learning_rate"], 5.0e-6)
+        self.assertEqual(
+            semi["init_from_checkpoint"],
+            "outputs/stage2_refine_v6_e1_physaug15/best_model_stage2.pth",
+        )
+        self.assertEqual(refine["refine_only_epochs"], 10)
+        self.assertEqual(train["boundary_ridge_weight"], 0.03)
+        self.assertEqual(train["boundary_ridge_positive_logit"], 2.0)
+        self.assertEqual(train["boundary_ridge_negative_logit"], -0.62)
+        self.assertEqual(train["boundary_ridge_ring_weight"], 0.25)
+        self.assertTrue(config["progressive_aug"]["enabled"])
+        self.assertFalse(semi["use_unlabeled"])
+
+    def test_e3b_balanced_ridge10_config_invariants(self):
+        config = load_config(
+            "config/train/stage2_refine_v6_e3b_balanced_ridge10.yaml"
+        )
+        semi = config["semi_supervised"]
+        refine = semi["refine_training"]
+        train = config["train"]
+        self.assertEqual(semi["epochs"], 10)
+        self.assertEqual(semi["learning_rate"], 5.0e-6)
+        self.assertEqual(
+            semi["init_from_checkpoint"],
+            "outputs/stage2_refine_v6_e1_physaug15/best_model_stage2.pth",
+        )
+        self.assertEqual(refine["refine_only_epochs"], 10)
+        self.assertEqual(train["boundary_ridge_weight"], 0.03)
+        self.assertEqual(train["boundary_ridge_positive_logit"], 2.0)
+        self.assertEqual(train["boundary_ridge_negative_logit"], -0.62)
+        self.assertEqual(train["boundary_ridge_ring_weight"], 0.25)
+        self.assertTrue(config["progressive_aug"]["enabled"])
+        self.assertFalse(semi["use_unlabeled"])
+
     def test_boundary_ridge_loss_prefers_thin_complete_ridge(self):
         criterion = BoundaryLoss(
             ridge_weight=1.0,
