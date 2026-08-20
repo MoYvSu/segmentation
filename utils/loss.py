@@ -59,6 +59,8 @@ class BoundaryLoss(nn.Module):
         ridge_tolerance: int = 1,
         ridge_ring_radius: int = 5,
         ridge_ring_weight: float = 1.0,
+        ridge_mode: str = "absolute",
+        ridge_margin: float = 1.5,
         center_weight: float = 1.0,
         center_gamma: float = 2.0,
     ):
@@ -84,6 +86,8 @@ class BoundaryLoss(nn.Module):
             ridge_tolerance: 核心峰值允许的像素定位误差。
             ridge_ring_radius: 在 GT 核心外构造背景抑制环的半径。
             ridge_ring_weight: 外环背景项相对于核心命中项的权重。
+            ridge_mode: `absolute` 使用独立明暗下限；`relative` 只约束局部对比。
+            ridge_margin: relative 模式中边界峰值超过邻近背景的 logit 间隔。
             center_weight: 中心热图损失权重；仅在 pred/target 存在第 3 通道时生效。
             center_gamma: 中心热图 focal BCE 的聚焦参数。
         """
@@ -109,11 +113,15 @@ class BoundaryLoss(nn.Module):
         self.ridge_tolerance = int(ridge_tolerance)
         self.ridge_ring_radius = int(ridge_ring_radius)
         self.ridge_ring_weight = ridge_ring_weight
+        self.ridge_mode = str(ridge_mode).lower()
+        self.ridge_margin = ridge_margin
         self.center_weight = center_weight
         self.center_gamma = center_gamma
 
         if self.ridge_tolerance < 0 or self.ridge_ring_radius < 0:
             raise ValueError("ridge tolerance and ring radius must be non-negative")
+        if self.ridge_mode not in {"absolute", "relative"}:
+            raise ValueError("ridge_mode must be 'absolute' or 'relative'")
 
     def boundary_ridge_loss(self, boundary_logits, boundary_target):
         """Favor a confident, narrow ridge near GT without demanding exact pixels.
@@ -135,9 +143,6 @@ class BoundaryLoss(nn.Module):
             stride=1,
             padding=self.ridge_tolerance,
         ).squeeze(1)
-        missed_core = F.relu(self.ridge_positive_logit - local_peak).pow(2)
-        core_loss = (missed_core * core_mass).sum() / core_mass.sum().clamp_min(1.0)
-
         ring_kernel = 2 * self.ridge_ring_radius + 1
         dilated_core = F.max_pool2d(
             core_mask.unsqueeze(1),
@@ -149,6 +154,38 @@ class BoundaryLoss(nn.Module):
             (dilated_core > 0)
             & (target <= self.ridge_background_threshold)
         ).to(boundary_logits.dtype)
+
+        if self.ridge_mode == "relative":
+            # 只对比每个 GT 核心附近的边界峰值和最强背景。
+            # 两者同时加上任意常数时损失不变，因此无法通过全图
+            # 统一变亮或变暗来降低损失。
+            masked_ring_logits = torch.where(
+                ring_mask > 0,
+                boundary_logits,
+                torch.full_like(boundary_logits, -1.0e4),
+            )
+            nearby_ring_peak = F.max_pool2d(
+                masked_ring_logits.unsqueeze(1),
+                kernel_size=ring_kernel,
+                stride=1,
+                padding=self.ridge_ring_radius,
+            ).squeeze(1)
+            nearby_ring_exists = F.max_pool2d(
+                ring_mask.unsqueeze(1),
+                kernel_size=ring_kernel,
+                stride=1,
+                padding=self.ridge_ring_radius,
+            ).squeeze(1)
+            valid_core_mass = core_mass * (nearby_ring_exists > 0).to(core_mass.dtype)
+            contrast_hinge = F.relu(
+                self.ridge_margin - local_peak + nearby_ring_peak
+            ).pow(2)
+            return (contrast_hinge * valid_core_mass).sum() / (
+                valid_core_mass.sum().clamp_min(1.0)
+            )
+
+        missed_core = F.relu(self.ridge_positive_logit - local_peak).pow(2)
+        core_loss = (missed_core * core_mass).sum() / core_mass.sum().clamp_min(1.0)
         raised_ring = F.relu(boundary_logits - self.ridge_negative_logit).pow(2)
         ring_loss = (raised_ring * ring_mask).sum() / ring_mask.sum().clamp_min(1.0)
         return core_loss + self.ridge_ring_weight * ring_loss

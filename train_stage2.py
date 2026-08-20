@@ -1160,6 +1160,8 @@ def main():
         ridge_tolerance=train_cfg.get("boundary_ridge_tolerance", 1),
         ridge_ring_radius=train_cfg.get("boundary_ridge_ring_radius", 5),
         ridge_ring_weight=train_cfg.get("boundary_ridge_ring_weight", 1.0),
+        ridge_mode=train_cfg.get("boundary_ridge_mode", "absolute"),
+        ridge_margin=train_cfg.get("boundary_ridge_margin", 1.5),
         center_weight=train_cfg.get("center_weight", 0.0),
         center_gamma=train_cfg.get("center_gamma", 2.0),
     ).to(device)
@@ -1169,14 +1171,17 @@ def main():
     )
     if criterion.ridge_weight > 0:
         logger.info(
-            "  Boundary ridge: weight=%.4f, peak_logit=%.2f, "
-            "ring_logit=%.2f, tolerance=%dpx, ring_radius=%dpx, ring_weight=%.2f",
+            "  Boundary ridge: mode=%s, weight=%.4f, peak_logit=%.2f, "
+            "ring_logit=%.2f, tolerance=%dpx, ring_radius=%dpx, "
+            "ring_weight=%.2f, margin=%.2f",
+            criterion.ridge_mode,
             criterion.ridge_weight,
             criterion.ridge_positive_logit,
             criterion.ridge_negative_logit,
             criterion.ridge_tolerance,
             criterion.ridge_ring_radius,
             criterion.ridge_ring_weight,
+            criterion.ridge_margin,
         )
 
     # 分层参数优化器：语义分支和边界分支各自独立学习率（方案 B - 三分组）

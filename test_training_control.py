@@ -288,6 +288,44 @@ class Stage0TrainingControlTest(unittest.TestCase):
         self.assertLess(float(narrow_loss), float(diffuse_loss))
         self.assertLess(float(narrow_loss), float(broken_loss))
 
+    def test_relative_ridge_is_brightness_shift_invariant(self):
+        criterion = BoundaryLoss(
+            ridge_weight=1.0,
+            ridge_mode="relative",
+            ridge_margin=1.5,
+            ridge_tolerance=1,
+            ridge_ring_radius=2,
+        )
+        target = torch.zeros(1, 9, 9)
+        target[:, 4, 1:8] = 1.0
+        logits = torch.full_like(target, -1.0)
+        logits[:, 4, 1:8] = 0.0
+        original = criterion.boundary_ridge_loss(logits, target)
+        brighter = criterion.boundary_ridge_loss(logits + 3.0, target)
+        darker = criterion.boundary_ridge_loss(logits - 3.0, target)
+        self.assertGreater(float(original), 0.0)
+        self.assertAlmostEqual(float(original), float(brighter), places=6)
+        self.assertAlmostEqual(float(original), float(darker), places=6)
+
+    def test_e4_relative_ridge10_config_invariants(self):
+        config = load_config(
+            "config/train/stage2_refine_v6_e4_relative_ridge10.yaml"
+        )
+        semi = config["semi_supervised"]
+        refine = semi["refine_training"]
+        train = config["train"]
+        self.assertEqual(semi["epochs"], 10)
+        self.assertEqual(
+            semi["init_from_checkpoint"],
+            "outputs/stage2_refine_v6_e1_physaug15/best_model_stage2.pth",
+        )
+        self.assertEqual(refine["refine_only_epochs"], 10)
+        self.assertEqual(train["boundary_ridge_mode"], "relative")
+        self.assertEqual(train["boundary_ridge_weight"], 0.03)
+        self.assertEqual(train["boundary_ridge_margin"], 1.5)
+        self.assertTrue(config["progressive_aug"]["enabled"])
+        self.assertFalse(semi["use_unlabeled"])
+
     def test_validation_reports_boundary_haze_metrics(self):
         target = torch.tensor(
             [[
