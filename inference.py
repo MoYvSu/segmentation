@@ -28,6 +28,7 @@ if PROJECT_ROOT not in sys.path:
 
 from data.dataset import letterbox
 from models.fpn_decoder import FPNDecoder, SegmentationModel
+from models.edge_prior import load_pretrained_edge_prior
 from models.gda_mim import load_pretrained_gda
 from models.sam2_encoder import SAM2Encoder
 from utils.checkpoint import (
@@ -82,6 +83,13 @@ def build_model(
             "boundary_refine_version", "legacy_lowres"
         ),
         center_head=decoder_cfg.get("center_head", False),
+        edge_prior_fusion=decoder_cfg.get("edge_prior_fusion", False),
+        edge_prior_fusion_hidden=decoder_cfg.get(
+            "edge_prior_fusion_hidden", 32
+        ),
+        edge_prior_max_logit_delta=decoder_cfg.get(
+            "edge_prior_max_logit_delta", 1.0
+        ),
     )
 
     boundary_adapter = None
@@ -104,7 +112,32 @@ def build_model(
         )
         logger.info("Boundary GDA enabled: %s", gda_checkpoint)
 
-    model = SegmentationModel(encoder, decoder, boundary_adapter=boundary_adapter)
+    edge_prior = None
+    edge_prior_cfg = config.get("edge_prior", {})
+    if edge_prior_cfg.get("enabled", False):
+        prior_checkpoint = project_path(
+            config, edge_prior_cfg.get("checkpoint", "")
+        )
+        if not prior_checkpoint or not os.path.exists(prior_checkpoint):
+            raise FileNotFoundError(
+                f"Edge-prior checkpoint not found: {prior_checkpoint or '<empty>'}"
+            )
+        edge_prior = load_pretrained_edge_prior(
+            prior_checkpoint,
+            in_channels=encoder.get_stage_channels()[:2],
+            hidden_channels=int(edge_prior_cfg.get("hidden_channels", 64)),
+            map_location=device,
+        )
+        logger.info("Retained G0b edge prior enabled: %s", prior_checkpoint)
+    if decoder_cfg.get("edge_prior_fusion", False) and edge_prior is None:
+        raise ValueError(
+            "decoder.edge_prior_fusion=True requires edge_prior.enabled=True"
+        )
+
+    model = SegmentationModel(
+        encoder, decoder, boundary_adapter=boundary_adapter,
+        edge_prior=edge_prior,
+    )
     model = model.to(device)
 
     if checkpoint_path and os.path.exists(checkpoint_path):
@@ -117,6 +150,12 @@ def build_model(
             logger.warning("Intentional architecture mismatch: %s", validation["mismatches"])
         from models.fpn_decoder import load_decoder_state
         load_decoder_state(model.decoder, checkpoint["decoder_state_dict"])
+        if model.edge_prior is not None and checkpoint.get("edge_prior_state_dict"):
+            model.edge_prior.load_state_dict(
+                checkpoint["edge_prior_state_dict"], strict=True
+            )
+            model.edge_prior.eval()
+            logger.info("Embedded retained edge-prior state loaded")
         if model.boundary_adapter is not None:
             gda_state = checkpoint.get("gda_state_dict")
             if not gda_state:
