@@ -28,6 +28,7 @@ if PROJECT_ROOT not in sys.path:
 
 from data.dataset import letterbox
 from models.fpn_decoder import FPNDecoder, SegmentationModel
+from models.gda_mim import load_pretrained_gda
 from models.sam2_encoder import SAM2Encoder
 from utils.checkpoint import (
     checkpoint_architecture,
@@ -83,7 +84,25 @@ def build_model(
         center_head=decoder_cfg.get("center_head", False),
     )
 
-    model = SegmentationModel(encoder, decoder)
+    boundary_adapter = None
+    gda_cfg = config.get("gda", {})
+    if gda_cfg.get("enabled", False):
+        gda_checkpoint = project_path(config, gda_cfg.get("checkpoint", ""))
+        if not gda_checkpoint or not os.path.exists(gda_checkpoint):
+            raise FileNotFoundError(
+                f"GDA checkpoint not found: {gda_checkpoint or '<empty>'}"
+            )
+        boundary_adapter = load_pretrained_gda(
+            gda_checkpoint,
+            channels=encoder.get_stage_channels(),
+            bottleneck_ratio=int(gda_cfg.get("bottleneck_ratio", 8)),
+            map_location=device,
+            freeze_adapters=True,
+            train_gates=False,
+        )
+        logger.info("Boundary GDA enabled: %s", gda_checkpoint)
+
+    model = SegmentationModel(encoder, decoder, boundary_adapter=boundary_adapter)
     model = model.to(device)
 
     if checkpoint_path and os.path.exists(checkpoint_path):
@@ -96,6 +115,17 @@ def build_model(
             logger.warning("Intentional architecture mismatch: %s", validation["mismatches"])
         from models.fpn_decoder import load_decoder_state
         load_decoder_state(model.decoder, checkpoint["decoder_state_dict"])
+        if model.boundary_adapter is not None:
+            gda_state = checkpoint.get("gda_state_dict")
+            if not gda_state:
+                raise KeyError(
+                    "GDA inference config requires checkpoint.gda_state_dict"
+                )
+            model.boundary_adapter.load_state_dict(gda_state, strict=True)
+            logger.info(
+                "GDA state loaded; gates=%s",
+                model.boundary_adapter.gates.detach().cpu().tolist(),
+            )
         # 含 lora_state_dict 的检查点：注入并加载 LoRA（trunk 域适配）
         from models.lora import load_lora_from_checkpoint
         load_lora_from_checkpoint(model, checkpoint)

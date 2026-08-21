@@ -1,0 +1,48 @@
+# G1: route the G0 generative domain adapter only into the boundary branch.
+# The pretrained adapter convolutions, semantic path, LoRA, and V6 coarse base
+# stay frozen.  Zero gates make epoch-0 exactly identical to E1; only four
+# bounded gates and the B2 refine head are optimized for ten epochs.
+_base: stage2_refine_v6_e1_physaug15.yaml
+
+gda:
+  enabled: true
+  checkpoint: outputs/gda_mim_g0a/best_gda_mim.pth
+  bottleneck_ratio: 8
+  freeze_adapters: true
+  train_gates: true
+  gate_learning_rate: 1.0e-3
+
+inference:
+  output_dir: outputs/inference_refine_v6_g1_gda_gate10
+  stage2_checkpoint: outputs/stage2_refine_v6_g1_gda_gate10/best_model_stage2.pth
+
+semi_supervised:
+  output_dir: outputs/stage2_refine_v6_g1_gda_gate10
+  init_from_checkpoint: outputs/stage2_refine_v6_e1_physaug15/best_model_stage2.pth
+  use_unlabeled: false
+  use_cached_pseudo_labels: false
+  boundary_teacher_mode: self_consistency
+  unsup_weight: 0.0
+  unsup_seg_weight: 0.0
+  epochs: 10
+  learning_rate: 1.0e-5
+  warmup_epochs: 0
+  flat_epochs: 6
+  decay_end_factor: 0.35
+  labeled_steps_per_epoch: 62
+  checkpoint_interval: 2
+  boundary_anchor:
+    enabled: false
+  monitor:
+    image_dir: data/unlabeled
+    manifest: config/monitor/unlabeled_holdout_v1.txt
+    num_images: 24
+    output_dir: outputs/stage2_refine_v6_g1_gda_gate10/monitor
+  refine_training:
+    enabled: true
+    refine_only_epochs: 10
+    refine_lr_ratio: 1.0
+    boundary_base_lr_ratio: 0.15
+  diagnostics:
+    enabled: true
+    save_initial_monitor: true

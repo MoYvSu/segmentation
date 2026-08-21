@@ -8,12 +8,13 @@ import subprocess
 from typing import Any, Dict, Iterable, Optional
 
 
-FORMAT_VERSION = 2
+FORMAT_VERSION = 3
 
 
 def architecture_from_config(config: Dict[str, Any]) -> Dict[str, Any]:
     decoder = config.get("decoder", {})
     lora = config.get("lora", {})
+    gda = config.get("gda", {})
     sam2 = config.get("sam2", {})
     boundary_refine = bool(decoder.get("boundary_refine", False))
     return {
@@ -30,6 +31,11 @@ def architecture_from_config(config: Dict[str, Any]) -> Dict[str, Any]:
         "center_head": bool(decoder.get("center_head", False)),
         "lora_enabled": bool(lora.get("enabled", False)),
         "lora_rank": int(lora.get("rank", 0)) if lora.get("enabled", False) else 0,
+        "gda_enabled": bool(gda.get("enabled", False)),
+        "gda_bottleneck_ratio": (
+            int(gda.get("bottleneck_ratio", 8))
+            if gda.get("enabled", False) else 0
+        ),
     }
 
 
@@ -56,6 +62,8 @@ def architecture_from_state_dict(
         "center_head": any(k.startswith("center_branch.") for k in keys),
         "lora_enabled": bool(lora_state_dict),
         "lora_rank": lora_rank,
+        "gda_enabled": False,
+        "gda_bottleneck_ratio": 0,
     }
 
 
@@ -81,6 +89,7 @@ def architecture_mismatches(
     fields: Iterable[str] = (
         "encoder", "decoder", "fpn_channels", "num_classes", "boundary_refine",
         "boundary_refine_version", "center_head", "lora_enabled", "lora_rank",
+        "gda_enabled", "gda_bottleneck_ratio",
     ),
 ) -> Dict[str, tuple[Any, Any]]:
     mismatches = {}
@@ -140,6 +149,9 @@ def build_checkpoint(
         "best_composite_score": float(best_composite_score),
         "config": config,
     }
+    boundary_adapter = getattr(model, "boundary_adapter", None)
+    if boundary_adapter is not None:
+        payload["gda_state_dict"] = boundary_adapter.state_dict()
     if optimizer is not None:
         payload["optimizer_state_dict"] = optimizer.state_dict()
     if scheduler is not None:

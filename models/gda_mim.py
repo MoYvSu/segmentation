@@ -89,6 +89,36 @@ class GenerativeDomainAdapterPyramid(nn.Module):
         return self.adapters.parameters()
 
 
+def load_pretrained_gda(
+    checkpoint_path: str,
+    *,
+    channels: Sequence[int] = (112, 224, 448, 896),
+    bottleneck_ratio: int = 8,
+    map_location="cpu",
+    freeze_adapters: bool = True,
+    train_gates: bool = True,
+) -> GenerativeDomainAdapterPyramid:
+    """Build the retained GDA pyramid and load a G0 or downstream checkpoint.
+
+    G0 checkpoints and Stage-2 checkpoints intentionally share the
+    ``gda_state_dict`` key.  Adapter weights are frozen by default downstream;
+    only the four zero-initialized gates are optimized in G1.
+    """
+    checkpoint = torch.load(
+        checkpoint_path, map_location=map_location, weights_only=False
+    )
+    state_dict = checkpoint.get("gda_state_dict")
+    if not state_dict:
+        raise KeyError(f"checkpoint has no gda_state_dict: {checkpoint_path}")
+
+    gda = GenerativeDomainAdapterPyramid(channels, bottleneck_ratio)
+    gda.load_state_dict(state_dict, strict=True)
+    for parameter in gda.adapters.parameters():
+        parameter.requires_grad_(not freeze_adapters)
+    gda.gates.requires_grad_(bool(train_gates))
+    return gda
+
+
 class MIMReconstructionDecoder(nn.Module):
     """Temporary FPN decoder reconstructing RGB from adapted Hiera features."""
 

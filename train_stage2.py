@@ -52,6 +52,7 @@ from data.dataset_semi import (
     unlabeled_collate_fn,
 )
 from models.fpn_decoder import FPNDecoder, SegmentationModel
+from models.gda_mim import load_pretrained_gda
 from models.lora import (
     count_lora_params,
     extract_lora_state_dict,
@@ -142,6 +143,13 @@ def set_student_train_modes(student_model):
         params = list(module.parameters())
         if params and not any(param.requires_grad for param in params):
             module.eval()
+    boundary_adapter = getattr(student_model, "boundary_adapter", None)
+    if boundary_adapter is not None:
+        # G1 freezes the pretrained convolutional adapters.  eval() does not
+        # block gradients to the four gates, and prevents accidental stateful
+        # layer updates if the adapter implementation changes later.
+        if not any(p.requires_grad for p in boundary_adapter.adapters.parameters()):
+            boundary_adapter.adapters.eval()
 
 
 def snapshot_parameters(named_parameters):
@@ -307,7 +315,30 @@ def build_model(config, device):
         center_head=decoder_cfg.get("center_head", False),
     )
 
-    model = SegmentationModel(encoder, decoder)
+    boundary_adapter = None
+    gda_cfg = config.get("gda", {})
+    if gda_cfg.get("enabled", False):
+        gda_checkpoint = project_path(config, gda_cfg.get("checkpoint", ""))
+        if not gda_checkpoint or not os.path.exists(gda_checkpoint):
+            raise FileNotFoundError(
+                f"GDA checkpoint not found: {gda_checkpoint or '<empty>'}"
+            )
+        boundary_adapter = load_pretrained_gda(
+            gda_checkpoint,
+            channels=encoder.get_stage_channels(),
+            bottleneck_ratio=int(gda_cfg.get("bottleneck_ratio", 8)),
+            map_location=device,
+            freeze_adapters=bool(gda_cfg.get("freeze_adapters", True)),
+            train_gates=bool(gda_cfg.get("train_gates", True)),
+        )
+        logger.info(
+            "Boundary GDA: ENABLED (%s, adapter_trainable=%s, gates_trainable=%s)",
+            gda_checkpoint,
+            not bool(gda_cfg.get("freeze_adapters", True)),
+            bool(gda_cfg.get("train_gates", True)),
+        )
+
+    model = SegmentationModel(encoder, decoder, boundary_adapter=boundary_adapter)
     model = model.to(device)
     return model
 
@@ -343,6 +374,27 @@ def load_base_checkpoint(model, checkpoint_path, device):
         f"  Epoch: {checkpoint.get('epoch', '?')}, "
         f"Best Score: {best_score}"
     )
+
+
+def load_gda_checkpoint_state(model, checkpoint, *, required=False, tag="checkpoint"):
+    """Restore downstream GDA gates/adapters when the active model has GDA."""
+    adapter = getattr(model, "boundary_adapter", None)
+    state_dict = checkpoint.get("gda_state_dict")
+    if adapter is None:
+        if state_dict:
+            logger.warning("%s contains GDA state but active config disables GDA", tag)
+        return False
+    if not state_dict:
+        if required:
+            raise KeyError(f"{tag} has no gda_state_dict")
+        return False
+    adapter.load_state_dict(state_dict, strict=True)
+    logger.info(
+        "%s GDA state loaded; gates=%s",
+        tag,
+        adapter.gates.detach().cpu().tolist(),
+    )
+    return True
 
 
 def build_dataloaders(config, disable_unlabeled_appearance_aug=False,
@@ -545,6 +597,8 @@ def train_one_epoch(
     n_steps = 0
 
     clip_params = list(student_model.decoder.parameters())
+    if getattr(student_model, "boundary_adapter", None) is not None:
+        clip_params.extend(student_model.boundary_adapter.parameters())
     refine_params = (
         list(student_model.decoder.boundary_refine_head.parameters())
         if getattr(student_model.decoder, "boundary_refine", False)
@@ -841,6 +895,42 @@ def validate(model, loader, criterion, device):
     return val_metrics
 
 
+def resolve_monitor_image_paths(config):
+    """Resolve a deterministic monitor subset, optionally from a manifest."""
+    paths_cfg = config["paths"]
+    monitor_cfg = config.get("semi_supervised", {}).get("monitor", {})
+    image_dir = os.path.join(
+        paths_cfg["project_root"],
+        monitor_cfg.get("image_dir", "data/test"),
+    )
+    num_images = int(monitor_cfg.get("num_images", 3))
+    manifest = monitor_cfg.get("manifest", "")
+    if manifest:
+        manifest_path = project_path(config, manifest)
+        if not os.path.exists(manifest_path):
+            raise FileNotFoundError(f"Monitor manifest not found: {manifest_path}")
+        with open(manifest_path, "r", encoding="utf-8") as handle:
+            names = [line.strip() for line in handle if line.strip()]
+        image_paths = [
+            os.path.join(image_dir, name)
+            for name in names
+            if os.path.isfile(os.path.join(image_dir, name))
+        ]
+        missing = len(names) - len(image_paths)
+        if missing:
+            logger.warning(
+                "Monitor manifest: %d/%d entries missing under %s",
+                missing, len(names), image_dir,
+            )
+    else:
+        valid_exts = ("*.jpg", "*.jpeg", "*.png", "*.bmp", "*.tif", "*.tiff")
+        image_paths = []
+        for ext in valid_exts:
+            image_paths.extend(glob.glob(os.path.join(image_dir, ext)))
+        image_paths.sort()
+    return image_paths[:num_images], image_dir
+
+
 @torch.no_grad()
 def monitor_inference(model, config, epoch, device):
     """对 data/test 前 N 张图像做轻量推理，保存语义+边界概率图。
@@ -851,11 +941,6 @@ def monitor_inference(model, config, epoch, device):
     data_cfg = config["data"]
     monitor_cfg = config.get("semi_supervised", {}).get("monitor", {})
 
-    image_dir = os.path.join(
-        paths_cfg["project_root"],
-        monitor_cfg.get("image_dir", "data/test"),
-    )
-    num_images = monitor_cfg.get("num_images", 3)
     output_base = os.path.join(
         paths_cfg["project_root"],
         monitor_cfg.get("output_dir", "outputs/stage2/monitor"),
@@ -865,17 +950,11 @@ def monitor_inference(model, config, epoch, device):
     epoch_dir = os.path.join(output_base, f"epoch_{epoch + 1:04d}")
     os.makedirs(epoch_dir, exist_ok=True)
 
-    valid_exts = ("*.jpg", "*.jpeg", "*.png", "*.bmp", "*.tif", "*.tiff")
-    image_paths = []
-    for ext in valid_exts:
-        image_paths.extend(glob.glob(os.path.join(image_dir, ext)))
-    image_paths.sort()
+    image_paths, image_dir = resolve_monitor_image_paths(config)
 
     if len(image_paths) == 0:
         logger.warning(f"Monitor: no images found in {image_dir}")
         return
-
-    image_paths = image_paths[:num_images]
 
     model.eval()
     for img_path in image_paths:
@@ -933,24 +1012,12 @@ def compute_semantic_confidence_stats(model, config, device):
     data_cfg = config["data"]
     monitor_cfg = config.get("semi_supervised", {}).get("monitor", {})
 
-    image_dir = os.path.join(
-        paths_cfg["project_root"],
-        monitor_cfg.get("image_dir", "data/test"),
-    )
-    num_images = monitor_cfg.get("num_images", 3)
     image_size = data_cfg.get("image_size", 1024)
-
-    valid_exts = ("*.jpg", "*.jpeg", "*.png", "*.bmp", "*.tif", "*.tiff")
-    image_paths = []
-    for ext in valid_exts:
-        image_paths.extend(glob.glob(os.path.join(image_dir, ext)))
-    image_paths.sort()
+    image_paths, image_dir = resolve_monitor_image_paths(config)
 
     if len(image_paths) == 0:
         logger.warning(f"Sem conf: no images found in {image_dir}")
         return None, None
-
-    image_paths = image_paths[:num_images]
 
     model.eval()
     high_sum = 0.0
@@ -1001,6 +1068,7 @@ def main():
     train_cfg = config["train"]
     semi_cfg = config.get("semi_supervised", {})
     lora_cfg = config.get("lora", {})
+    gda_cfg = config.get("gda", {})
 
     train_seed = int(train_cfg.get("seed", config.get("data", {}).get("seed", 42)))
     deterministic = bool(train_cfg.get("deterministic", False))
@@ -1232,6 +1300,18 @@ def main():
         lora_lr_ratio = 0.0
         lora_lr = 0.0
 
+    gda_gate_params = []
+    gda_gate_lr = 0.0
+    if getattr(student_model, "boundary_adapter", None) is not None:
+        gda_gate_params = [
+            student_model.boundary_adapter.gates
+        ] if student_model.boundary_adapter.gates.requires_grad else []
+        # Four scalar gates need a much larger step than convolution weights.
+        # They remain bounded by tanh in the forward pass.
+        gda_gate_lr = float(
+            gda_cfg.get("gate_learning_rate", base_lr * 100.0)
+        )
+
     # 构建优化器参数组列表（跳过空组，冻结分支的参数已被排除）
     param_groups = []
     if len(seg_params) > 0:
@@ -1246,6 +1326,13 @@ def main():
         })
     if len(lora_params) > 0:
         param_groups.append({"params": lora_params, "lr": lora_lr, "name": "lora"})
+    if len(gda_gate_params) > 0:
+        param_groups.append({
+            "params": gda_gate_params,
+            "lr": gda_gate_lr,
+            "weight_decay": 0.0,
+            "name": "gda_gates",
+        })
 
     if not param_groups:
         raise RuntimeError("No trainable parameter groups were configured")
@@ -1261,7 +1348,8 @@ def main():
         f"Seg lr={seg_lr:.2e} ({len(seg_params)} tensors), "
         f"Boundary base lr={boundary_lr:.2e} ({len(boundary_params)} tensors), "
         f"Refine lr={refine_lr:.2e} ({len(refine_params)} tensors), "
-        f"LoRA lr={lora_lr:.2e} ({len(lora_params)} tensors, ratio={lora_lr_ratio})"
+        f"LoRA lr={lora_lr:.2e} ({len(lora_params)} tensors, ratio={lora_lr_ratio}), "
+        f"GDA gates lr={gda_gate_lr:.2e} ({len(gda_gate_params)} tensors)"
     )
 
     # 记录每个参数组创建时的峰值 LR（LambdaLR 会原地改写 group['lr']，
@@ -1535,6 +1623,11 @@ def main():
         if "lora_state_dict" in checkpoint and checkpoint["lora_state_dict"]:
             n_lora = load_lora_state_dict(student_model, checkpoint["lora_state_dict"])
             logger.info(f"  LoRA state loaded: {n_lora} 个参数张量")
+        load_gda_checkpoint_state(
+            student_model, checkpoint,
+            required=bool(gda_cfg.get("enabled", False)),
+            tag="Resume checkpoint",
+        )
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         try:
             scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
@@ -1567,6 +1660,10 @@ def main():
         if "lora_state_dict" in init_checkpoint and init_checkpoint["lora_state_dict"]:
             n_lora = load_lora_state_dict(student_model, init_checkpoint["lora_state_dict"])
             logger.info(f"  LoRA state loaded: {n_lora} 个参数张量")
+        load_gda_checkpoint_state(
+            student_model, init_checkpoint, required=False,
+            tag="Init checkpoint",
+        )
         start_epoch = 0
         best_composite_score = 0.0
         init_epoch = init_checkpoint.get("epoch", "?")
@@ -1613,6 +1710,11 @@ def main():
         for name, param in student_model.encoder.trunk.named_parameters()
         if ("lora_A" in name or "lora_B" in name) and not param.requires_grad
     ]
+    gda_gate_named_parameters = []
+    if getattr(student_model, "boundary_adapter", None) is not None:
+        gda_gate_named_parameters = [
+            ("gates", student_model.boundary_adapter.gates)
+        ]
     if diagnostics_enabled:
         initial_refine_state = snapshot_parameters(refine_named_parameters)
         initial_boundary_base_state = snapshot_parameters(
@@ -1624,18 +1726,21 @@ def main():
         initial_frozen_lora_state = snapshot_parameters(
             frozen_lora_named_parameters
         )
+        initial_gda_gate_state = snapshot_parameters(gda_gate_named_parameters)
         logger.info(
             "Stage-0 diagnostics: ENABLED "
             f"(refine={len(refine_named_parameters)} tensors, "
             f"boundary_base={len(boundary_base_named_parameters)}, "
             f"frozen_decoder={len(frozen_decoder_named_parameters)}, "
-            f"frozen_lora={len(frozen_lora_named_parameters)})"
+            f"frozen_lora={len(frozen_lora_named_parameters)}, "
+            f"gda_gates={len(gda_gate_named_parameters)})"
         )
     else:
         initial_refine_state = {}
         initial_boundary_base_state = {}
         initial_frozen_decoder_state = {}
         initial_frozen_lora_state = {}
+        initial_gda_gate_state = {}
 
     if diagnostics_enabled:
         initial_val_metrics = validate(student_model, val_loader, criterion, device)
@@ -1645,6 +1750,11 @@ def main():
         )
         initial_diagnostics = {
             "optimizer_steps": 0,
+            "gda_gates": (
+                student_model.boundary_adapter.gates.detach().cpu().tolist()
+                if getattr(student_model, "boundary_adapter", None) is not None
+                else []
+            ),
             "refine_out_weight_norm": float(
                 student_model.decoder.boundary_refine_head.out.weight
                 .detach().float().norm()
@@ -1837,6 +1947,8 @@ def main():
         boundary_base_delta_max = 0.0
         frozen_decoder_max_delta = 0.0
         frozen_lora_max_delta = 0.0
+        gda_gate_delta_l2 = 0.0
+        gda_gate_values = []
         refine_out_weight_norm = 0.0
         refine_out_weight_max = 0.0
         if diagnostics_enabled:
@@ -1854,6 +1966,9 @@ def main():
             _, frozen_lora_max_delta = parameter_delta_stats(
                 frozen_lora_named_parameters, initial_frozen_lora_state
             )
+            gda_gate_delta_l2, _ = parameter_delta_stats(
+                gda_gate_named_parameters, initial_gda_gate_state
+            )
             refine_out = student_model.decoder.boundary_refine_head.out.weight
             refine_out_weight_norm = float(refine_out.detach().float().norm())
             refine_out_weight_max = float(refine_out.detach().abs().max())
@@ -1868,8 +1983,14 @@ def main():
                 f"base_delta_l2={boundary_base_delta_l2:.3e} "
                 f"base_delta_max={boundary_base_delta_max:.3e} "
                 f"frozen_max_delta={frozen_decoder_max_delta:.3e} "
-                f"lora_max_delta={frozen_lora_max_delta:.3e}"
+                f"lora_max_delta={frozen_lora_max_delta:.3e} "
+                f"gda_gate_delta={gda_gate_delta_l2:.3e}"
             )
+        if getattr(student_model, "boundary_adapter", None) is not None:
+            gda_gate_values = (
+                student_model.boundary_adapter.gates.detach().cpu().tolist()
+            )
+            logger.info("  GDA gates: %s", [round(v, 6) for v in gda_gate_values])
 
         # test 语义置信度监控（新日志参数）：无需 GT，统计概率分布
         # >0.8 高置信占比 / 0.4-0.6 模糊带占比
@@ -1954,6 +2075,7 @@ def main():
             "refine_stage": refine_stage,
             "lr_boundary_base": lr_by_group.get("boundary_base", 0.0),
             "lr_boundary_refine": lr_by_group.get("boundary_refine", 0.0),
+            "lr_gda_gates": lr_by_group.get("gda_gates", 0.0),
             "train_loss": train_metrics["loss"],
             "sup_loss": train_metrics["sup_loss"],
             "unsup_loss": train_metrics["unsup_loss"],
@@ -1979,6 +2101,11 @@ def main():
             "boundary_base_delta_max": boundary_base_delta_max,
             "frozen_decoder_max_delta": frozen_decoder_max_delta,
             "frozen_lora_max_delta": frozen_lora_max_delta,
+            "gda_gate_delta_l2": gda_gate_delta_l2,
+            "gda_gate_0": gda_gate_values[0] if gda_gate_values else 0.0,
+            "gda_gate_1": gda_gate_values[1] if gda_gate_values else 0.0,
+            "gda_gate_2": gda_gate_values[2] if gda_gate_values else 0.0,
+            "gda_gate_3": gda_gate_values[3] if gda_gate_values else 0.0,
             "val_loss": val_metrics["loss"],
             "mIoU": val_metrics["mean_iou"],
             "boundary_iou": val_metrics["boundary_iou"],

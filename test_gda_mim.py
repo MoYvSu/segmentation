@@ -8,13 +8,16 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
+import torch.nn as nn
 
 from data.mim_dataset import MaskedMetallographyDataset
 from models.gda_mim import (
     GenerativeDomainAdapterPyramid,
     MIMReconstructionDecoder,
     gda_reconstruction_loss,
+    load_pretrained_gda,
 )
+from models.fpn_decoder import SegmentationModel
 from tools.export_sam2_labelme import (
     records_to_labelme,
     select_non_overlapping_masks,
@@ -48,6 +51,54 @@ class GDAMIMTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(loss))
         self.assertGreater(details["gradient"], 0.0)
         self.assertIsNotNone(features[0].grad)
+
+    def test_downstream_gda_routes_only_to_boundary_features(self):
+        channels = (8, 16, 32, 64)
+
+        class Encoder(nn.Module):
+            def forward(self, image):
+                batch = image.shape[0]
+                return [
+                    torch.ones(batch, channel, 8 // (2 ** index), 8 // (2 ** index))
+                    for index, channel in enumerate(channels)
+                ]
+
+        class Decoder(nn.Module):
+            def forward(self, features, output_size=None, image=None, boundary_features=None):
+                del output_size, image
+                semantic = features[0].mean(dim=1, keepdim=True)
+                boundary = boundary_features[0].mean(dim=1, keepdim=True)
+                return torch.cat([semantic, boundary], dim=1)
+
+        gda = GenerativeDomainAdapterPyramid(channels, bottleneck_ratio=4)
+        with torch.no_grad():
+            for adapter in gda.adapters:
+                adapter.net[-1].bias.fill_(1.0)
+        baseline = SegmentationModel(Encoder(), Decoder())
+        adapted = SegmentationModel(Encoder(), Decoder(), boundary_adapter=gda)
+        image = torch.rand(2, 3, 32, 32)
+
+        zero_output = adapted(image)
+        baseline_output = baseline(image)
+        self.assertTrue(torch.equal(zero_output, baseline_output))
+
+        with torch.no_grad():
+            gda.gates.fill_(0.5)
+        gated_output = adapted(image)
+        self.assertTrue(torch.equal(gated_output[:, 0], baseline_output[:, 0]))
+        self.assertFalse(torch.equal(gated_output[:, 1], baseline_output[:, 1]))
+
+    def test_pretrained_gda_loader_freezes_adapters_but_trains_gates(self):
+        channels = (8, 16, 32, 64)
+        source = GenerativeDomainAdapterPyramid(channels, bottleneck_ratio=4)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "gda.pth"
+            torch.save({"gda_state_dict": source.state_dict()}, path)
+            loaded = load_pretrained_gda(
+                str(path), channels=channels, bottleneck_ratio=4
+            )
+        self.assertFalse(any(p.requires_grad for p in loaded.adapters.parameters()))
+        self.assertTrue(loaded.gates.requires_grad)
 
     def test_holdout_manifest_is_excluded_from_training(self):
         with tempfile.TemporaryDirectory() as directory:
