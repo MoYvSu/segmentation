@@ -36,6 +36,29 @@ class GDAMIMTest(unittest.TestCase):
         for original, output in zip(features, adapted):
             self.assertTrue(torch.equal(original, output))
 
+    def test_channel_gates_change_only_active_shallow_scales(self):
+        channels = (8, 16, 32, 64)
+        gda = GenerativeDomainAdapterPyramid(
+            channels,
+            bottleneck_ratio=4,
+            gate_mode="channel",
+            active_scales=(0, 1),
+        )
+        features = [
+            torch.randn(2, channels[i], 16 // (2 ** i), 16 // (2 ** i))
+            for i in range(4)
+        ]
+        zero = gda(features, gated=True)
+        for original, output in zip(features, zero):
+            self.assertTrue(torch.equal(original, output))
+        with torch.no_grad():
+            gda.gates.fill_(0.25)
+        adapted = gda(features, gated=True)
+        self.assertFalse(torch.equal(features[0], adapted[0]))
+        self.assertFalse(torch.equal(features[1], adapted[1]))
+        self.assertTrue(torch.equal(features[2], adapted[2]))
+        self.assertTrue(torch.equal(features[3], adapted[3]))
+
     def test_reconstruction_loss_backpropagates(self):
         decoder = MIMReconstructionDecoder((8, 16, 32, 64), hidden_channels=16)
         features = [
@@ -99,6 +122,28 @@ class GDAMIMTest(unittest.TestCase):
             )
         self.assertFalse(any(p.requires_grad for p in loaded.adapters.parameters()))
         self.assertTrue(loaded.gates.requires_grad)
+
+    def test_scalar_pretrain_loads_into_zero_channel_gates(self):
+        channels = (8, 16, 32, 64)
+        source = GenerativeDomainAdapterPyramid(channels, bottleneck_ratio=4)
+        with torch.no_grad():
+            source.gates.fill_(0.5)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "gda_scalar.pth"
+            torch.save({"gda_state_dict": source.state_dict()}, path)
+            loaded = load_pretrained_gda(
+                str(path),
+                channels=channels,
+                bottleneck_ratio=4,
+                gate_mode="channel",
+                active_scales=(0, 1),
+            )
+        self.assertEqual(loaded.gates.numel(), sum(channels))
+        self.assertTrue(torch.equal(loaded.gates, torch.zeros_like(loaded.gates)))
+        for source_adapter, loaded_adapter in zip(source.adapters, loaded.adapters):
+            self.assertTrue(torch.equal(
+                source_adapter.net[0].weight, loaded_adapter.net[0].weight
+            ))
 
     def test_holdout_manifest_is_excluded_from_training(self):
         with tempfile.TemporaryDirectory() as directory:
