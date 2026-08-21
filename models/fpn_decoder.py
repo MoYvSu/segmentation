@@ -351,12 +351,16 @@ class FPNDecoder(nn.Module):
                 nn.init.ones_(m.weight)
                 nn.init.zeros_(m.bias)
 
-    def forward(self, features, output_size=None, image=None):
+    def forward(
+        self, features, output_size=None, image=None, boundary_features=None
+    ):
         """
         前向传播：双 FPN 独立提取 + 各自输出头 + 拼接。
 
         Args:
             features: [feat_s1, feat_s2, feat_s3, feat_s4]
+            boundary_features: 可选的边界专用多尺度特征。为空时与
+                ``features`` 相同；GDA 实验仅改写该路径，语义路径保持原样。
             output_size: 可选，最终输出的 (H, W) 尺寸。
             image: 原始输入图像 [B, 3, H, W]（boundary_refine 启用时提供，
                    作为高分辨率边界的高频引导）。
@@ -369,10 +373,16 @@ class FPNDecoder(nn.Module):
         assert len(features) == self.num_stages, (
             f"期望 {self.num_stages} 个尺度特征，实际得到 {len(features)}"
         )
+        if boundary_features is None:
+            boundary_features = features
+        assert len(boundary_features) == self.num_stages, (
+            f"期望 {self.num_stages} 个边界尺度特征，"
+            f"实际得到 {len(boundary_features)}"
+        )
 
         # 独立双 FPN 提取
         seg_feat = self.seg_fpn(features)
-        boundary_feat = self.boundary_fpn(features)
+        boundary_feat = self.boundary_fpn(boundary_features)
 
         # 各自输出头
         seg_logits = self.seg_branch(seg_feat)            # [B, 1, 256, 256]
@@ -536,10 +546,11 @@ class SegmentationModel(nn.Module):
     完整分割模型：冻结 SAM 2 Encoder + 随机初始化双 FPN Decoder（边界预测版本）。
     """
 
-    def __init__(self, encoder, decoder):
+    def __init__(self, encoder, decoder, boundary_adapter=None):
         super().__init__()
         self.encoder = encoder
         self.decoder = decoder
+        self.boundary_adapter = boundary_adapter
 
     def forward(self, x, output_size=None):
         """
@@ -555,17 +566,30 @@ class SegmentationModel(nn.Module):
                 - output[:, 1] 为边界 logits
         """
         features = self.encoder(x)
-        output = self.decoder(features, output_size=output_size, image=x)
+        boundary_features = features
+        if self.boundary_adapter is not None:
+            boundary_features = self.boundary_adapter(features, gated=True)
+        output = self.decoder(
+            features,
+            output_size=output_size,
+            image=x,
+            boundary_features=boundary_features,
+        )
         return output
 
     def total_param_count(self):
         """返回各部分参数量统计。"""
         encoder_params = sum(p.numel() for p in self.encoder.parameters())
         decoder_params = sum(p.numel() for p in self.decoder.parameters())
-        total = encoder_params + decoder_params
+        adapter_params = (
+            sum(p.numel() for p in self.boundary_adapter.parameters())
+            if self.boundary_adapter is not None else 0
+        )
+        total = encoder_params + decoder_params + adapter_params
         return {
             "encoder": encoder_params,
             "decoder": decoder_params,
+            "boundary_adapter": adapter_params,
             "total": total,
             "total_M": total / 1e6,
             "constraint_passed": total < 500e6,
