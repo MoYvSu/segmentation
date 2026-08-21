@@ -4,6 +4,7 @@
 from .sam2_encoder import SAM2Encoder
 from .fpn_decoder import FPNDecoder, FPNBackbone, SegmentationModel
 from .gda_mim import GDAMaskedAutoencoder, GenerativeDomainAdapterPyramid
+from .edge_prior import GenerativeEdgePrior, FrozenEncoderEdgePrior
 
 __all__ = [
     "SAM2Encoder",
@@ -12,4 +13,6 @@ __all__ = [
     "SegmentationModel",
     "GDAMaskedAutoencoder",
     "GenerativeDomainAdapterPyramid",
+    "GenerativeEdgePrior",
+    "FrozenEncoderEdgePrior",
 ]
