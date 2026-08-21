@@ -1,0 +1,45 @@
+# G2a: calibrate the retained G0b structural prior on top of the reproducible
+# E1 V6/B2 checkpoint. The zero-initialized bounded residual is the only
+# trainable module, so epoch 0 is exactly E1 and this is a clean utility test.
+_base: stage2_refine_v6_e1_physaug15.yaml
+
+decoder:
+  edge_prior_fusion: true
+  edge_prior_fusion_hidden: 32
+  edge_prior_max_logit_delta: 1.0
+
+edge_prior:
+  enabled: true
+  checkpoint: outputs/edge_prior_g0b/best_edge_prior.pth
+  hidden_channels: 64
+  only_fusion: true
+  learning_rate_ratio: 1.0
+
+inference:
+  output_dir: outputs/inference_refine_v6_g2a_edge_prior15
+  stage2_checkpoint: outputs/stage2_refine_v6_g2a_edge_prior15/best_model_stage2.pth
+
+semi_supervised:
+  base_checkpoint: outputs/stage2_refine_v6_e1_physaug15/best_model_stage2.pth
+  init_from_checkpoint: ""
+  output_dir: outputs/stage2_refine_v6_g2a_edge_prior15
+  epochs: 15
+  learning_rate: 1.0e-4
+  warmup_epochs: 1
+  warmup_start_factor: 0.10
+  flat_epochs: 9
+  decay_end_factor: 0.20
+  use_unlabeled: false
+  unsup_weight: 0.0
+  unsup_seg_weight: 0.0
+  labeled_steps_per_epoch: 62
+  checkpoint_interval: 3
+  monitor:
+    image_dir: data/raw
+    num_images: 10
+    output_dir: outputs/stage2_refine_v6_g2a_edge_prior15/monitor
+  refine_training:
+    enabled: false
+  diagnostics:
+    enabled: true
+    save_initial_monitor: true

@@ -75,6 +75,53 @@ class BoundaryRefineHeadTest(unittest.TestCase):
             )
         )
 
+    def test_edge_prior_fusion_starts_identical_and_isolates_baseline(self):
+        _, baseline = self._make_pair()
+        fused = FPNDecoder(
+            **self.decoder_kwargs,
+            boundary_refine=True,
+            boundary_refine_version="v2_fullres_isolated",
+            edge_prior_fusion=True,
+            edge_prior_fusion_hidden=16,
+            edge_prior_max_logit_delta=1.0,
+        )
+        fused.load_state_dict(baseline.state_dict(), strict=False)
+        edge_prior_raw = torch.randn(1, 3, 64, 64)
+        baseline.eval()
+        fused.eval()
+        with torch.no_grad():
+            expected = baseline(
+                self.features, output_size=(64, 64), image=self.image
+            )
+            actual = fused(
+                self.features,
+                output_size=(64, 64),
+                image=self.image,
+                edge_prior_raw=edge_prior_raw,
+            )
+        torch.testing.assert_close(actual, expected, rtol=0.0, atol=1e-7)
+
+        fused.set_edge_prior_fusion_only()
+        fused.train()
+        fused.zero_grad(set_to_none=True)
+        output = fused(
+            self.features,
+            output_size=(64, 64),
+            image=self.image,
+            edge_prior_raw=edge_prior_raw,
+        )[:, 1]
+        output.mean().backward()
+        fusion_ids = {id(param) for param in fused.edge_prior_fusion.parameters()}
+        self.assertTrue(all(param.requires_grad for param in fused.edge_prior_fusion.parameters()))
+        self.assertTrue(
+            all(
+                (id(param) in fusion_ids) or not param.requires_grad
+                for param in fused.parameters()
+            )
+        )
+        self.assertGreater(float(fused.edge_prior_fusion.out.weight.grad.abs().sum()), 0.0)
+
+
 
 if __name__ == "__main__":
     unittest.main()

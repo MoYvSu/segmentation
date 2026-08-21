@@ -8,13 +8,14 @@ import subprocess
 from typing import Any, Dict, Iterable, Optional
 
 
-FORMAT_VERSION = 4
+FORMAT_VERSION = 5
 
 
 def architecture_from_config(config: Dict[str, Any]) -> Dict[str, Any]:
     decoder = config.get("decoder", {})
     lora = config.get("lora", {})
     gda = config.get("gda", {})
+    edge_prior = config.get("edge_prior", {})
     sam2 = config.get("sam2", {})
     boundary_refine = bool(decoder.get("boundary_refine", False))
     return {
@@ -42,6 +43,16 @@ def architecture_from_config(config: Dict[str, Any]) -> Dict[str, Any]:
         "gda_active_scales": (
             tuple(gda.get("active_scales", (0, 1, 2, 3)))
             if gda.get("enabled", False) else ()
+        ),
+        "edge_prior_enabled": bool(edge_prior.get("enabled", False)),
+        "edge_prior_hidden_channels": (
+            int(edge_prior.get("hidden_channels", 64))
+            if edge_prior.get("enabled", False) else 0
+        ),
+        "edge_prior_fusion": bool(decoder.get("edge_prior_fusion", False)),
+        "edge_prior_fusion_hidden": (
+            int(decoder.get("edge_prior_fusion_hidden", 32))
+            if decoder.get("edge_prior_fusion", False) else 0
         ),
     }
 
@@ -73,6 +84,12 @@ def architecture_from_state_dict(
         "gda_bottleneck_ratio": 0,
         "gda_gate_mode": "none",
         "gda_active_scales": (),
+        "edge_prior_enabled": False,
+        "edge_prior_hidden_channels": 0,
+        "edge_prior_fusion": any(
+            k.startswith("edge_prior_fusion.") for k in keys
+        ),
+        "edge_prior_fusion_hidden": None,
     }
 
 
@@ -100,6 +117,8 @@ def architecture_mismatches(
         "boundary_refine_version", "center_head", "lora_enabled", "lora_rank",
         "gda_enabled", "gda_bottleneck_ratio",
         "gda_gate_mode", "gda_active_scales",
+        "edge_prior_enabled", "edge_prior_hidden_channels",
+        "edge_prior_fusion", "edge_prior_fusion_hidden",
     ),
 ) -> Dict[str, tuple[Any, Any]]:
     mismatches = {}
@@ -162,6 +181,9 @@ def build_checkpoint(
     boundary_adapter = getattr(model, "boundary_adapter", None)
     if boundary_adapter is not None:
         payload["gda_state_dict"] = boundary_adapter.state_dict()
+    edge_prior = getattr(model, "edge_prior", None)
+    if edge_prior is not None:
+        payload["edge_prior_state_dict"] = edge_prior.state_dict()
     if optimizer is not None:
         payload["optimizer_state_dict"] = optimizer.state_dict()
     if scheduler is not None:

@@ -6,6 +6,7 @@ import unittest
 import torch
 
 from models.edge_prior import (
+    EdgePriorResidualFusion,
     GenerativeEdgePrior,
     build_structural_edge_target,
     edge_prior_loss,
@@ -13,6 +14,18 @@ from models.edge_prior import (
 
 
 class EdgePriorTest(unittest.TestCase):
+    def test_residual_fusion_is_bounded_and_zero_initialized(self):
+        fusion = EdgePriorResidualFusion(hidden_channels=16, max_logit_delta=1.0)
+        boundary = torch.randn(2, 1, 32, 32)
+        prior = torch.randn(2, 3, 64, 64)
+        initial = fusion(boundary, prior)
+        torch.testing.assert_close(initial, torch.zeros_like(initial))
+
+        loss = (initial - 0.25).square().mean()
+        loss.backward()
+        self.assertIsNotNone(fusion.out.weight.grad)
+        self.assertGreater(float(fusion.out.weight.grad.abs().sum()), 0.0)
+
     def test_structural_target_rejects_flat_field_and_detects_step(self):
         flat = torch.full((1, 3, 64, 64), 0.5)
         step = flat.clone()

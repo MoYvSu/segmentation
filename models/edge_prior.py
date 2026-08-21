@@ -94,6 +94,93 @@ class GenerativeEdgePrior(nn.Module):
         return torch.sigmoid(raw[:, 0:1]), torch.tanh(raw[:, 1:3])
 
 
+class EdgePriorResidualFusion(nn.Module):
+    """Bounded, baseline-preserving correction from the frozen edge prior."""
+
+    def __init__(self, hidden_channels: int = 32, max_logit_delta: float = 1.0):
+        super().__init__()
+        hidden_channels = int(hidden_channels)
+        if hidden_channels < 8:
+            raise ValueError("edge-prior fusion hidden_channels must be >= 8")
+        self.max_logit_delta = float(max_logit_delta)
+        self.body = nn.Sequential(
+            nn.Conv2d(5, hidden_channels, 3, padding=1, bias=False),
+            _group_norm(hidden_channels),
+            nn.GELU(),
+            nn.Conv2d(
+                hidden_channels, hidden_channels // 2, 3, padding=1, bias=False
+            ),
+            _group_norm(hidden_channels // 2),
+            nn.GELU(),
+        )
+        self.out = nn.Conv2d(hidden_channels // 2, 1, 1, bias=True)
+        self._init_weights()
+        self.reset_output()
+
+    def _init_weights(self):
+        for module in self.modules():
+            if isinstance(module, nn.Conv2d):
+                nn.init.kaiming_normal_(
+                    module.weight, mode="fan_out", nonlinearity="relu"
+                )
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.GroupNorm):
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
+
+    def reset_output(self):
+        nn.init.zeros_(self.out.weight)
+        nn.init.zeros_(self.out.bias)
+
+    def forward(
+        self,
+        boundary_logits: torch.Tensor,
+        raw_edge_prior: torch.Tensor,
+    ) -> torch.Tensor:
+        if raw_edge_prior.shape[-2:] != boundary_logits.shape[-2:]:
+            raw_edge_prior = F.interpolate(
+                raw_edge_prior,
+                size=boundary_logits.shape[-2:],
+                mode="bilinear",
+                align_corners=False,
+            )
+        edge, orientation = GenerativeEdgePrior.decode(raw_edge_prior.detach())
+        boundary_probability = torch.sigmoid(boundary_logits.detach())
+        disagreement = edge - boundary_probability
+        inputs = torch.cat(
+            [boundary_probability, edge, orientation * edge, disagreement], dim=1
+        )
+        raw_delta = self.out(self.body(inputs))
+        return self.max_logit_delta * torch.tanh(raw_delta)
+
+
+def load_pretrained_edge_prior(
+    checkpoint_path: str,
+    *,
+    in_channels: Sequence[int] = (112, 224),
+    hidden_channels: int = 64,
+    map_location="cpu",
+) -> GenerativeEdgePrior:
+    """Load the retained G0b module and freeze it for downstream use."""
+    checkpoint = torch.load(
+        checkpoint_path, map_location=map_location, weights_only=False
+    )
+    state_dict = checkpoint.get("edge_prior_state_dict")
+    if not state_dict:
+        raise KeyError(
+            f"edge-prior checkpoint has no edge_prior_state_dict: {checkpoint_path}"
+        )
+    prior = GenerativeEdgePrior(
+        in_channels=in_channels, hidden_channels=hidden_channels
+    )
+    prior.load_state_dict(state_dict, strict=True)
+    for parameter in prior.parameters():
+        parameter.requires_grad_(False)
+    prior.eval()
+    return prior
+
+
 class FrozenEncoderEdgePrior(nn.Module):
     """Frozen E1 SAM2 encoder plus the fully retained edge-prior decoder."""
 

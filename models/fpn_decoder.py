@@ -24,6 +24,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import List, Optional
 
+from .edge_prior import EdgePriorResidualFusion
+
 logger = logging.getLogger(__name__)
 
 
@@ -242,6 +244,9 @@ class FPNDecoder(nn.Module):
         boundary_refine: bool = False,
         boundary_refine_version: str = "legacy_lowres",
         center_head: bool = False,
+        edge_prior_fusion: bool = False,
+        edge_prior_fusion_hidden: int = 32,
+        edge_prior_max_logit_delta: float = 1.0,
     ):
         """
         Args:
@@ -256,6 +261,7 @@ class FPNDecoder(nn.Module):
             boundary_refine_version: ``legacy_lowres`` 保持旧 checkpoint 行为；
                 ``v2_fullres_isolated`` 使用原始分辨率图像并切断语义梯度。
             center_head: 增加轻量中心热图头，复用 boundary FPN。
+            edge_prior_fusion: 启用冻结 G0b 结构先验的有界残差融合。
         """
         super().__init__()
         if in_channels is None:
@@ -316,6 +322,7 @@ class FPNDecoder(nn.Module):
             )
         self.boundary_refine_version = boundary_refine_version
         self.center_head_enabled = bool(center_head)
+        self.edge_prior_fusion_enabled = bool(edge_prior_fusion)
         self.center_branch = None
         if self.center_head_enabled:
             self.center_branch = nn.Sequential(
@@ -332,6 +339,12 @@ class FPNDecoder(nn.Module):
             self.boundary_refine_head = BoundaryRefineHead(
                 fpn_channels=fpn_channels, img_ch=3, hidden=96
             )
+        self.edge_prior_fusion = None
+        if self.edge_prior_fusion_enabled:
+            self.edge_prior_fusion = EdgePriorResidualFusion(
+                hidden_channels=edge_prior_fusion_hidden,
+                max_logit_delta=edge_prior_max_logit_delta,
+            )
 
         self._init_weights()
         if self.boundary_refine:
@@ -339,6 +352,8 @@ class FPNDecoder(nn.Module):
             # boundary head, so a new high-resolution head cannot saturate it.
             nn.init.zeros_(self.boundary_refine_head.out.weight)
             nn.init.zeros_(self.boundary_refine_head.out.bias)
+        if self.edge_prior_fusion is not None:
+            self.edge_prior_fusion.reset_output()
 
     def _init_weights(self):
         """使用 Kaiming 初始化（随机初始化，不加载预训练权重）。"""
@@ -352,7 +367,8 @@ class FPNDecoder(nn.Module):
                 nn.init.zeros_(m.bias)
 
     def forward(
-        self, features, output_size=None, image=None, boundary_features=None
+        self, features, output_size=None, image=None, boundary_features=None,
+        edge_prior_raw=None,
     ):
         """
         前向传播：双 FPN 独立提取 + 各自输出头 + 拼接。
@@ -364,6 +380,7 @@ class FPNDecoder(nn.Module):
             output_size: 可选，最终输出的 (H, W) 尺寸。
             image: 原始输入图像 [B, 3, H, W]（boundary_refine 启用时提供，
                    作为高分辨率边界的高频引导）。
+            edge_prior_raw: 冻结 G0b 输出的边缘/方向原始张量。
 
         Returns:
             output: [B, 2, H, W]
@@ -447,6 +464,14 @@ class FPNDecoder(nn.Module):
                 center_logits, size=boundary_logits.shape[-2:],
                 mode="bilinear", align_corners=True,
             )
+        if self.edge_prior_fusion is not None:
+            if edge_prior_raw is None:
+                raise ValueError(
+                    "decoder.edge_prior_fusion=True requires edge_prior_raw"
+                )
+            boundary_logits = boundary_logits + self.edge_prior_fusion(
+                boundary_logits, edge_prior_raw
+            )
         outputs = [seg_logits, boundary_logits]
         if center_logits is not None:
             outputs.append(center_logits)
@@ -477,6 +502,9 @@ class FPNDecoder(nn.Module):
         if self.center_branch is not None:
             for param in self.center_branch.parameters():
                 param.requires_grad = False
+        if self.edge_prior_fusion is not None:
+            for param in self.edge_prior_fusion.parameters():
+                param.requires_grad = False
         logger_freeze_info = (
             f"Boundary branch FROZEN (boundary_fpn + boundary_branch"
             f"{' + boundary_refine_head' if self.boundary_refine else ''}, "
@@ -502,6 +530,17 @@ class FPNDecoder(nn.Module):
         )
         print(f"Boundary base {state} (boundary_fpn + boundary_branch, {count} params)")
 
+    def set_edge_prior_fusion_only(self):
+        """Freeze the historical model and calibrate only the new fusion head."""
+        if self.edge_prior_fusion is None:
+            raise ValueError("edge-prior fusion-only mode requires fusion enabled")
+        for parameter in self.parameters():
+            parameter.requires_grad_(False)
+        for parameter in self.edge_prior_fusion.parameters():
+            parameter.requires_grad_(True)
+        count = sum(p.numel() for p in self.edge_prior_fusion.parameters())
+        print(f"Edge-prior fusion ONLY ({count} trainable params)")
+
     def reset_boundary_branch(self):
         """重新初始化边界路径，保留语义路径和 encoder 权重。"""
         modules = [self.boundary_fpn, self.boundary_branch]
@@ -509,6 +548,8 @@ class FPNDecoder(nn.Module):
             modules.append(self.boundary_refine_head)
         if self.center_branch is not None:
             modules.append(self.center_branch)
+        if self.edge_prior_fusion is not None:
+            modules.append(self.edge_prior_fusion)
         for module in modules:
             for m in module.modules():
                 if isinstance(m, nn.Conv2d):
@@ -518,6 +559,8 @@ class FPNDecoder(nn.Module):
                 elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
                     nn.init.ones_(m.weight)
                     nn.init.zeros_(m.bias)
+        if self.edge_prior_fusion is not None:
+            self.edge_prior_fusion.reset_output()
         print("Boundary branch RESET (boundary FPN/head reinitialized)")
     def param_count(self):
         """返回解码头的参数总量。"""
@@ -546,11 +589,12 @@ class SegmentationModel(nn.Module):
     完整分割模型：冻结 SAM 2 Encoder + 随机初始化双 FPN Decoder（边界预测版本）。
     """
 
-    def __init__(self, encoder, decoder, boundary_adapter=None):
+    def __init__(self, encoder, decoder, boundary_adapter=None, edge_prior=None):
         super().__init__()
         self.encoder = encoder
         self.decoder = decoder
         self.boundary_adapter = boundary_adapter
+        self.edge_prior = edge_prior
 
     def forward(self, x, output_size=None):
         """
@@ -569,12 +613,19 @@ class SegmentationModel(nn.Module):
         boundary_features = features
         if self.boundary_adapter is not None:
             boundary_features = self.boundary_adapter(features, gated=True)
-        output = self.decoder(
-            features,
-            output_size=output_size,
-            image=x,
-            boundary_features=boundary_features,
-        )
+        edge_prior_raw = None
+        if self.edge_prior is not None:
+            self.edge_prior.eval()
+            with torch.no_grad():
+                edge_prior_raw = self.edge_prior(features[:2], x.shape[-2:])
+        decoder_kwargs = {
+            "output_size": output_size,
+            "image": x,
+            "boundary_features": boundary_features,
+        }
+        if edge_prior_raw is not None:
+            decoder_kwargs["edge_prior_raw"] = edge_prior_raw
+        output = self.decoder(features, **decoder_kwargs)
         return output
 
     def total_param_count(self):
@@ -585,11 +636,16 @@ class SegmentationModel(nn.Module):
             sum(p.numel() for p in self.boundary_adapter.parameters())
             if self.boundary_adapter is not None else 0
         )
-        total = encoder_params + decoder_params + adapter_params
+        edge_prior_params = (
+            sum(p.numel() for p in self.edge_prior.parameters())
+            if self.edge_prior is not None else 0
+        )
+        total = encoder_params + decoder_params + adapter_params + edge_prior_params
         return {
             "encoder": encoder_params,
             "decoder": decoder_params,
             "boundary_adapter": adapter_params,
+            "edge_prior": edge_prior_params,
             "total": total,
             "total_M": total / 1e6,
             "constraint_passed": total < 500e6,

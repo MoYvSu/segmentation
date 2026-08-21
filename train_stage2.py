@@ -52,6 +52,7 @@ from data.dataset_semi import (
     unlabeled_collate_fn,
 )
 from models.fpn_decoder import FPNDecoder, SegmentationModel
+from models.edge_prior import load_pretrained_edge_prior
 from models.gda_mim import load_pretrained_gda
 from models.lora import (
     count_lora_params,
@@ -139,6 +140,8 @@ def set_student_train_modes(student_model):
         modules.append(decoder.boundary_refine_head)
     if getattr(decoder, "center_branch", None) is not None:
         modules.append(decoder.center_branch)
+    if getattr(decoder, "edge_prior_fusion", None) is not None:
+        modules.append(decoder.edge_prior_fusion)
     for module in modules:
         params = list(module.parameters())
         if params and not any(param.requires_grad for param in params):
@@ -150,6 +153,9 @@ def set_student_train_modes(student_model):
         # layer updates if the adapter implementation changes later.
         if not any(p.requires_grad for p in boundary_adapter.adapters.parameters()):
             boundary_adapter.adapters.eval()
+    edge_prior = getattr(student_model, "edge_prior", None)
+    if edge_prior is not None:
+        edge_prior.eval()
 
 
 def snapshot_parameters(named_parameters):
@@ -313,6 +319,13 @@ def build_model(config, device):
             "boundary_refine_version", "legacy_lowres"
         ),
         center_head=decoder_cfg.get("center_head", False),
+        edge_prior_fusion=decoder_cfg.get("edge_prior_fusion", False),
+        edge_prior_fusion_hidden=decoder_cfg.get(
+            "edge_prior_fusion_hidden", 32
+        ),
+        edge_prior_max_logit_delta=decoder_cfg.get(
+            "edge_prior_max_logit_delta", 1.0
+        ),
     )
 
     boundary_adapter = None
@@ -343,7 +356,32 @@ def build_model(config, device):
             bool(gda_cfg.get("train_gates", True)),
         )
 
-    model = SegmentationModel(encoder, decoder, boundary_adapter=boundary_adapter)
+    edge_prior = None
+    edge_prior_cfg = config.get("edge_prior", {})
+    if edge_prior_cfg.get("enabled", False):
+        prior_checkpoint = project_path(
+            config, edge_prior_cfg.get("checkpoint", "")
+        )
+        if not prior_checkpoint or not os.path.exists(prior_checkpoint):
+            raise FileNotFoundError(
+                f"Edge-prior checkpoint not found: {prior_checkpoint or '<empty>'}"
+            )
+        edge_prior = load_pretrained_edge_prior(
+            prior_checkpoint,
+            in_channels=encoder.get_stage_channels()[:2],
+            hidden_channels=int(edge_prior_cfg.get("hidden_channels", 64)),
+            map_location=device,
+        )
+        logger.info("Retained G0b edge prior: ENABLED (%s)", prior_checkpoint)
+    if decoder_cfg.get("edge_prior_fusion", False) and edge_prior is None:
+        raise ValueError(
+            "decoder.edge_prior_fusion=True requires edge_prior.enabled=True"
+        )
+
+    model = SegmentationModel(
+        encoder, decoder, boundary_adapter=boundary_adapter,
+        edge_prior=edge_prior,
+    )
     model = model.to(device)
     return model
 
@@ -395,6 +433,26 @@ def load_gda_checkpoint_state(model, checkpoint, *, required=False, tag="checkpo
         return False
     adapter.load_state_dict(state_dict, strict=True)
     logger.info("%s GDA state loaded; gate_stats=%s", tag, adapter.gate_statistics())
+    return True
+
+
+def load_edge_prior_checkpoint_state(
+    model, checkpoint, *, required=False, tag="checkpoint"
+):
+    """Restore the retained G0b state embedded in a downstream checkpoint."""
+    prior = getattr(model, "edge_prior", None)
+    state_dict = checkpoint.get("edge_prior_state_dict")
+    if prior is None:
+        if state_dict:
+            logger.warning("%s contains edge-prior state but config disables it", tag)
+        return False
+    if not state_dict:
+        if required:
+            raise KeyError(f"{tag} has no edge_prior_state_dict")
+        return False
+    prior.load_state_dict(state_dict, strict=True)
+    prior.eval()
+    logger.info("%s retained edge-prior state loaded", tag)
     return True
 
 
@@ -597,6 +655,10 @@ def train_one_epoch(
     refine_residual_sum_std = 0.0
     refine_residual_max_abs = 0.0
     refine_residual_calls = 0
+    fusion_residual_sum_abs = 0.0
+    fusion_residual_sum_std = 0.0
+    fusion_residual_max_abs = 0.0
+    fusion_residual_calls = 0
     n_steps = 0
 
     clip_params = list(student_model.decoder.parameters())
@@ -605,6 +667,11 @@ def train_one_epoch(
     refine_params = (
         list(student_model.decoder.boundary_refine_head.parameters())
         if getattr(student_model.decoder, "boundary_refine", False)
+        else []
+    )
+    fusion_params = (
+        list(student_model.decoder.edge_prior_fusion.parameters())
+        if getattr(student_model.decoder, "edge_prior_fusion", None) is not None
         else []
     )
 
@@ -626,6 +693,26 @@ def train_one_epoch(
 
         refine_hook = student_model.decoder.boundary_refine_head.register_forward_hook(
             _capture_refine_output
+        )
+
+    fusion_hook = None
+    if diagnostics_enabled and fusion_params:
+        def _capture_fusion_output(module, inputs, output):
+            del module, inputs
+            nonlocal fusion_residual_sum_abs
+            nonlocal fusion_residual_sum_std
+            nonlocal fusion_residual_max_abs
+            nonlocal fusion_residual_calls
+            value = output.detach().float()
+            fusion_residual_sum_abs += float(value.abs().mean())
+            fusion_residual_sum_std += float(value.std(unbiased=False))
+            fusion_residual_max_abs = max(
+                fusion_residual_max_abs, float(value.abs().max())
+            )
+            fusion_residual_calls += 1
+
+        fusion_hook = student_model.decoder.edge_prior_fusion.register_forward_hook(
+            _capture_fusion_output
         )
 
     # 不使用 itertools.cycle：它会缓存第一轮已增强 batch，之后只重复旧张量。
@@ -768,7 +855,9 @@ def train_one_epoch(
             if grad_clip > 0 or diagnostics_enabled:
                 scaler.unscale_(optimizer)
             if diagnostics_enabled:
-                total_refine_grad_norm += gradient_l2_norm(refine_params)
+                total_refine_grad_norm += gradient_l2_norm(
+                    refine_params + fusion_params
+                )
             if grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(clip_params, grad_clip)
             scaler.step(optimizer)
@@ -776,7 +865,9 @@ def train_one_epoch(
         else:
             total_loss.backward()
             if diagnostics_enabled:
-                total_refine_grad_norm += gradient_l2_norm(refine_params)
+                total_refine_grad_norm += gradient_l2_norm(
+                    refine_params + fusion_params
+                )
             if grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(clip_params, grad_clip)
             optimizer.step()
@@ -810,9 +901,12 @@ def train_one_epoch(
 
     if refine_hook is not None:
         refine_hook.remove()
+    if fusion_hook is not None:
+        fusion_hook.remove()
 
     n = max(n_steps, 1)
     refine_n = max(refine_residual_calls, 1)
+    fusion_n = max(fusion_residual_calls, 1)
     return {
         "loss": total_loss_sum / n,
         "sup_loss": total_sup_loss / n,
@@ -831,6 +925,9 @@ def train_one_epoch(
         "refine_residual_mean_abs": refine_residual_sum_abs / refine_n,
         "refine_residual_std": refine_residual_sum_std / refine_n,
         "refine_residual_max_abs": refine_residual_max_abs,
+        "fusion_residual_mean_abs": fusion_residual_sum_abs / fusion_n,
+        "fusion_residual_std": fusion_residual_sum_std / fusion_n,
+        "fusion_residual_max_abs": fusion_residual_max_abs,
     }
 
 
@@ -1100,6 +1197,7 @@ def main():
     semi_cfg = config.get("semi_supervised", {})
     lora_cfg = config.get("lora", {})
     gda_cfg = config.get("gda", {})
+    edge_prior_cfg = config.get("edge_prior", {})
 
     train_seed = int(train_cfg.get("seed", config.get("data", {}).get("seed", 42)))
     deterministic = bool(train_cfg.get("deterministic", False))
@@ -1223,6 +1321,18 @@ def main():
             f"(refine_only_epochs={refine_only_epochs})"
         )
 
+    edge_prior_fusion_only = bool(edge_prior_cfg.get("only_fusion", False))
+    if edge_prior_fusion_only:
+        if refine_training_enabled:
+            raise ValueError(
+                "edge_prior.only_fusion=True requires refine_training.enabled=False"
+            )
+        student_model.decoder.set_edge_prior_fusion_only()
+        logger.info(
+            "G2a edge-prior calibration: ONLY fusion head is trainable; "
+            "E1 decoder, refine, semantic, LoRA, and G0b prior are frozen"
+        )
+
     if gda_cfg.get("only_gates", False):
         if getattr(student_model, "boundary_adapter", None) is None:
             raise ValueError("gda.only_gates=True requires gda.enabled=True")
@@ -1310,6 +1420,7 @@ def main():
     seg_params = []
     boundary_params = []
     refine_params = []
+    edge_prior_fusion_params = []
     for name, param in student_model.decoder.named_parameters():
         if "seg_fpn" in name or "seg_branch" in name:
             if param.requires_grad:
@@ -1317,6 +1428,9 @@ def main():
         elif "boundary_refine_head" in name:
             if param.requires_grad:
                 refine_params.append(param)
+        elif "edge_prior_fusion" in name:
+            if param.requires_grad:
+                edge_prior_fusion_params.append(param)
         elif (
             "boundary_fpn" in name
             or "boundary_branch" in name
@@ -1366,6 +1480,13 @@ def main():
     if len(refine_params) > 0:
         param_groups.append({
             "params": refine_params, "lr": refine_lr, "name": "boundary_refine"
+        })
+    if len(edge_prior_fusion_params) > 0:
+        fusion_lr_ratio = float(edge_prior_cfg.get("learning_rate_ratio", 1.0))
+        param_groups.append({
+            "params": edge_prior_fusion_params,
+            "lr": base_lr * fusion_lr_ratio,
+            "name": "edge_prior_fusion",
         })
     if len(lora_params) > 0:
         param_groups.append({"params": lora_params, "lr": lora_lr, "name": "lora"})
@@ -1671,6 +1792,11 @@ def main():
             required=bool(gda_cfg.get("enabled", False)),
             tag="Resume checkpoint",
         )
+        load_edge_prior_checkpoint_state(
+            student_model, checkpoint,
+            required=bool(edge_prior_cfg.get("enabled", False)),
+            tag="Resume checkpoint",
+        )
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         try:
             scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
@@ -1704,6 +1830,10 @@ def main():
             n_lora = load_lora_state_dict(student_model, init_checkpoint["lora_state_dict"])
             logger.info(f"  LoRA state loaded: {n_lora} 个参数张量")
         load_gda_checkpoint_state(
+            student_model, init_checkpoint, required=False,
+            tag="Init checkpoint",
+        )
+        load_edge_prior_checkpoint_state(
             student_model, init_checkpoint, required=False,
             tag="Init checkpoint",
         )
@@ -2032,6 +2162,13 @@ def main():
                 f"lora_max_delta={frozen_lora_max_delta:.3e} "
                 f"gda_gate_delta={gda_gate_delta_l2:.3e}"
             )
+            if getattr(student_model.decoder, "edge_prior_fusion", None) is not None:
+                logger.info(
+                    "  Edge-prior fusion: "
+                    f"residual_abs={train_metrics['fusion_residual_mean_abs']:.3e} "
+                    f"residual_std={train_metrics['fusion_residual_std']:.3e} "
+                    f"residual_max={train_metrics['fusion_residual_max_abs']:.3e}"
+                )
         if getattr(student_model, "boundary_adapter", None) is not None:
             gate_stats = student_model.boundary_adapter.gate_statistics()
             gda_gate_values = [item["mean"] for item in gate_stats]
@@ -2122,6 +2259,7 @@ def main():
             "refine_stage": refine_stage,
             "lr_boundary_base": lr_by_group.get("boundary_base", 0.0),
             "lr_boundary_refine": lr_by_group.get("boundary_refine", 0.0),
+            "lr_edge_prior_fusion": lr_by_group.get("edge_prior_fusion", 0.0),
             "lr_gda_gates": lr_by_group.get("gda_gates", 0.0),
             "train_loss": train_metrics["loss"],
             "sup_loss": train_metrics["sup_loss"],
@@ -2142,6 +2280,9 @@ def main():
             "refine_residual_mean_abs": train_metrics["refine_residual_mean_abs"],
             "refine_residual_std": train_metrics["refine_residual_std"],
             "refine_residual_max_abs": train_metrics["refine_residual_max_abs"],
+            "fusion_residual_mean_abs": train_metrics["fusion_residual_mean_abs"],
+            "fusion_residual_std": train_metrics["fusion_residual_std"],
+            "fusion_residual_max_abs": train_metrics["fusion_residual_max_abs"],
             "refine_out_weight_norm": refine_out_weight_norm,
             "refine_out_weight_max": refine_out_weight_max,
             "refine_delta_l2": refine_delta_l2,
