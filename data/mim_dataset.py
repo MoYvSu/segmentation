@@ -138,18 +138,25 @@ class MaskedMetallographyDataset(Dataset):
             image = np.clip(image + np.random.uniform(-0.12, 0.12) * field, 0.0, 1.0)
         return np.clip(image * 255.0, 0, 255).astype(np.uint8)
 
-    def _mask(self) -> np.ndarray:
+    def _mask(self, index: int) -> np.ndarray:
         size = self.crop_size
-        target_ratio = float(np.random.uniform(*self.mask_ratio_range))
+        # Holdout corruption must remain fixed across epochs; otherwise
+        # validation loss and monitor panels measure a different task each time.
+        rng = (
+            np.random
+            if self.split == "train"
+            else np.random.RandomState(104729 + int(index))
+        )
+        target_ratio = float(rng.uniform(*self.mask_ratio_range))
         target_pixels = int(size * size * target_ratio)
         mask = np.zeros((size, size), dtype=np.uint8)
         attempts = 0
         while int(mask.sum()) < target_pixels and attempts < 4096:
-            patch = int(np.random.randint(self.mask_patch_range[0], self.mask_patch_range[1] + 1))
-            height = int(np.random.randint(max(8, patch // 2), patch + 1))
-            width = int(np.random.randint(max(8, patch // 2), patch + 1))
-            y0 = int(np.random.randint(0, max(1, size - height + 1)))
-            x0 = int(np.random.randint(0, max(1, size - width + 1)))
+            patch = int(rng.randint(self.mask_patch_range[0], self.mask_patch_range[1] + 1))
+            height = int(rng.randint(max(8, patch // 2), patch + 1))
+            width = int(rng.randint(max(8, patch // 2), patch + 1))
+            y0 = int(rng.randint(0, max(1, size - height + 1)))
+            x0 = int(rng.randint(0, max(1, size - width + 1)))
             mask[y0:y0 + height, x0:x0 + width] = 1
             attempts += 1
         return mask
@@ -162,7 +169,7 @@ class MaskedMetallographyDataset(Dataset):
         clean = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         clean = self._geometry(self._crop(clean))
         input_view = self._physical_view(clean)
-        mask = self._mask()
+        mask = self._mask(index)
         mean_color = input_view.reshape(-1, 3).mean(axis=0).astype(np.uint8)
         masked = input_view.copy()
         masked[mask > 0] = mean_color

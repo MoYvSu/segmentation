@@ -1,0 +1,32 @@
+# G0b: fully retained generative edge prior on the allowed unlabeled images.
+# The frozen E1 encoder receives masked/physically degraded views.  The retained
+# decoder predicts multi-scale-stable edge magnitude and orientation, not RGB.
+_base: stage2_refine_v6_e1_physaug15.yaml
+
+edge_prior_pretrain:
+  base_checkpoint: outputs/stage2_refine_v6_e1_physaug15/best_model_stage2.pth
+  unlabeled_dir: data/unlabeled
+  holdout_manifest: config/monitor/unlabeled_holdout_v1.txt
+  output_dir: outputs/edge_prior_g0b
+  seed: 42
+  crop_size: 512
+  mask_ratio_range: [0.20, 0.35]
+  mask_patch_range: [16, 48]
+  physical_aug_probability: 0.90
+  hidden_channels: 64
+  positive_weight: 4.0
+  masked_region_weight: 1.5
+  dice_weight: 0.50
+  orientation_weight: 0.25
+  multiscale_weight: 0.25
+  background_weight: 0.10
+  epochs: 20
+  batch_size: 4
+  num_workers: 8
+  learning_rate: 2.0e-4
+  min_learning_rate: 2.0e-6
+  weight_decay: 0.02
+  grad_clip: 1.0
+  amp: true
+  checkpoint_interval: 4
+  monitor_images: 8

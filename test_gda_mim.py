@@ -162,6 +162,10 @@ class GDAMIMTest(unittest.TestCase):
             self.assertEqual(len(train), 2)
             self.assertEqual(len(holdout), 1)
             self.assertEqual(Path(holdout.samples[0]).stem, "train_001")
+            holdout_a = holdout[0]
+            holdout_b = holdout[0]
+            self.assertTrue(torch.equal(holdout_a["mask"], holdout_b["mask"]))
+            self.assertTrue(torch.equal(holdout_a["input"], holdout_b["input"]))
             sample = train[0]
             self.assertEqual(tuple(sample["input"].shape), (3, 64, 64))
             self.assertGreater(float(sample["mask"].mean()), 0.45)
