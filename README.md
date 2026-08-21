@@ -3,6 +3,9 @@
 > 技术路线：冻结 SAM 2 Image Encoder + LoRA 域适配 + 独立语义/边界 FPN + 两阶段训练 +
 > 受阻分水岭实例分割。当前状态、入口与产物约定以 [docs/PIPELINE.md](docs/PIPELINE.md) 为准。
 
+颜色先验分析已记录在 [docs/COLOR_SEPARABILITY.md](docs/COLOR_SEPARABILITY.md)。后续对话进程在
+讨论语义阈值、颜色辅助或数据增强前应先阅读该文档。
+
 ## 当前进度
 
 - **当前参考模型**：`outputs/stage2_v6/best_model_stage2.pth`。它仍同时存在中心区域
@@ -80,7 +83,8 @@ segmentationv2/
 │   └── progressive_aug.py       # 渐进式外观增强（学生输入专用）
 ├── tools/
 │   ├── preprocess_labels.py     # 离线边界净化 GT 生成
-│   └── precompute_pseudo_labels.py  # Stage-1 边界伪标签离线预计算（TTA + 质量报告）
+│   ├── precompute_pseudo_labels.py  # Stage-1 边界伪标签离线预计算（TTA + 质量报告）
+│   └── tmp_color_separability.py # 临时 GT 颜色可分性分析脚本（未接入训练）
 ├── weights/                     # 本地权重（sam2_hiera_base_plus.pt）
 ├── segment-anything-2/          # SAM 2 源码（本地仓库）
 ├── train.py                     # Stage 1 训练入口
