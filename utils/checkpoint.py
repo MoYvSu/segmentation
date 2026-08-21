@@ -8,7 +8,7 @@ import subprocess
 from typing import Any, Dict, Iterable, Optional
 
 
-FORMAT_VERSION = 3
+FORMAT_VERSION = 4
 
 
 def architecture_from_config(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -35,6 +35,13 @@ def architecture_from_config(config: Dict[str, Any]) -> Dict[str, Any]:
         "gda_bottleneck_ratio": (
             int(gda.get("bottleneck_ratio", 8))
             if gda.get("enabled", False) else 0
+        ),
+        "gda_gate_mode": (
+            gda.get("gate_mode", "scalar") if gda.get("enabled", False) else "none"
+        ),
+        "gda_active_scales": (
+            tuple(gda.get("active_scales", (0, 1, 2, 3)))
+            if gda.get("enabled", False) else ()
         ),
     }
 
@@ -64,6 +71,8 @@ def architecture_from_state_dict(
         "lora_rank": lora_rank,
         "gda_enabled": False,
         "gda_bottleneck_ratio": 0,
+        "gda_gate_mode": "none",
+        "gda_active_scales": (),
     }
 
 
@@ -90,6 +99,7 @@ def architecture_mismatches(
         "encoder", "decoder", "fpn_channels", "num_classes", "boundary_refine",
         "boundary_refine_version", "center_head", "lora_enabled", "lora_rank",
         "gda_enabled", "gda_bottleneck_ratio",
+        "gda_gate_mode", "gda_active_scales",
     ),
 ) -> Dict[str, tuple[Any, Any]]:
     mismatches = {}

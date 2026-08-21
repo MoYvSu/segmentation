@@ -54,13 +54,62 @@ class GenerativeDomainAdapterPyramid(nn.Module):
         self,
         channels: Sequence[int] = (112, 224, 448, 896),
         bottleneck_ratio: int = 8,
+        gate_mode: str = "scalar",
+        active_scales: Sequence[int] | None = None,
     ):
         super().__init__()
         self.channels = tuple(int(ch) for ch in channels)
+        if gate_mode not in {"scalar", "channel"}:
+            raise ValueError("gate_mode must be 'scalar' or 'channel'")
+        self.gate_mode = gate_mode
+        self.active_scales = tuple(
+            range(len(self.channels)) if active_scales is None
+            else sorted({int(index) for index in active_scales})
+        )
+        if any(index < 0 or index >= len(self.channels) for index in self.active_scales):
+            raise ValueError(f"invalid active_scales: {self.active_scales}")
         self.adapters = nn.ModuleList(
             GenerativeDomainAdapter(ch, bottleneck_ratio) for ch in self.channels
         )
-        self.gates = nn.Parameter(torch.zeros(len(self.channels)))
+        gate_count = (
+            len(self.channels) if gate_mode == "scalar" else sum(self.channels)
+        )
+        self.gates = nn.Parameter(torch.zeros(gate_count))
+
+    def _gate_slices(self):
+        if self.gate_mode == "scalar":
+            return [slice(index, index + 1) for index in range(len(self.channels))]
+        slices = []
+        start = 0
+        for channels in self.channels:
+            slices.append(slice(start, start + channels))
+            start += channels
+        return slices
+
+    def gate_for_scale(self, index: int) -> torch.Tensor:
+        return self.gates[self._gate_slices()[index]]
+
+    def gate_statistics(self):
+        stats = []
+        for index in range(len(self.channels)):
+            values = torch.tanh(self.gate_for_scale(index).detach().float())
+            stats.append({
+                "scale": index,
+                "active": index in self.active_scales,
+                "mean": float(values.mean()),
+                "mean_abs": float(values.abs().mean()),
+                "max_abs": float(values.abs().max()),
+            })
+        return stats
+
+    def active_gate_l1(self) -> torch.Tensor:
+        values = [
+            self.gate_for_scale(index).abs().mean()
+            for index in self.active_scales
+        ]
+        if not values:
+            return self.gates.sum() * 0.0
+        return torch.stack(values).mean()
 
     def deltas(self, features: Sequence[torch.Tensor]) -> List[torch.Tensor]:
         if len(features) != len(self.adapters):
@@ -78,11 +127,16 @@ class GenerativeDomainAdapterPyramid(nn.Module):
         deltas = self.deltas(features)
         if gated:
             # tanh keeps a learned gate bounded while gate=0 is an exact identity.
-            scales = torch.tanh(self.gates)
-            return [
-                feature + scales[i] * delta
-                for i, (feature, delta) in enumerate(zip(features, deltas))
-            ]
+            outputs = []
+            for index, (feature, delta) in enumerate(zip(features, deltas)):
+                if index not in self.active_scales:
+                    outputs.append(feature)
+                    continue
+                scale = torch.tanh(self.gate_for_scale(index))
+                if self.gate_mode == "channel":
+                    scale = scale.view(1, -1, 1, 1)
+                outputs.append(feature + scale * delta)
+            return outputs
         return [feature + delta for feature, delta in zip(features, deltas)]
 
     def adapter_parameters(self) -> Iterable[nn.Parameter]:
@@ -94,6 +148,8 @@ def load_pretrained_gda(
     *,
     channels: Sequence[int] = (112, 224, 448, 896),
     bottleneck_ratio: int = 8,
+    gate_mode: str = "scalar",
+    active_scales: Sequence[int] | None = None,
     map_location="cpu",
     freeze_adapters: bool = True,
     train_gates: bool = True,
@@ -111,8 +167,24 @@ def load_pretrained_gda(
     if not state_dict:
         raise KeyError(f"checkpoint has no gda_state_dict: {checkpoint_path}")
 
-    gda = GenerativeDomainAdapterPyramid(channels, bottleneck_ratio)
-    gda.load_state_dict(state_dict, strict=True)
+    gda = GenerativeDomainAdapterPyramid(
+        channels,
+        bottleneck_ratio,
+        gate_mode=gate_mode,
+        active_scales=active_scales,
+    )
+    state_dict = dict(state_dict)
+    source_gates = state_dict.get("gates")
+    if source_gates is not None and source_gates.shape != gda.gates.shape:
+        # G0 scalar gates are intentionally discarded when G1b switches to
+        # zero-initialized channel gates; pretrained adapter weights remain.
+        state_dict.pop("gates")
+    missing, unexpected = gda.load_state_dict(state_dict, strict=False)
+    allowed_missing = {"gates"} if "gates" not in state_dict else set()
+    if set(missing) != allowed_missing or unexpected:
+        raise RuntimeError(
+            f"incompatible GDA state: missing={missing}, unexpected={unexpected}"
+        )
     for parameter in gda.adapters.parameters():
         parameter.requires_grad_(not freeze_adapters)
     gda.gates.requires_grad_(bool(train_gates))

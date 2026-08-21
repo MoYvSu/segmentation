@@ -96,6 +96,8 @@ def build_model(
             gda_checkpoint,
             channels=encoder.get_stage_channels(),
             bottleneck_ratio=int(gda_cfg.get("bottleneck_ratio", 8)),
+            gate_mode=gda_cfg.get("gate_mode", "scalar"),
+            active_scales=gda_cfg.get("active_scales"),
             map_location=device,
             freeze_adapters=True,
             train_gates=False,
@@ -123,8 +125,8 @@ def build_model(
                 )
             model.boundary_adapter.load_state_dict(gda_state, strict=True)
             logger.info(
-                "GDA state loaded; gates=%s",
-                model.boundary_adapter.gates.detach().cpu().tolist(),
+                "GDA state loaded; gate_stats=%s",
+                model.boundary_adapter.gate_statistics(),
             )
         # 含 lora_state_dict 的检查点：注入并加载 LoRA（trunk 域适配）
         from models.lora import load_lora_from_checkpoint

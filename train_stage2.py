@@ -327,13 +327,18 @@ def build_model(config, device):
             gda_checkpoint,
             channels=encoder.get_stage_channels(),
             bottleneck_ratio=int(gda_cfg.get("bottleneck_ratio", 8)),
+            gate_mode=gda_cfg.get("gate_mode", "scalar"),
+            active_scales=gda_cfg.get("active_scales"),
             map_location=device,
             freeze_adapters=bool(gda_cfg.get("freeze_adapters", True)),
             train_gates=bool(gda_cfg.get("train_gates", True)),
         )
         logger.info(
-            "Boundary GDA: ENABLED (%s, adapter_trainable=%s, gates_trainable=%s)",
+            "Boundary GDA: ENABLED (%s, gate_mode=%s, active_scales=%s, "
+            "adapter_trainable=%s, gates_trainable=%s)",
             gda_checkpoint,
+            boundary_adapter.gate_mode,
+            boundary_adapter.active_scales,
             not bool(gda_cfg.get("freeze_adapters", True)),
             bool(gda_cfg.get("train_gates", True)),
         )
@@ -389,11 +394,7 @@ def load_gda_checkpoint_state(model, checkpoint, *, required=False, tag="checkpo
             raise KeyError(f"{tag} has no gda_state_dict")
         return False
     adapter.load_state_dict(state_dict, strict=True)
-    logger.info(
-        "%s GDA state loaded; gates=%s",
-        tag,
-        adapter.gates.detach().cpu().tolist(),
-    )
+    logger.info("%s GDA state loaded; gate_stats=%s", tag, adapter.gate_statistics())
     return True
 
 
@@ -544,6 +545,7 @@ def train_one_epoch(
     peak_hinge_weight=0.0, peak_threshold=0.8,
     rate_regularizer_weight=0.0, rate_slack=0.05,
     sem_boundary_align_weight=0.0,
+    gda_gate_l1_weight=0.0,
     diagnostics_enabled=False,
 ):
     """训练一个 epoch（双流混合 Batch + 可选 EMA 更新）。
@@ -590,6 +592,7 @@ def train_one_epoch(
     total_bnd_gap = 0.0
     total_bnd_rate = 0.0
     total_refine_grad_norm = 0.0
+    total_gda_gate_reg = 0.0
     refine_residual_sum_abs = 0.0
     refine_residual_sum_std = 0.0
     refine_residual_max_abs = 0.0
@@ -752,7 +755,13 @@ def train_one_epoch(
                 seg_consist_val = unsup_seg_loss.item()
                 boundary_consist_val = unsup_bnd_loss.item()
 
-        total_loss = sup_loss + unsup_loss
+        gda_gate_reg = torch.tensor(0.0, device=device)
+        boundary_adapter = getattr(student_model, "boundary_adapter", None)
+        if boundary_adapter is not None and gda_gate_l1_weight > 0:
+            gda_gate_reg = boundary_adapter.active_gate_l1()
+        total_loss = (
+            sup_loss + unsup_loss + gda_gate_l1_weight * gda_gate_reg
+        )
 
         if use_amp:
             scaler.scale(total_loss).backward()
@@ -783,6 +792,7 @@ def train_one_epoch(
         total_boundary += boundary_val
         total_seg_consist += seg_consist_val
         total_boundary_consist += boundary_consist_val
+        total_gda_gate_reg += float(gda_gate_reg.detach())
         total_bnd_max += bnd_stats.get("bnd_max", 0.0)
         total_bnd_pos += bnd_stats.get("bnd_pos_frac", 0.0)
         total_bnd_gap += bnd_stats.get("bnd_gap", 0.0)
@@ -794,7 +804,8 @@ def train_one_epoch(
                 f"  Step {step_idx + 1}/{num_steps}: "
                 f"total={total_loss.item():.4f} "
                 f"sup={sup_loss.item():.4f} (seg={seg_val:.4f} bnd={boundary_val:.4f}) "
-                f"unsup={unsup_loss.item():.4f} (s_c={seg_consist_val:.4f} b_c={boundary_consist_val:.4f})"
+                f"unsup={unsup_loss.item():.4f} (s_c={seg_consist_val:.4f} b_c={boundary_consist_val:.4f}) "
+                f"gda_l1={float(gda_gate_reg.detach()):.5f}"
             )
 
     if refine_hook is not None:
@@ -810,6 +821,7 @@ def train_one_epoch(
         "boundary": total_boundary / n,
         "seg_consist": total_seg_consist / n,
         "boundary_consist": total_boundary_consist / n,
+        "gda_gate_l1": total_gda_gate_reg / n,
         "bnd_max": total_bnd_max / n,
         "bnd_pos_frac": total_bnd_pos / n,
         "bnd_gap": total_bnd_gap / n,
@@ -910,7 +922,11 @@ def resolve_monitor_image_paths(config):
         if not os.path.exists(manifest_path):
             raise FileNotFoundError(f"Monitor manifest not found: {manifest_path}")
         with open(manifest_path, "r", encoding="utf-8") as handle:
-            names = [line.strip() for line in handle if line.strip()]
+            names = [
+                line.strip()
+                for line in handle
+                if line.strip() and not line.lstrip().startswith("#")
+            ]
         image_paths = [
             os.path.join(image_dir, name)
             for name in names
@@ -946,6 +962,7 @@ def monitor_inference(model, config, epoch, device):
         monitor_cfg.get("output_dir", "outputs/stage2/monitor"),
     )
     image_size = data_cfg.get("image_size", 1024)
+    raw_probability_size = int(monitor_cfg.get("raw_probability_size", 0))
 
     epoch_dir = os.path.join(output_base, f"epoch_{epoch + 1:04d}")
     os.makedirs(epoch_dir, exist_ok=True)
@@ -990,6 +1007,20 @@ def monitor_inference(model, config, epoch, device):
         bnd_vis = (bnd_prob * 255).astype(np.uint8)
         bnd_color = cv2.applyColorMap(bnd_vis, cv2.COLORMAP_HOT)
         cv2.imwrite(os.path.join(epoch_dir, f"{basename}_boundary.png"), bnd_color)
+
+        if raw_probability_size > 0:
+            # Compact 16-bit raw probabilities expose small changes hidden by
+            # the 8-bit colour map without storing full float tensors.
+            bnd_raw = cv2.resize(
+                bnd_prob,
+                (raw_probability_size, raw_probability_size),
+                interpolation=cv2.INTER_AREA,
+            )
+            bnd_raw16 = np.clip(bnd_raw * 65535.0, 0, 65535).astype(np.uint16)
+            cv2.imwrite(
+                os.path.join(epoch_dir, f"{basename}_boundary_raw16.png"),
+                bnd_raw16,
+            )
 
         if center_prob is not None:
             center_vis = (center_prob * 255).astype(np.uint8)
@@ -1190,6 +1221,18 @@ def main():
         logger.info(
             "B2 refine training: ENABLED "
             f"(refine_only_epochs={refine_only_epochs})"
+        )
+
+    if gda_cfg.get("only_gates", False):
+        if getattr(student_model, "boundary_adapter", None) is None:
+            raise ValueError("gda.only_gates=True requires gda.enabled=True")
+        for parameter in student_model.decoder.parameters():
+            parameter.requires_grad_(False)
+        if not student_model.boundary_adapter.gates.requires_grad:
+            raise ValueError("gda.only_gates=True requires gda.train_gates=True")
+        logger.info(
+            "GDA gate-only training: decoder/refine fully frozen; "
+            "supervised boundary loss remains active"
         )
 
     # 边界伪标签源模式配置
@@ -1750,8 +1793,8 @@ def main():
         )
         initial_diagnostics = {
             "optimizer_steps": 0,
-            "gda_gates": (
-                student_model.boundary_adapter.gates.detach().cpu().tolist()
+            "gda_gate_stats": (
+                student_model.boundary_adapter.gate_statistics()
                 if getattr(student_model, "boundary_adapter", None) is not None
                 else []
             ),
@@ -1937,6 +1980,7 @@ def main():
             rate_regularizer_weight=rate_regularizer_weight,
             rate_slack=rate_slack,
             sem_boundary_align_weight=sem_boundary_align_weight,
+            gda_gate_l1_weight=float(gda_cfg.get("gate_l1_weight", 0.0)),
             diagnostics_enabled=diagnostics_enabled,
         )
         val_metrics = validate(student_model, val_loader, criterion, device)
@@ -1949,6 +1993,8 @@ def main():
         frozen_lora_max_delta = 0.0
         gda_gate_delta_l2 = 0.0
         gda_gate_values = []
+        gda_gate_abs_values = []
+        gda_gate_max_values = []
         refine_out_weight_norm = 0.0
         refine_out_weight_max = 0.0
         if diagnostics_enabled:
@@ -1987,10 +2033,11 @@ def main():
                 f"gda_gate_delta={gda_gate_delta_l2:.3e}"
             )
         if getattr(student_model, "boundary_adapter", None) is not None:
-            gda_gate_values = (
-                student_model.boundary_adapter.gates.detach().cpu().tolist()
-            )
-            logger.info("  GDA gates: %s", [round(v, 6) for v in gda_gate_values])
+            gate_stats = student_model.boundary_adapter.gate_statistics()
+            gda_gate_values = [item["mean"] for item in gate_stats]
+            gda_gate_abs_values = [item["mean_abs"] for item in gate_stats]
+            gda_gate_max_values = [item["max_abs"] for item in gate_stats]
+            logger.info("  GDA gate stats: %s", gate_stats)
 
         # test 语义置信度监控（新日志参数）：无需 GT，统计概率分布
         # >0.8 高置信占比 / 0.4-0.6 模糊带占比
@@ -2083,6 +2130,7 @@ def main():
             "boundary": train_metrics["boundary"],
             "seg_consist": train_metrics["seg_consist"],
             "boundary_consist": train_metrics["boundary_consist"],
+            "gda_gate_l1": train_metrics["gda_gate_l1"],
             "seg_high_conf": seg_high_conf if seg_high_conf is not None else -1.0,
             "seg_mid_conf": seg_mid_conf if seg_mid_conf is not None else -1.0,
             "bnd_max": train_metrics["bnd_max"],
@@ -2106,6 +2154,14 @@ def main():
             "gda_gate_1": gda_gate_values[1] if gda_gate_values else 0.0,
             "gda_gate_2": gda_gate_values[2] if gda_gate_values else 0.0,
             "gda_gate_3": gda_gate_values[3] if gda_gate_values else 0.0,
+            "gda_gate_abs_0": gda_gate_abs_values[0] if gda_gate_abs_values else 0.0,
+            "gda_gate_abs_1": gda_gate_abs_values[1] if gda_gate_abs_values else 0.0,
+            "gda_gate_abs_2": gda_gate_abs_values[2] if gda_gate_abs_values else 0.0,
+            "gda_gate_abs_3": gda_gate_abs_values[3] if gda_gate_abs_values else 0.0,
+            "gda_gate_max_0": gda_gate_max_values[0] if gda_gate_max_values else 0.0,
+            "gda_gate_max_1": gda_gate_max_values[1] if gda_gate_max_values else 0.0,
+            "gda_gate_max_2": gda_gate_max_values[2] if gda_gate_max_values else 0.0,
+            "gda_gate_max_3": gda_gate_max_values[3] if gda_gate_max_values else 0.0,
             "val_loss": val_metrics["loss"],
             "mIoU": val_metrics["mean_iou"],
             "boundary_iou": val_metrics["boundary_iou"],

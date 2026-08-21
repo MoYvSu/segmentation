@@ -1,0 +1,50 @@
+# G1b: isolate the generative adapter's high-resolution boundary contribution.
+# Start exactly from E1 + G0, enable zero-initialized per-channel gates only on
+# Hiera scales 0/1, and freeze every decoder/refine/semantic/LoRA parameter.
+_base: stage2_refine_v6_e1_physaug15.yaml
+
+gda:
+  enabled: true
+  checkpoint: outputs/gda_mim_g0a/best_gda_mim.pth
+  bottleneck_ratio: 8
+  gate_mode: channel
+  active_scales: [0, 1]
+  freeze_adapters: true
+  train_gates: true
+  only_gates: true
+  gate_learning_rate: 1.0e-3
+  gate_l1_weight: 1.0e-4
+
+inference:
+  output_dir: outputs/inference_refine_v6_g1b_shallow_channel12
+  stage2_checkpoint: outputs/stage2_refine_v6_g1b_shallow_channel12/best_model_stage2.pth
+
+semi_supervised:
+  output_dir: outputs/stage2_refine_v6_g1b_shallow_channel12
+  init_from_checkpoint: outputs/stage2_refine_v6_e1_physaug15/best_model_stage2.pth
+  use_unlabeled: false
+  use_cached_pseudo_labels: false
+  boundary_teacher_mode: self_consistency
+  unsup_weight: 0.0
+  unsup_seg_weight: 0.0
+  epochs: 12
+  learning_rate: 1.0e-5
+  warmup_epochs: 0
+  flat_epochs: 8
+  decay_end_factor: 0.50
+  labeled_steps_per_epoch: 62
+  checkpoint_interval: 2
+  boundary_anchor:
+    enabled: false
+  monitor:
+    image_dir: data/unlabeled
+    manifest: config/monitor/unlabeled_holdout_v1.txt
+    num_images: 24
+    raw_probability_size: 256
+    output_dir: outputs/stage2_refine_v6_g1b_shallow_channel12/monitor
+  refine_training:
+    enabled: false
+    refine_only_epochs: 0
+  diagnostics:
+    enabled: true
+    save_initial_monitor: true
