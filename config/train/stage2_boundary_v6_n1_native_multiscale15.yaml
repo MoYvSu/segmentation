@@ -1,0 +1,53 @@
+# N1: V6 boundary scale adaptation, no architecture/loss/unsupervised changes.
+_base: stage2_boundary_v6.yaml
+
+data:
+  image_size: 1024
+  crop_size: 0
+  native_multiscale:
+    enabled: true
+    source_crop_sizes: [1024, 2048]
+    source_crop_probabilities: [0.5, 0.5]
+
+train:
+  seed: 42
+  deterministic: true
+
+inference:
+  output_dir: outputs/inference_boundary_v6_n1_native_multiscale15
+  stage2_checkpoint: outputs/stage2_boundary_v6_n1_native_multiscale15/best_model_stage2.pth
+  boundary_threshold: 0.45
+  min_instance_area: 50
+  resolution_aware_min_area:
+    enabled: true
+    reference_shape: [1044, 1244]
+    min_area: 50
+    max_area: 200
+
+semi_supervised:
+  base_checkpoint: outputs/stage2_v6/best_model_stage2.pth
+  init_from_checkpoint: ""
+  output_dir: outputs/stage2_boundary_v6_n1_native_multiscale15
+  use_unlabeled: false
+  use_cached_pseudo_labels: false
+  unsup_weight: 0.0
+  unsup_seg_weight: 0.0
+  epochs: 15
+  learning_rate: 2.0e-5
+  lr_schedule: flat_decay
+  warmup_epochs: 0
+  flat_epochs: 10
+  decay_end_factor: 0.4
+  batch_size_labeled: 2
+  labeled_steps_per_epoch: 62
+  checkpoint_interval: 5
+  monitor:
+    image_dir: data/test
+    num_images: 10
+    output_dir: outputs/stage2_boundary_v6_n1_native_multiscale15/monitor
+  freeze:
+    seg_branch: true
+    boundary_branch: false
+
+progressive_aug:
+  enabled: false

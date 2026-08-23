@@ -28,6 +28,7 @@ from data.dataset import (
     random_crop,
     split_train_val_indices,
 )
+from data.native_multiscale import native_multiscale_crop
 
 
 # =============================================================================
@@ -57,6 +58,7 @@ class LabeledDataset(Dataset):
         boundary_weight_ceil: float = 4.0,
         boundary_target_key: str = "boundary_soft",
         center_sigma: float = 4.0,
+        native_multiscale_config: Optional[dict] = None,
     ):
         super().__init__()
         self.data_dir = data_dir
@@ -73,6 +75,7 @@ class LabeledDataset(Dataset):
         self.boundary_weight_ceil = boundary_weight_ceil
         self.boundary_target_key = boundary_target_key
         self.center_sigma = center_sigma
+        self.native_multiscale_config = native_multiscale_config or {}
 
         valid_exts = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
         self.samples: List[Tuple[str, str]] = []
@@ -114,16 +117,37 @@ class LabeledDataset(Dataset):
             boundary = boundary_core.astype(np.float32)
 
         from data.dataset import letterbox_mask, compute_boundary_weight
-        image_lb, scale, pad_h, pad_w = letterbox(image, self.image_size)
-        semantic_lb, _, _, _ = letterbox_mask(semantic, self.image_size)
-        boundary_lb, _, _, _ = letterbox_mask(boundary, self.image_size)
-        boundary_core_lb, _, _, _ = letterbox_mask(boundary_core, self.image_size)
-        center_lb = center_heatmap_from_points(
-            self.instance_centers.get(img_path, []),
-            scale=scale,
-            target_size=self.image_size,
-            sigma=self.center_sigma,
-        )
+        native_cfg = self.native_multiscale_config
+        use_native_multiscale = bool(self.augment and native_cfg.get("enabled", False))
+        sample_meta = {}
+        if use_native_multiscale:
+            (
+                image_lb, semantic_lb, boundary_lb, boundary_core_lb,
+                center_lb, sample_meta,
+            ) = native_multiscale_crop(
+                image=image,
+                semantic=semantic,
+                boundary=boundary,
+                boundary_core=boundary_core,
+                centers=self.instance_centers.get(img_path, []),
+                output_size=self.image_size,
+                source_crop_sizes=native_cfg.get("source_crop_sizes", [1024, 2048]),
+                source_crop_probabilities=native_cfg.get(
+                    "source_crop_probabilities", [0.5, 0.5]
+                ),
+                center_sigma=self.center_sigma,
+            )
+        else:
+            image_lb, scale, pad_h, pad_w = letterbox(image, self.image_size)
+            semantic_lb, _, _, _ = letterbox_mask(semantic, self.image_size)
+            boundary_lb, _, _, _ = letterbox_mask(boundary, self.image_size)
+            boundary_core_lb, _, _, _ = letterbox_mask(boundary_core, self.image_size)
+            center_lb = center_heatmap_from_points(
+                self.instance_centers.get(img_path, []),
+                scale=scale,
+                target_size=self.image_size,
+                sigma=self.center_sigma,
+            )
         weight_lb = compute_boundary_weight(
             boundary_core_lb,
             scale_factor=self.boundary_scale_factor,
@@ -131,7 +155,7 @@ class LabeledDataset(Dataset):
             weight_ceil=self.boundary_weight_ceil,
         )
 
-        if self.augment and self.crop_size > 0:
+        if self.augment and self.crop_size > 0 and not use_native_multiscale:
             image_lb, semantic_lb, boundary_lb, weight_lb, center_lb = random_crop(
                 image_lb, semantic_lb, boundary_lb, weight_lb, center_lb, self.crop_size
             )
@@ -154,6 +178,10 @@ class LabeledDataset(Dataset):
             "weight": weight_tensor,
             "original_size": (h_orig, w_orig),
             "image_path": img_path,
+            "source_crop_size": int(sample_meta.get("source_crop_size", 0)),
+            "requested_source_crop_size": int(
+                sample_meta.get("requested_source_crop_size", 0)
+            ),
         }
 
     def _augment(self, image, semantic, boundary, weight, center):

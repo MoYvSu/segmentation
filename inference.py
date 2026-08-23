@@ -37,6 +37,7 @@ from utils.checkpoint import (
 )
 from utils.config import load_config, project_path
 from utils.post_process import post_process_prediction_boundary
+from utils.scale_policy import resolution_scaled_min_area
 from utils.quality_aware import (
     assess_image_quality,
     classify_quality,
@@ -222,6 +223,7 @@ def predict_single_image(
     bridge_width=1,
     watershed_dilate_width=2,
     use_center_seeds=True, center_threshold=0.25, center_nms_kernel=9,
+    min_instance_area_policy=None,
     quality_aware_config=None,
     output_dir=None, save_visualization=True,
 ):
@@ -231,6 +233,9 @@ def predict_single_image(
         raise FileNotFoundError(f"Cannot read image: {image_path}")
     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     h_orig, w_orig = image_rgb.shape[:2]
+    effective_min_instance_area = resolution_scaled_min_area(
+        min_instance_area, (h_orig, w_orig), min_instance_area_policy
+    )
     quality_cfg = quality_aware_config or {}
     quality_enabled = bool(quality_cfg.get("enabled", False))
     quality_metrics = assess_image_quality(image_rgb) if quality_enabled else {}
@@ -293,7 +298,7 @@ def predict_single_image(
             original_size=(h_orig, w_orig),
             output_dir=output_dir,
             image_basename=basename,
-            min_instance_area=min_instance_area,
+            min_instance_area=effective_min_instance_area,
             max_instance_id=max_instance_id,
             threshold=threshold,
             boundary_threshold=selected_boundary_threshold,
@@ -327,6 +332,7 @@ def predict_single_image(
         "num_ferrite": n_ferrite,
         "num_pearlite": n_pearlite,
         "output_paths": output_paths,
+        "effective_min_instance_area": effective_min_instance_area,
         "quality_profile": quality_profile,
         "quality_reasons": quality_reasons,
         "quality_metrics": quality_metrics,
@@ -472,6 +478,7 @@ def main():
             use_center_seeds=effective["center_seeds"],
             center_threshold=effective["center_threshold"],
             center_nms_kernel=infer_cfg.get("center_nms_kernel", 9),
+            min_instance_area_policy=infer_cfg.get("resolution_aware_min_area", {}),
             quality_aware_config=quality_cfg,
             output_dir=output_dir,
             save_visualization=effective["save_visualization"],

@@ -35,6 +35,7 @@ from utils.instance_metrics import (
     summarize_instance_results,
 )
 from utils.post_process import post_process_prediction_boundary
+from utils.scale_policy import resolution_scaled_min_area
 
 
 @torch.no_grad()
@@ -258,12 +259,17 @@ def main():
                     use_tta=bool(args.tta or infer_cfg.get("tta", False)),
                 )
 
+            effective_min_area = resolution_scaled_min_area(
+                int(infer_cfg.get("min_instance_area", 50)),
+                image_rgb.shape[:2],
+                infer_cfg.get("resolution_aware_min_area", {}),
+            )
             _, pred_map, pred_class_map = post_process_prediction_boundary(
                 output=logits,
                 original_size=image_rgb.shape[:2],
                 output_dir=mode_dir,
                 image_basename=basename,
-                min_instance_area=int(infer_cfg.get("min_instance_area", 50)),
+                min_instance_area=effective_min_area,
                 max_instance_id=int(infer_cfg.get("max_instance_id", 255)),
                 threshold=float(infer_cfg.get("threshold", 0.5)),
                 boundary_threshold=float(infer_cfg.get("boundary_threshold", 0.5)),

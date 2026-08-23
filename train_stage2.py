@@ -500,6 +500,7 @@ def build_dataloaders(config, disable_unlabeled_appearance_aug=False,
         boundary_weight_ceil=boundary_weight_ceil,
         boundary_target_key=boundary_target_key,
         center_sigma=data_cfg.get("center_sigma", 4.0),
+        native_multiscale_config=data_cfg.get("native_multiscale", {}),
     )
 
     val_dataset = BoundaryDataset(
