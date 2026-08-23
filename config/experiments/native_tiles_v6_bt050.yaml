@@ -1,0 +1,5 @@
+# Native-resolution tile A/B: only boundary threshold differs from V6 reference.
+_base: ../inference/v6_reference.yaml
+
+inference:
+  boundary_threshold: 0.50
