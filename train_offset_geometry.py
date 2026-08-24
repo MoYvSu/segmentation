@@ -224,6 +224,7 @@ def main():
         center_sigma_scale=float(geometry_cfg.get("center_sigma_scale", 0.12)),
         center_min_sigma=float(geometry_cfg.get("center_min_sigma", 2.0)),
         center_max_sigma=float(geometry_cfg.get("center_max_sigma", 8.0)),
+        cache_in_memory=bool(geometry_cfg.get("cache_in_memory", False)),
     )
     loader = DataLoader(
         dataset,

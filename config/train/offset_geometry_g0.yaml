@@ -12,7 +12,8 @@ offset_geometry:
   # G0 is deliberately a deterministic two-image overfit audit.
   sample_names: [train_001, train_002]
   batch_size: 1
-  num_workers: 2
+  num_workers: 0
+  cache_in_memory: true
   max_steps: 400
   learning_rate: 1.0e-4
   weight_decay: 1.0e-4

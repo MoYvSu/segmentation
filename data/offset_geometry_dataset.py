@@ -66,6 +66,7 @@ class OffsetGeometryDataset(Dataset):
         center_sigma_scale: float = 0.12,
         center_min_sigma: float = 2.0,
         center_max_sigma: float = 8.0,
+        cache_in_memory: bool = False,
     ):
         self.data_dir = Path(data_dir)
         self.image_size = int(image_size)
@@ -73,6 +74,7 @@ class OffsetGeometryDataset(Dataset):
         self.center_sigma_scale = float(center_sigma_scale)
         self.center_min_sigma = float(center_min_sigma)
         self.center_max_sigma = float(center_max_sigma)
+        self.cache_in_memory = bool(cache_in_memory)
         extensions = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
         requested = {
             Path(name).stem for name in (sample_names or [])
@@ -90,11 +92,21 @@ class OffsetGeometryDataset(Dataset):
                 raise FileNotFoundError(f"requested labeled samples missing: {missing}")
         if not self.samples:
             raise ValueError(f"no labeled samples in {self.data_dir}")
+        self._cached_samples = None
+        if self.cache_in_memory:
+            self._cached_samples = [
+                self._load_sample(index) for index in range(len(self.samples))
+            ]
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, index):
+        if self._cached_samples is not None:
+            return self._cached_samples[int(index)]
+        return self._load_sample(index)
+
+    def _load_sample(self, index):
         image_path = self.samples[int(index)]
         image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
         if image is None:
