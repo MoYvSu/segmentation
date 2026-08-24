@@ -1,0 +1,33 @@
+_base: ../inference/v6_reference.yaml
+
+offset_geometry:
+  reference_checkpoint: outputs/stage2_v6/best_model_stage2.pth
+  output_dir: outputs/offset_geometry_g0
+  input_size: 1024
+  output_grid: 512
+  fpn_channels: 256
+  up_channels: 128
+  init_from_v6_boundary_fpn: true
+
+  # G0 is deliberately a deterministic two-image overfit audit.
+  sample_names: [train_001, train_002]
+  batch_size: 1
+  num_workers: 2
+  max_steps: 400
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  amp: true
+  seed: 42
+
+  center_sigma_scale: 0.12
+  center_min_sigma: 2.0
+  center_max_sigma: 8.0
+  center_weight: 1.0
+  offset_weight: 5.0
+  smooth_l1_beta: 0.02
+
+  semantic_tolerance: 1.0e-6
+  log_interval: 20
+  monitor_interval: 100
+  checkpoint_interval: 200
