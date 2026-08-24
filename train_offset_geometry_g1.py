@@ -86,7 +86,10 @@ def build_system(config, geometry_cfg, device):
 
 
 @torch.no_grad()
-def evaluate_sample(system, sample, grid_size: int):
+def evaluate_sample(
+    system, sample, grid_size: int, center_threshold: float = 0.25,
+    center_nms_radius: int = 3,
+):
     device = next(system.geometry_decoder.parameters()).device
     prediction = system.geometry_forward(sample["image"].unsqueeze(0).to(device))
     center_probability = torch.sigmoid(
@@ -98,7 +101,8 @@ def evaluate_sample(system, sample, grid_size: int):
     gt_instances = sample["instance_map"].numpy().astype(np.int32)
     yy, xx = np.indices(foreground.shape, dtype=np.float32)
     centers, scores, _ = extract_center_peaks(
-        center_probability, valid, threshold=0.25, nms_radius=3, max_centers=255
+        center_probability, valid, threshold=center_threshold,
+        nms_radius=center_nms_radius, max_centers=255,
     )
     predicted, assignment = assign_endpoints_to_centers(
         yy + offsets[0], xx + offsets[1], foreground, centers,
@@ -127,7 +131,8 @@ def evaluate_sample(system, sample, grid_size: int):
 @torch.no_grad()
 def write_unlabeled_monitor(
     system, image_path: Path, output_dir: Path, epoch: int,
-    input_size: int, grid_size: int,
+    input_size: int, grid_size: int, center_threshold: float = 0.25,
+    center_nms_radius: int = 3,
 ):
     image_bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
     if image_bgr is None:
@@ -142,7 +147,8 @@ def write_unlabeled_monitor(
     valid = np.zeros((grid_size, grid_size), dtype=bool)
     valid[:metadata.content_height, :metadata.content_width] = True
     centers, scores, audit = extract_center_peaks(
-        probability, valid, threshold=0.25, nms_radius=3, max_centers=255
+        probability, valid, threshold=center_threshold,
+        nms_radius=center_nms_radius, max_centers=255,
     )
     monitor_dir = output_dir / "unlabeled_monitor" / f"epoch_{epoch:03d}" / image_path.stem
     monitor_dir.mkdir(parents=True, exist_ok=True)
@@ -278,10 +284,13 @@ def main():
     best_score = -1.0
     monitor_interval = int(cfg.get("monitor_interval", 5))
     grid_size = int(cfg.get("output_grid", 512))
+    center_threshold = float(cfg.get("center_threshold", 0.25))
+    center_nms_radius = int(cfg.get("center_nms_radius", 3))
     for monitor_path in unlabeled_monitors:
         write_unlabeled_monitor(
             system, monitor_path, output_dir, 0,
             int(cfg.get("input_size", 1024)), grid_size,
+            center_threshold, center_nms_radius,
         )
     for index in range(min(2, len(val_dataset))):
         audit_sample(system, val_dataset[index], output_dir / "val_monitor" / "epoch_000", grid_size, [None])
@@ -303,6 +312,9 @@ def main():
                     prediction, center_target, offset_target, foreground, valid_content,
                     instance_map,
                     center_weight=float(cfg.get("center_weight", 1.0)),
+                    center_positive_weight=float(
+                        cfg.get("center_positive_weight", 1.0)
+                    ),
                     offset_weight=float(cfg.get("offset_weight", 5.0)),
                     smooth_l1_beta=float(cfg.get("smooth_l1_beta", 0.005)),
                     offset_reduction="instance_balanced",
@@ -320,7 +332,13 @@ def main():
             totals["batches"] += 1
         scheduler.step()
         system.eval()
-        val_rows = [evaluate_sample(system, val_dataset[index], grid_size) for index in range(len(val_dataset))]
+        val_rows = [
+            evaluate_sample(
+                system, val_dataset[index], grid_size,
+                center_threshold, center_nms_radius,
+            )
+            for index in range(len(val_dataset))
+        ]
         row = {
             "epoch": epoch,
             "train_loss": totals["loss"] / totals["batches"],
@@ -361,6 +379,7 @@ def main():
                 write_unlabeled_monitor(
                     system, monitor_path, output_dir, epoch,
                     int(cfg.get("input_size", 1024)), grid_size,
+                    center_threshold, center_nms_radius,
                 )
             for index in range(min(2, len(val_dataset))):
                 audit_sample(

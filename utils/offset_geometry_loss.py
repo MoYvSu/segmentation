@@ -15,6 +15,7 @@ def center_focal_loss(
     valid_mask: torch.Tensor,
     alpha: float = 2.0,
     beta: float = 4.0,
+    positive_weight: float = 1.0,
 ) -> torch.Tensor:
     probability = torch.sigmoid(logits).clamp(1e-5, 1.0 - 1e-5)
     valid = valid_mask.bool()
@@ -27,7 +28,8 @@ def center_focal_loss(
     )
     positive_count = positive.sum().clamp_min(1)
     return (
-        positive_loss[positive].sum() + negative_loss[negative].sum()
+        float(positive_weight) * positive_loss[positive].sum()
+        + negative_loss[negative].sum()
     ) / positive_count
 
 
@@ -40,13 +42,19 @@ def center_offset_loss(
     instance_map: torch.Tensor | None = None,
     *,
     center_weight: float = 1.0,
+    center_positive_weight: float = 1.0,
     offset_weight: float = 5.0,
     smooth_l1_beta: float = 0.02,
     offset_reduction: str = "pixel_mean",
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     center_logits = prediction["center_logits"]
     offsets = prediction["offsets"]
-    center_loss = center_focal_loss(center_logits, center_target, valid_content)
+    center_loss = center_focal_loss(
+        center_logits,
+        center_target,
+        valid_content,
+        positive_weight=center_positive_weight,
+    )
     offset_mask = foreground.bool() & valid_content.bool()
     component_mask = offset_mask.expand_as(offsets)
     raw_offset = F.smooth_l1_loss(

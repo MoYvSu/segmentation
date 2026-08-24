@@ -1,0 +1,20 @@
+_base: offset_geometry_g1.yaml
+
+offset_geometry_g1:
+  # Continue from the best full-data G1 geometry checkpoint. The frozen V6
+  # semantic branch remains byte-for-byte unchanged.
+  geometry_init_checkpoint: outputs/offset_geometry_g1/best_geometry.pth
+  output_dir: outputs/offset_geometry_g1b
+  epochs: 20
+
+  # G1 validation continued to improve at epoch 19. Re-open the learning rate
+  # mildly while emphasizing exact EDT peaks and difficult dense offsets.
+  learning_rate: 4.0e-5
+  min_learning_rate: 1.0e-5
+  center_positive_weight: 2.0
+  offset_weight: 8.0
+
+  # Calibration audit: 0.25 missed many centers; 0.20/r4 was close to the
+  # labeled validation instance count without touching the 255 cap.
+  center_threshold: 0.20
+  center_nms_radius: 4

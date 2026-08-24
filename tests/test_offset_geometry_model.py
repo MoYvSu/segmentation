@@ -1,7 +1,7 @@
 import torch
 
 from models.offset_geometry import CenterOffsetGeometryDecoder
-from utils.offset_geometry_loss import center_offset_loss
+from utils.offset_geometry_loss import center_focal_loss, center_offset_loss
 
 
 def test_geometry_decoder_outputs_center_and_offsets_at_requested_grid():
@@ -39,3 +39,12 @@ def test_center_offset_loss_is_finite_and_backpropagates():
     loss.backward()
     assert center_logits.grad is not None
     assert offsets.grad is not None
+
+def test_center_positive_weight_increases_exact_peak_penalty():
+    logits = torch.zeros(1, 1, 2, 2)
+    target = torch.zeros_like(logits)
+    target[:, :, 0, 0] = 1.0
+    valid = torch.ones_like(logits, dtype=torch.bool)
+    baseline = center_focal_loss(logits, target, valid, positive_weight=1.0)
+    emphasized = center_focal_loss(logits, target, valid, positive_weight=2.0)
+    assert emphasized > baseline
