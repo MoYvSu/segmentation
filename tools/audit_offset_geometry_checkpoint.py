@@ -139,6 +139,23 @@ def audit_sample(system, sample, output_dir: Path, grid_size: int, radii):
         str(sample_dir / "instances_endpoint_components_content.png"),
         colorize_instances(baseline[:content_height, :content_width]),
     )
+    spatial_voronoi, spatial_voronoi_audit = assign_endpoints_to_centers(
+        yy, xx, foreground, centers,
+        max_assignment_distance=None, min_instance_area=1,
+    )
+    target_offsets = sample["offset_target"].numpy() * float(grid_size)
+    oracle_offset, oracle_offset_audit = assign_endpoints_to_centers(
+        yy + target_offsets[0], xx + target_offsets[1], foreground, centers,
+        max_assignment_distance=None, min_instance_area=1,
+    )
+    cv2.imwrite(
+        str(sample_dir / "instances_spatial_voronoi_content.png"),
+        colorize_instances(spatial_voronoi[:content_height, :content_width]),
+    )
+    cv2.imwrite(
+        str(sample_dir / "instances_oracle_offset_content.png"),
+        colorize_instances(oracle_offset[:content_height, :content_width]),
+    )
     result = {
         "image": sample["image_name"],
         "foreground_source": "ground_truth_conditional_geometry_audit",
@@ -154,6 +171,14 @@ def audit_sample(system, sample, output_dir: Path, grid_size: int, radii):
         "endpoint_components": {
             **instance_metrics(gt_instances, baseline),
             "audit": baseline_audit,
+        },
+        "spatial_voronoi_without_offset": {
+            **instance_metrics(gt_instances, spatial_voronoi),
+            "audit": spatial_voronoi_audit,
+        },
+        "oracle_offset_upper_bound": {
+            **instance_metrics(gt_instances, oracle_offset),
+            "audit": oracle_offset_audit,
         },
         "center_guided": {},
     }
