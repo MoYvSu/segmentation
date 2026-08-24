@@ -140,4 +140,7 @@ class OffsetGeometryDataset(Dataset):
             "content_shape": torch.tensor(
                 [metadata.content_height, metadata.content_width], dtype=torch.int32
             ),
+            "input_content_shape": torch.tensor(
+                [metadata.resized_height, metadata.resized_width], dtype=torch.int32
+            ),
         }

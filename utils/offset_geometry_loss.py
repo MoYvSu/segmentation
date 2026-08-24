@@ -37,10 +37,12 @@ def center_offset_loss(
     offset_target: torch.Tensor,
     foreground: torch.Tensor,
     valid_content: torch.Tensor,
+    instance_map: torch.Tensor | None = None,
     *,
     center_weight: float = 1.0,
     offset_weight: float = 5.0,
     smooth_l1_beta: float = 0.02,
+    offset_reduction: str = "pixel_mean",
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     center_logits = prediction["center_logits"]
     offsets = prediction["offsets"]
@@ -50,7 +52,38 @@ def center_offset_loss(
     raw_offset = F.smooth_l1_loss(
         offsets, offset_target, reduction="none", beta=float(smooth_l1_beta)
     )
-    offset_loss = raw_offset[component_mask].mean() if component_mask.any() else raw_offset.sum() * 0
+    if offset_reduction == "instance_balanced":
+        if instance_map is None:
+            raise ValueError("instance_map is required for instance-balanced offset loss")
+        per_pixel_loss = raw_offset.mean(dim=1)
+        instance_losses = []
+        for batch_index in range(offsets.shape[0]):
+            mask = offset_mask[batch_index, 0]
+            labels = instance_map[batch_index][mask].long()
+            values = per_pixel_loss[batch_index][mask]
+            if labels.numel() == 0:
+                continue
+            unique_labels, inverse = torch.unique(
+                labels, sorted=False, return_inverse=True
+            )
+            sums = torch.zeros(
+                unique_labels.shape[0], device=values.device, dtype=values.dtype
+            ).scatter_add_(0, inverse, values)
+            counts = torch.zeros_like(sums).scatter_add_(
+                0, inverse, torch.ones_like(values)
+            )
+            instance_losses.append(sums / counts.clamp_min(1.0))
+        offset_loss = (
+            torch.cat(instance_losses).mean()
+            if instance_losses else raw_offset.sum() * 0
+        )
+    elif offset_reduction == "pixel_mean":
+        offset_loss = (
+            raw_offset[component_mask].mean()
+            if component_mask.any() else raw_offset.sum() * 0
+        )
+    else:
+        raise ValueError(f"unknown offset_reduction: {offset_reduction}")
     total = float(center_weight) * center_loss + float(offset_weight) * offset_loss
     with torch.no_grad():
         probability = torch.sigmoid(center_logits)

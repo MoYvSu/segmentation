@@ -1,0 +1,47 @@
+_base: ../inference/v6_reference.yaml
+
+offset_geometry_g1:
+  reference_checkpoint: outputs/stage2_v6/best_model_stage2.pth
+  geometry_init_checkpoint: outputs/offset_geometry_g0/geometry_step_0400.pth
+  output_dir: outputs/offset_geometry_g1
+  unlabeled_dir: data/unlabeled
+
+  input_size: 1024
+  output_grid: 512
+  fpn_channels: 256
+  up_channels: 128
+
+  seed: 42
+  val_fraction: 0.20
+  forced_train_names: [train_001, train_002]
+  unlabeled_monitor_count: 2
+  batch_size: 2
+  epochs: 20
+
+  learning_rate: 1.0e-4
+  min_learning_rate: 1.0e-5
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  amp: true
+
+  center_sigma_scale: 0.12
+  center_min_sigma: 2.0
+  center_max_sigma: 8.0
+  center_weight: 1.0
+  offset_weight: 5.0
+  smooth_l1_beta: 0.005
+  semantic_tolerance: 1.0e-6
+  monitor_interval: 5
+
+  # Global-center geometry forbids random crops. Dihedral transforms preserve
+  # metallurgy while vector components are transformed exactly with the image.
+  augmentation:
+    horizontal_flip: true
+    vertical_flip: true
+    rotation90: true
+    brightness: 0.12
+    contrast: 0.12
+    gamma: 0.12
+    noise_probability: 0.25
+    noise_std: 0.01
+    blur_probability: 0.10
