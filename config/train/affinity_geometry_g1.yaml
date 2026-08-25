@@ -1,0 +1,44 @@
+_base: ../inference/v6_reference.yaml
+
+affinity_geometry_g1:
+  reference_checkpoint: outputs/stage2_v6/best_model_stage2.pth
+  geometry_init_checkpoint: outputs/affinity_geometry_g0_long/latest_affinity.pth
+  output_dir: outputs/affinity_geometry_g1
+  unlabeled_dir: data/unlabeled
+
+  input_size: 1024
+  output_grid: 512
+  fpn_channels: 256
+  up_channels: 128
+
+  seed: 42
+  val_fraction: 0.20
+  forced_train_names: [train_001, train_002]
+  unlabeled_monitor_count: 2
+  batch_size: 2
+  epochs: 20
+
+  learning_rate: 5.0e-5
+  min_learning_rate: 1.0e-5
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  amp: true
+  semantic_tolerance: 1.0e-6
+  monitor_interval: 5
+
+  # Conservative long-edge bridge selected after the G0 threshold audit.
+  graph_thresholds: [0.20, 0.20, 0.20, 0.20, 0.25, 0.25, 0.60, 0.60]
+
+  augmentation:
+    horizontal_flip: true
+    vertical_flip: true
+    rotation90: true
+    brightness: 0.12
+    contrast: 0.12
+    gamma: 0.12
+    noise_probability: 0.25
+    noise_std: 0.01
+    blur_probability: 0.10
+    crop_probability: 0.50
+    crop_scale_min: 0.65
+    crop_scale_max: 0.90
