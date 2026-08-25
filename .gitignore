@@ -16,6 +16,9 @@ outputs
 data/raw/
 data/test/
 data/unlabeled/
+data/purified_gt/
+data/purified_gt_uncovered/
+data/sam2_geometry/
 **/__pycache__/
 data/smoketest/
 .ipynb_checkpoints/
