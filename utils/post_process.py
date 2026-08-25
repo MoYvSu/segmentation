@@ -65,6 +65,41 @@ def center_heatmap_markers(
 # Boundary-based Watershed Instance Separation
 # ---------------------------------------------------------------------------
 
+def _boundary_skeleton_belt(
+    boundary_mask: np.ndarray,
+    bridge_width: int,
+    dilate_width: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Convert a binary boundary map into its skeleton and barrier belt."""
+    boundary_binary = (boundary_mask > 0).astype(np.uint8) * 255
+    if bridge_width > 0:
+        k = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (2 * bridge_width + 1, 2 * bridge_width + 1)
+        )
+        boundary_binary = cv2.dilate(boundary_binary, k)
+    if not np.any(boundary_binary):
+        skeleton = boundary_binary
+    else:
+        try:
+            skeleton = cv2.ximgproc.thinning(
+                boundary_binary, thinningType=cv2.ximgproc.THINNING_ZHANGSUEN
+            )
+        except (AttributeError, cv2.error):
+            from skimage.morphology import skeletonize as sk_skeletonize
+
+            skeleton = (sk_skeletonize(boundary_binary > 0) * 255).astype(np.uint8)
+
+    if dilate_width > 0:
+        kernel_size = 2 * dilate_width + 1
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)
+        )
+        skeleton_belt = cv2.dilate(skeleton, kernel)
+    else:
+        skeleton_belt = skeleton
+    return skeleton, skeleton_belt
+
+
 def boundary_watershed_separation(
     semantic_mask: np.ndarray,
     boundary_mask: np.ndarray,
@@ -75,6 +110,9 @@ def boundary_watershed_separation(
     center_prob: Optional[np.ndarray] = None,
     center_threshold: float = 0.25,
     center_nms_kernel: int = 9,
+    marker_boundary_mask: Optional[np.ndarray] = None,
+    marker_bridge_width: Optional[int] = None,
+    marker_dilate_width: Optional[int] = None,
 ) -> Tuple[np.ndarray, Dict[int, int]]:
     """
     基于边界预测的受阻分水岭实例分割。
@@ -98,31 +136,16 @@ def boundary_watershed_separation(
     # Step 1: 骨架化边界（可选先膨胀桥接"双峰/双线"输出：
     # 边界概率剖面呈两条脊时，阈值化后是两条分离的细带，骨架化得到粗糙双线；
     # 先膨胀 bridge_width 像素把两条脊合成一条带，骨架取中轴即为平滑单线）
-    boundary_binary = (boundary_mask > 0).astype(np.uint8) * 255
-    if bridge_width > 0:
-        k = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (2 * bridge_width + 1, 2 * bridge_width + 1)
+    skeleton, skeleton_belt = _boundary_skeleton_belt(
+        boundary_mask, bridge_width, dilate_width
+    )
+    marker_skeleton_belt = skeleton_belt
+    if marker_boundary_mask is not None:
+        _, marker_skeleton_belt = _boundary_skeleton_belt(
+            marker_boundary_mask,
+            bridge_width if marker_bridge_width is None else marker_bridge_width,
+            dilate_width if marker_dilate_width is None else marker_dilate_width,
         )
-        boundary_binary = cv2.dilate(boundary_binary, k)
-    if not np.any(boundary_binary):
-        skeleton = boundary_binary
-    else:
-        try:
-            skeleton = cv2.ximgproc.thinning(
-                boundary_binary, thinningType=cv2.ximgproc.THINNING_ZHANGSUEN
-            )
-        except (AttributeError, cv2.error):
-            from skimage.morphology import skeletonize as sk_skeletonize
-            skeleton = (sk_skeletonize(boundary_binary > 0) * 255).astype(np.uint8)
-
-    # Step 2: 膨胀骨架带
-    if dilate_width > 0:
-        kernel_size = 2 * dilate_width + 1
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-        skeleton_belt = cv2.dilate(skeleton, kernel)
-    else:
-        skeleton_belt = skeleton
-
     # Step 3/4: 生成种子。中心峰避免“一个连通核心=一个实例”的欠分割，
     # 仍保留旧核心种子作为旧 checkpoint 和低置信中心热图的安全回退。
     markers = np.zeros((h, w), dtype=np.int32)
@@ -136,7 +159,7 @@ def boundary_watershed_separation(
     valid_id = center_count
 
     if center_count == 0:
-        cores = cv2.bitwise_not(skeleton_belt)
+        cores = cv2.bitwise_not(marker_skeleton_belt)
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
             cores, connectivity=8
         )
