@@ -68,3 +68,17 @@ def test_uncapped_diagnostic_preserves_every_raw_component():
     assert int(prediction.max()) == 400
     assert audit["kept_instance_count"] == 400
     assert audit["merged_components_for_cap"] == 0
+
+def test_channel_specific_threshold_can_disable_long_edges():
+    labels = np.zeros((6, 8), dtype=np.int32)
+    labels[2, 1] = 1
+    labels[2, 5] = 2
+    affinity = np.zeros((len(DEFAULT_AFFINITY_OFFSETS), 6, 8), dtype=np.float32)
+    affinity[6, 2, 1] = 0.9
+    merged, _ = reconstruct_affinity_components(labels > 0, affinity, threshold=0.5)
+    separated, _ = reconstruct_affinity_components(
+        labels > 0, affinity,
+        threshold=[0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 1.1, 1.1],
+    )
+    assert len(np.unique(merged[merged > 0])) == 1
+    assert len(np.unique(separated[separated > 0])) == 2

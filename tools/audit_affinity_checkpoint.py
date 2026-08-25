@@ -30,7 +30,7 @@ from utils.config import load_config, project_path
 
 
 def binary_metrics(probability, target, valid, threshold):
-    prediction = probability >= float(threshold)
+    prediction = probability >= np.asarray(threshold, dtype=np.float32)
     positive = valid & (target > 0.5)
     negative = valid & ~positive
     tp = int(np.sum(prediction & positive))
@@ -126,12 +126,46 @@ def main():
                 **graph,
                 **audit_instance_recovery(labels, instances),
             })
+    recipes = {
+        "short_t020": [0.20, 0.20, 0.20, 0.20, 1.10, 1.10, 1.10, 1.10],
+        "short_t025": [0.25, 0.25, 0.25, 0.25, 1.10, 1.10, 1.10, 1.10],
+        "short020_d2_025": [0.20, 0.20, 0.20, 0.20, 0.25, 0.25, 1.10, 1.10],
+        "staged_d4_050": [0.20, 0.20, 0.20, 0.20, 0.25, 0.25, 0.50, 0.50],
+        "staged_d4_060": [0.20, 0.20, 0.20, 0.20, 0.25, 0.25, 0.60, 0.60],
+        "staged_d4_070": [0.20, 0.20, 0.20, 0.20, 0.25, 0.25, 0.70, 0.70],
+        "conservative": [0.25, 0.25, 0.25, 0.25, 0.30, 0.30, 0.60, 0.60],
+    }
+    recipe_rows = []
+    for recipe_name, recipe_thresholds in recipes.items():
+        for sample, probability in zip(dataset, predictions):
+            labels = sample["instance_map"].numpy().astype(np.int32)
+            target, valid = build_affinity_targets(
+                labels, sample["valid_content"][0].numpy().astype(bool)
+            )
+            threshold_grid = np.asarray(
+                recipe_thresholds, dtype=np.float32
+            )[:, None, None]
+            instances, graph = reconstruct_affinity_components(
+                labels > 0, probability, threshold=recipe_thresholds,
+                max_instances=None,
+            )
+            recipe_rows.append({
+                "recipe": recipe_name,
+                "image": sample["image_name"],
+                **binary_metrics(
+                    probability, target, valid, threshold_grid
+                ),
+                **graph,
+                **audit_instance_recovery(labels, instances),
+            })
     summary = {
         "checkpoint": os.path.abspath(project_path(config, args.checkpoint)),
         "checkpoint_step": int(checkpoint.get("step", -1)),
         "thresholds": thresholds,
         "sweep": sweep,
         "per_channel_at_0_5": per_channel,
+        "threshold_recipes": recipes,
+        "recipe_sweep": recipe_rows,
     }
     output = Path(project_path(config, args.output))
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -140,6 +174,16 @@ def main():
         rows = [row for row in sweep if row["threshold"] == threshold]
         print({
             "threshold": threshold,
+            "mean_components": float(np.mean([row["raw_component_count"] for row in rows])),
+            "split_gt": int(sum(row["split_gt_instance_count"] for row in rows)),
+            "merged_pred": int(sum(row["merged_pred_instance_count"] for row in rows)),
+            "precision": float(np.mean([row["precision"] for row in rows])),
+            "recall": float(np.mean([row["recall"] for row in rows])),
+        })
+    for recipe_name in recipes:
+        rows = [row for row in recipe_rows if row["recipe"] == recipe_name]
+        print({
+            "recipe": recipe_name,
             "mean_components": float(np.mean([row["raw_component_count"] for row in rows])),
             "split_gt": int(sum(row["split_gt_instance_count"] for row in rows)),
             "merged_pred": int(sum(row["merged_pred_instance_count"] for row in rows)),

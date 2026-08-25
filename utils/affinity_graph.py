@@ -80,7 +80,7 @@ def reconstruct_affinity_components(
     foreground: np.ndarray,
     affinity: np.ndarray,
     offsets: Sequence[Tuple[int, int]] = DEFAULT_AFFINITY_OFFSETS,
-    threshold: float = 0.5,
+    threshold: float | Sequence[float] = 0.5,
     max_instances: int | None = 255,
 ):
     """Partition foreground pixels by thresholded undirected affinity edges.
@@ -97,6 +97,16 @@ def reconstruct_affinity_components(
     if scores.shape != (len(offsets), *mask.shape):
         raise ValueError(
             f"affinity shape {scores.shape} != {(len(offsets), *mask.shape)}"
+        )
+    threshold_array = np.asarray(threshold, dtype=np.float32)
+    if threshold_array.ndim == 0:
+        threshold_array = np.full(
+            len(offsets), float(threshold_array), dtype=np.float32
+        )
+    if threshold_array.shape != (len(offsets),):
+        raise ValueError(
+            f"threshold must be scalar or {len(offsets)} values, "
+            f"got {threshold_array.shape}"
         )
     if max_instances is not None and (
         int(max_instances) < 1 or int(max_instances) > 255
@@ -122,7 +132,7 @@ def reconstruct_affinity_components(
     for channel, (dy, dx) in enumerate(offsets):
         source, target = _edge_slices(height, width, int(dy), int(dx))
         selected = (
-            (scores[channel][source] >= float(threshold))
+            (scores[channel][source] >= float(threshold_array[channel]))
             & mask[source]
             & mask[target]
         )
