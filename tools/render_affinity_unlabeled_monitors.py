@@ -114,6 +114,13 @@ def main():
     parser.add_argument("--exclude-manifest")
     parser.add_argument("--thresholds", default="0.45,0.55")
     parser.add_argument(
+        "--fusion-mode", choices=("mean", "short", "gated"), default="mean"
+    )
+    parser.add_argument("--distance2-weight", type=float, default=0.50)
+    parser.add_argument("--distance4-weight", type=float, default=0.25)
+    parser.add_argument("--support-threshold", type=float, default=0.20)
+    parser.add_argument("--support-temperature", type=float, default=0.05)
+    parser.add_argument(
         "--output-dir", default="outputs/experiments/affinity_unlabeled_monitor12"
     )
     args = parser.parse_args()
@@ -145,6 +152,12 @@ def main():
     output_root = Path(project_path(config, args.output_dir))
     output_root.mkdir(parents=True, exist_ok=True)
     thresholds = [float(value) for value in args.thresholds.split(",")]
+    fusion_kwargs = {
+        "distance2_weight": args.distance2_weight,
+        "distance4_weight": args.distance4_weight,
+        "support_threshold": args.support_threshold,
+        "support_temperature": args.support_temperature,
+    }
     system, _, _, digest = build_system(config, cfg, device)
     rows = []
     for alias, checkpoint_value in args.checkpoint:
@@ -165,12 +178,23 @@ def main():
                 int(cfg.get("input_size", 1024)), int(cfg.get("output_grid", 512)),
             )
             image, _, affinity_output, boundary_probability = predict_maps(
-                system, image_path, int(cfg.get("input_size", 1024)), device
+                system, image_path, int(cfg.get("input_size", 1024)), device,
+                args.fusion_mode, fusion_kwargs,
             )
             cv2.imwrite(
                 str(alias_root / "unlabeled_monitor" / f"epoch_{epoch:03d}"
                     / image_path.stem / "source.jpg"),
                 cv2.cvtColor(image, cv2.COLOR_RGB2BGR),
+            )
+            preview = cv2.resize(
+                boundary_probability[0, 0].numpy(),
+                (int(cfg.get("output_grid", 512)), int(cfg.get("output_grid", 512))),
+                interpolation=cv2.INTER_AREA,
+            )
+            cv2.imwrite(
+                str(alias_root / "unlabeled_monitor" / f"epoch_{epoch:03d}"
+                    / image_path.stem / f"boundary_{args.fusion_mode}.png"),
+                (preview * 255).astype(np.uint8),
             )
             row = {
                 "checkpoint": alias,
@@ -197,6 +221,7 @@ def main():
         "candidate_count": len(candidates),
         "selected_images": [path.name for path in selected],
         "thresholds": thresholds,
+        "fusion": {"mode": args.fusion_mode, **fusion_kwargs},
         "rows": rows,
     }
     (output_root / "report.json").write_text(

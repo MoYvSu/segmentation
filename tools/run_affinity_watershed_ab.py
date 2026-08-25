@@ -23,6 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from data.dataset import letterbox
 from data.mim_dataset import list_images
 from train_affinity_geometry_g1 import build_system
+from utils.affinity_fusion import affinity_boundary_probability
 from utils.config import load_config, project_path
 from utils.instance_metrics import (
     evaluate_instance_pair,
@@ -34,9 +35,7 @@ from utils.post_process import post_process_prediction_boundary
 
 def affinity_mean_boundary_probability(affinity_logits: torch.Tensor) -> torch.Tensor:
     """Return ``1 - mean(sigmoid(affinity))`` as a one-channel boundary map."""
-    if affinity_logits.ndim != 4 or affinity_logits.shape[1] < 1:
-        raise ValueError(f"expected [B,C,H,W] affinity logits, got {affinity_logits.shape}")
-    return 1.0 - torch.sigmoid(affinity_logits).mean(dim=1, keepdim=True)
+    return affinity_boundary_probability(affinity_logits, mode="mean")
 
 
 def probability_to_logit(probability: torch.Tensor, eps: float = 1.0e-5):
@@ -72,7 +71,14 @@ def prepare_image(image_path: str | Path, image_size: int, device):
 
 
 @torch.no_grad()
-def predict_maps(system, image_path, image_size, device):
+def predict_maps(
+    system,
+    image_path,
+    image_size,
+    device,
+    fusion_mode="mean",
+    fusion_kwargs=None,
+):
     image, tensor, pad_h, pad_w = prepare_image(image_path, image_size, device)
     original_size = image.shape[:2]
     reference_output = system.reference_model(tensor)
@@ -80,7 +86,11 @@ def predict_maps(system, image_path, image_size, device):
     reference_native = crop_letterbox_output(
         reference_output, image_size, pad_h, pad_w, original_size
     ).cpu()
-    affinity_boundary = affinity_mean_boundary_probability(affinity_output)
+    affinity_boundary = affinity_boundary_probability(
+        affinity_output,
+        mode=fusion_mode,
+        **(fusion_kwargs or {}),
+    )
     affinity_boundary_native = crop_letterbox_output(
         affinity_boundary, image_size, pad_h, pad_w, original_size
     ).cpu()
@@ -165,6 +175,13 @@ def main():
         "--output-dir", default="outputs/experiments/affinity_mean_watershed_ab"
     )
     parser.add_argument("--thresholds", default="0.25,0.35,0.45")
+    parser.add_argument(
+        "--fusion-mode", choices=("mean", "short", "gated"), default="mean"
+    )
+    parser.add_argument("--distance2-weight", type=float, default=0.50)
+    parser.add_argument("--distance4-weight", type=float, default=0.25)
+    parser.add_argument("--support-threshold", type=float, default=0.20)
+    parser.add_argument("--support-temperature", type=float, default=0.05)
     parser.add_argument("--monitor-dir", default="data/test")
     parser.add_argument("--monitor-count", type=int, default=10)
     args = parser.parse_args()
@@ -196,10 +213,16 @@ def main():
         raise FileNotFoundError(f"validation images missing: {missing}")
 
     thresholds = [float(value) for value in args.thresholds.split(",")]
+    fusion_kwargs = {
+        "distance2_weight": args.distance2_weight,
+        "distance4_weight": args.distance4_weight,
+        "support_threshold": args.support_threshold,
+        "support_temperature": args.support_temperature,
+    }
     baseline_threshold = float(infer_cfg.get("boundary_threshold", 0.35))
     arms = [("v6_boundary", baseline_threshold, "reference")]
     arms.extend(
-        (f"affinity_mean_bt{int(round(value * 100)):03d}", value, "affinity")
+        (f"affinity_{args.fusion_mode}_bt{int(round(value * 100)):03d}", value, "affinity")
         for value in thresholds
     )
     output_root = Path(project_path(config, args.output_dir))
@@ -211,7 +234,7 @@ def main():
         basename = image_path.stem
         started = time.time()
         image, reference_output, affinity_output, boundary_prob = predict_maps(
-            system, image_path, image_size, device
+            system, image_path, image_size, device, args.fusion_mode, fusion_kwargs
         )
         prediction_seconds = time.time() - started
         gt_map, gt_class_map, _ = load_labelme_instances(
@@ -232,7 +255,7 @@ def main():
             )
             if source == "affinity":
                 cv2.imwrite(
-                    str(arm_dir / f"{basename}_affinity_mean_boundary.png"),
+                    str(arm_dir / f"{basename}_affinity_{args.fusion_mode}_boundary.png"),
                     (boundary_prob[0, 0].numpy() * 255).astype(np.uint8),
                 )
             metrics = evaluate_instance_pair(
@@ -263,7 +286,7 @@ def main():
     for image_path in monitor_images:
         basename = image_path.stem
         image, _, affinity_output, boundary_prob = predict_maps(
-            system, image_path, image_size, device
+            system, image_path, image_size, device, args.fusion_mode, fusion_kwargs
         )
         for arm_name, threshold, source in arms:
             if source != "affinity":
@@ -280,7 +303,7 @@ def main():
                 True,
             )
             cv2.imwrite(
-                str(arm_dir / f"{basename}_affinity_mean_boundary.png"),
+                str(arm_dir / f"{basename}_affinity_{args.fusion_mode}_boundary.png"),
                 (boundary_prob[0, 0].numpy() * 255).astype(np.uint8),
             )
 
@@ -289,7 +312,8 @@ def main():
         "affinity_checkpoint": os.path.abspath(checkpoint_path),
         "split": os.path.abspath(project_path(config, args.split)),
         "validation_images": val_names,
-        "definition": "boundary_probability = 1 - mean(sigmoid(8 affinity logits))",
+        "definition": "short-range affinity boundary with optional gated long-range reinforcement",
+        "fusion": {"mode": args.fusion_mode, **fusion_kwargs},
         "fixed_postprocess": {
             "min_instance_area": int(infer_cfg.get("min_instance_area", 50)),
             "bridge_width": int(infer_cfg.get("bridge_width", 1)),

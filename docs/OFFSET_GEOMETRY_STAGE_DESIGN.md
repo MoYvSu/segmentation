@@ -129,3 +129,27 @@ competition's <=500 self-labeled-image limit.
 
 This hierarchy prevents the native-tile duplicate-center failure measured in
 O0 while preserving the known-good semantic branch.
+
+## Affinity watershed postprocess A/B (2026-08-26)
+
+`utils/affinity_fusion.py` adds a short-range-dominant, gated long-range fusion
+for the eight-channel affinity head:
+
+```text
+short = boundary probability from four unit-offset channels
+support(d) = soft dilation of short to radius d
+fused = normalized(short + 0.50 * support(2) * distance2 + 0.25 * support(4) * distance4)
+```
+
+On the fixed six-image labeled split and the G2 latest checkpoint:
+
+| Boundary threshold | Mean fusion proxy | Gated fusion proxy | Mean/Gated predictions |
+|---:|---:|---:|---:|
+| 0.45 | 84.53 | 85.81 | 1240 / 1228 |
+| 0.55 | 88.94 | 89.40 | 1182 / 1177 |
+
+The gain is small and comes mainly from the ferrite mean-area term; mIoU changes
+only slightly. On the same 12 label-free monitor images, gated fusion reduces
+mean boundary probability from about 0.271 to 0.266 while leaving the mean final
+instance count nearly unchanged. Raw components above 255 are diagnostic only;
+the exported map must still enforce `max_instance_id=255`.
