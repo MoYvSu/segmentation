@@ -58,6 +58,10 @@ def main():
     parser.add_argument(
         "--thresholds", default="0.20,0.25,0.30,0.35,0.40,0.45,0.50,0.55,0.60,0.70"
     )
+    parser.add_argument(
+        "--sample-names-from",
+        help="Optional split JSON; audit names from its 'val' list.",
+    )
     args = parser.parse_args()
     config = load_config(args.config)
     cfg = config.get("affinity_geometry") or config.get("affinity_geometry_g1")
@@ -84,9 +88,13 @@ def main():
     )
     decoder.load_state_dict(checkpoint["geometry_state_dict"], strict=True)
     system = FrozenSemanticGeometrySystem(reference, decoder).to(device).eval()
+    sample_names = cfg.get("sample_names")
+    if args.sample_names_from:
+        split_path = Path(project_path(config, args.sample_names_from))
+        sample_names = json.loads(split_path.read_text(encoding="utf-8"))["val"]
     dataset = OffsetGeometryDataset(
         project_path(config, config["paths"]["raw_data_dir"]),
-        sample_names=cfg.get("sample_names"),
+        sample_names=sample_names,
         image_size=int(cfg.get("input_size", 1024)),
         output_grid=int(cfg.get("output_grid", 512)),
         cache_in_memory=True,
@@ -131,6 +139,15 @@ def main():
                 **audit_instance_recovery(labels, instances),
             })
     recipes = {
+        "short005_only": [0.05, 0.05, 0.05, 0.05, 1.10, 1.10, 1.10, 1.10],
+        "short008_only": [0.08, 0.08, 0.08, 0.08, 1.10, 1.10, 1.10, 1.10],
+        "short010_only": [0.10, 0.10, 0.10, 0.10, 1.10, 1.10, 1.10, 1.10],
+        "short012_only": [0.12, 0.12, 0.12, 0.12, 1.10, 1.10, 1.10, 1.10],
+        "short008_d2_015": [0.08, 0.08, 0.08, 0.08, 0.15, 0.15, 1.10, 1.10],
+        "short010_d2_018": [0.10, 0.10, 0.10, 0.10, 0.18, 0.18, 1.10, 1.10],
+        "short012_d2_020": [0.12, 0.12, 0.12, 0.12, 0.20, 0.20, 1.10, 1.10],
+        "short010_d2_018_d4_050": [0.10, 0.10, 0.10, 0.10, 0.18, 0.18, 0.50, 0.50],
+        "short012_d2_020_d4_060": [0.12, 0.12, 0.12, 0.12, 0.20, 0.20, 0.60, 0.60],
         "short_t020": [0.20, 0.20, 0.20, 0.20, 1.10, 1.10, 1.10, 1.10],
         "short_t025": [0.25, 0.25, 0.25, 0.25, 1.10, 1.10, 1.10, 1.10],
         "short020_d2_025": [0.20, 0.20, 0.20, 0.20, 0.25, 0.25, 1.10, 1.10],
