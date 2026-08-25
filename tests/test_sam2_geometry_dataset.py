@@ -80,3 +80,21 @@ def test_class_agnostic_targets_turn_eroded_rim_into_boundary():
     assert boundary[1:10, 1:10].any()
     assert not np.any((interiors > 0) & (boundary > 0))
     assert np.all(valid[(interiors > 0) | (boundary > 0)])
+
+def test_partition_can_apply_explicit_recorded_instance_cap():
+    records = []
+    for x in (0, 2, 4):
+        mask = np.zeros((6, 6), dtype=bool)
+        mask[0:2, x : x + 2] = True
+        records.append(_record(mask))
+    labels, _, _, rejected = partition_mask_records(
+        records,
+        (6, 6),
+        min_area=1,
+        max_area_fraction=0.9,
+        max_overlap_fraction=0.0,
+        max_instances=2,
+        cap_instances=True,
+    )
+    assert labels.max() == 2
+    assert rejected["instance_cap"] == 1

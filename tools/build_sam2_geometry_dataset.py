@@ -55,6 +55,7 @@ def partition_mask_records(
     max_area_fraction: float,
     max_overlap_fraction: float,
     max_instances: int = 255,
+    cap_instances: bool = False,
 ):
     """Convert overlapping SAM2 proposals into one unambiguous instance map."""
     height, width = int(image_shape[0]), int(image_shape[1])
@@ -64,6 +65,7 @@ def partition_mask_records(
         "area": 0,
         "overlap": 0,
         "empty_after_partition": 0,
+        "instance_cap": 0,
     }
     for record in records:
         mask = np.asarray(record["segmentation"], dtype=bool)
@@ -91,6 +93,9 @@ def partition_mask_records(
         if unique_area < min_area:
             rejection_counts["empty_after_partition"] += 1
             continue
+        if cap_instances and len(accepted) >= int(max_instances):
+            rejection_counts["instance_cap"] += 1
+            continue
         accepted.append(
             {
                 "mask": unique_mask,
@@ -103,7 +108,7 @@ def partition_mask_records(
         )
         occupied |= unique_mask
 
-    if len(accepted) > int(max_instances):
+    if not cap_instances and len(accepted) > int(max_instances):
         raise ValueError(
             f"accepted SAM2 instances={len(accepted)} exceeds per-image cap="
             f"{max_instances}; refusing silent truncation"
@@ -224,6 +229,7 @@ def main():
     parser.add_argument("--boundary-radius", type=int, default=6)
     parser.add_argument("--boundary-soft-decay", type=float, default=4.0)
     parser.add_argument("--max-instances", type=int, default=255)
+    parser.add_argument("--cap-instances", action="store_true")
     parser.add_argument("--max-source-images", type=int, default=249)
     args = parser.parse_args()
 
@@ -298,6 +304,7 @@ def main():
         "min_area": args.min_area,
         "max_area_fraction": args.max_area_fraction,
         "max_overlap_fraction": args.max_overlap_fraction,
+        "cap_instances": args.cap_instances,
         "shrink_radius": args.shrink_radius,
         "boundary_radius": args.boundary_radius,
         "boundary_soft_decay": args.boundary_soft_decay,
@@ -320,6 +327,7 @@ def main():
             max_area_fraction=args.max_area_fraction,
             max_overlap_fraction=args.max_overlap_fraction,
             max_instances=args.max_instances,
+            cap_instances=args.cap_instances,
         )
         interior_map, boundary, boundary_soft, geometry_valid = (
             build_class_agnostic_geometry_targets(
