@@ -81,7 +81,7 @@ def reconstruct_affinity_components(
     affinity: np.ndarray,
     offsets: Sequence[Tuple[int, int]] = DEFAULT_AFFINITY_OFFSETS,
     threshold: float = 0.5,
-    max_instances: int = 255,
+    max_instances: int | None = 255,
 ):
     """Partition foreground pixels by thresholded undirected affinity edges.
 
@@ -98,12 +98,15 @@ def reconstruct_affinity_components(
         raise ValueError(
             f"affinity shape {scores.shape} != {(len(offsets), *mask.shape)}"
         )
-    if int(max_instances) < 1 or int(max_instances) > 255:
+    if max_instances is not None and (
+        int(max_instances) < 1 or int(max_instances) > 255
+    ):
         raise ValueError("max_instances must be within [1, 255]")
 
     height, width = mask.shape
     foreground_flat = np.flatnonzero(mask.ravel())
-    output = np.zeros((height, width), dtype=np.uint8)
+    output_dtype = np.int32 if max_instances is None else np.uint8
+    output = np.zeros((height, width), dtype=output_dtype)
     if foreground_flat.size == 0:
         return output, {
             "raw_component_count": 0,
@@ -146,7 +149,11 @@ def reconstruct_affinity_components(
     areas = np.bincount(component, minlength=raw_count)
     order = np.argsort(-areas, kind="stable")
     component_to_instance = np.zeros(raw_count, dtype=np.uint16)
-    if raw_count <= int(max_instances):
+    if max_instances is None:
+        component_to_instance[order] = np.arange(1, raw_count + 1)
+        kept_count = raw_count
+        merged_for_cap = 0
+    elif raw_count <= int(max_instances):
         component_to_instance[order] = np.arange(1, raw_count + 1)
         kept_count = raw_count
         merged_for_cap = 0
@@ -161,7 +168,9 @@ def reconstruct_affinity_components(
         component_to_instance[overflow] = int(max_instances)
         kept_count = int(max_instances)
         merged_for_cap = int(raw_count - kept_count)
-    output.ravel()[foreground_flat] = component_to_instance[component].astype(np.uint8)
+    output.ravel()[foreground_flat] = component_to_instance[component].astype(
+        output_dtype
+    )
     return output, {
         "raw_component_count": int(raw_count),
         "kept_instance_count": int(kept_count),
