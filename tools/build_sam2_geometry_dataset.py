@@ -219,6 +219,38 @@ def parse_indices(value: str) -> List[int]:
     return indices
 
 
+def select_unique_sources(
+    images: Sequence[Path],
+    count: int,
+    *,
+    excluded_hashes: Iterable[str] = (),
+    excluded_stems: Iterable[str] = (),
+    start_index: int = 0,
+):
+    excluded_hashes = set(excluded_hashes)
+    excluded_stems = set(excluded_stems)
+    excluded_hashes.update(
+        sha256_file(path) for path in images if Path(path).stem in excluded_stems
+    )
+    selected_indices, selected, source_hashes = [], [], []
+    seen = set()
+    for index in range(max(0, int(start_index)), len(images)):
+        path = Path(images[index])
+        digest = sha256_file(path)
+        if path.stem in excluded_stems or digest in excluded_hashes or digest in seen:
+            continue
+        selected_indices.append(index)
+        selected.append(path)
+        source_hashes.append(digest)
+        seen.add(digest)
+        if len(selected) >= int(count):
+            break
+    if len(selected) != int(count):
+        raise ValueError(
+            f"only {len(selected)} eligible unique sources for count={count}"
+        )
+    return selected_indices, selected, source_hashes
+
 def save_overlay(image: np.ndarray, instance_map: np.ndarray, path: Path):
     overlay = image.copy()
     rng = np.random.default_rng(42)
@@ -233,7 +265,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-dir", required=True)
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--indices", required=True)
+    selection = parser.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--indices", default="")
+    selection.add_argument("--count", type=int, default=0)
+    parser.add_argument("--start-index", type=int, default=0)
     parser.add_argument("--sam2-repo", default="segment-anything-2")
     parser.add_argument("--config-file", default="configs/sam2/sam2_hiera_b+.yaml")
     parser.add_argument("--checkpoint", default="weights/sam2_hiera_base_plus.pt")
@@ -261,23 +296,31 @@ def main():
 
     from data.mim_dataset import list_images
 
-    images = [Path(path).resolve() for path in list_images(str(input_dir))]
-    indices = parse_indices(args.indices)
-    if any(index < 0 or index >= len(images) for index in indices):
-        raise IndexError(f"indices must be within [0, {len(images) - 1}]")
-    selected = [images[index] for index in indices]
-    source_hashes = [sha256_file(path) for path in selected]
-    if len(source_hashes) != len(set(source_hashes)):
-        raise ValueError("selected files contain duplicate image content")
-
     manual_sources = (
         collect_labelme_source_hashes(Path(args.exclude_labelme_dir).resolve())
         if args.exclude_labelme_dir
         else {}
     )
     manual_hashes = set(manual_sources)
-    selected_stems = {path.stem for path in selected}
     manual_stems = {path.stem for path in manual_sources.values()}
+    images = [Path(path).resolve() for path in list_images(str(input_dir))]
+    if args.count:
+        indices, selected, source_hashes = select_unique_sources(
+            images,
+            args.count,
+            excluded_hashes=manual_hashes,
+            excluded_stems=manual_stems,
+            start_index=args.start_index,
+        )
+    else:
+        indices = parse_indices(args.indices)
+        if any(index < 0 or index >= len(images) for index in indices):
+            raise IndexError(f"indices must be within [0, {len(images) - 1}]")
+        selected = [images[index] for index in indices]
+        source_hashes = [sha256_file(path) for path in selected]
+        if len(source_hashes) != len(set(source_hashes)):
+            raise ValueError("selected files contain duplicate image content")
+    selected_stems = {path.stem for path in selected}
     overlap_hashes = manual_hashes & set(source_hashes)
     overlap_stems = manual_stems & selected_stems
     if overlap_hashes or overlap_stems:

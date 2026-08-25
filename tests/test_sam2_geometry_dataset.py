@@ -6,6 +6,8 @@ from tools.build_sam2_geometry_dataset import (
     collect_labelme_source_hashes,
     enforce_source_limit,
     partition_mask_records,
+    select_unique_sources,
+    sha256_file,
 )
 
 
@@ -109,3 +111,16 @@ def test_collect_labelme_sources_hashes_only_annotated_images(tmp_path):
     sources = collect_labelme_source_hashes(tmp_path)
     assert len(sources) == 1
     assert next(iter(sources.values())) == annotated
+
+def test_select_unique_sources_skips_manual_and_content_duplicates(tmp_path):
+    paths = [tmp_path / f"image_{index}.jpg" for index in range(5)]
+    payloads = [b"manual", b"duplicate", b"duplicate", b"keep-a", b"keep-b"]
+    for path, payload in zip(paths, payloads):
+        path.write_bytes(payload)
+    manual_hash = sha256_file(paths[0])
+    indices, selected, hashes = select_unique_sources(
+        paths, 2, excluded_hashes={manual_hash}, excluded_stems={paths[1].stem}
+    )
+    assert indices == [3, 4]
+    assert selected == paths[3:5]
+    assert len(set(hashes)) == 2
