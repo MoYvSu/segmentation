@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 from tools.build_sam2_geometry_dataset import (
+    build_class_agnostic_geometry_targets,
     enforce_source_limit,
     partition_mask_records,
 )
@@ -54,3 +55,28 @@ def test_partition_refuses_silent_instance_truncation():
             max_overlap_fraction=0.0,
             max_instances=2,
         )
+
+
+def test_class_agnostic_targets_keep_interfaces_without_shrink():
+    labels = np.zeros((10, 12), dtype=np.uint16)
+    labels[2:8, 1:6] = 1
+    labels[2:8, 6:11] = 2
+    interiors, boundary, soft, valid = build_class_agnostic_geometry_targets(
+        labels, shrink_radius=0, boundary_radius=2
+    )
+    assert np.array_equal(interiors, labels)
+    assert boundary[:, 5:7].any()
+    assert soft.shape == labels.shape
+    assert np.all(valid[interiors > 0])
+
+
+def test_class_agnostic_targets_turn_eroded_rim_into_boundary():
+    labels = np.zeros((11, 11), dtype=np.uint16)
+    labels[1:10, 1:10] = 1
+    interiors, boundary, _, valid = build_class_agnostic_geometry_targets(
+        labels, shrink_radius=2, boundary_radius=2
+    )
+    assert np.sum(interiors > 0) < np.sum(labels > 0)
+    assert boundary[1:10, 1:10].any()
+    assert not np.any((interiors > 0) & (boundary > 0))
+    assert np.all(valid[(interiors > 0) | (boundary > 0)])

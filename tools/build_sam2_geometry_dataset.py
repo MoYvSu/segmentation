@@ -119,6 +119,65 @@ def partition_mask_records(
     return instance_map, scores, stability, rejection_counts
 
 
+def build_class_agnostic_geometry_targets(
+    instance_map: np.ndarray,
+    *,
+    shrink_radius: int = 2,
+    boundary_radius: int = 6,
+    soft_decay: float = 4.0,
+):
+    """Create conservative interiors and a class-agnostic boundary band."""
+    labels = np.asarray(instance_map)
+    if labels.ndim != 2:
+        raise ValueError(f"instance_map must be 2-D, got {labels.shape}")
+    shrink_radius = max(0, int(shrink_radius))
+    boundary_radius = max(0, int(boundary_radius))
+    interiors = np.zeros_like(labels)
+    if shrink_radius == 0:
+        interiors[...] = labels
+    else:
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (2 * shrink_radius + 1, 2 * shrink_radius + 1)
+        )
+        for instance_id in np.unique(labels):
+            if int(instance_id) <= 0:
+                continue
+            eroded = cv2.erode((labels == instance_id).astype(np.uint8), kernel) > 0
+            interiors[eroded] = instance_id
+
+    occupied = labels > 0
+    interior = interiors > 0
+    if boundary_radius > 0:
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (2 * boundary_radius + 1, 2 * boundary_radius + 1)
+        )
+        near_instances = cv2.dilate(occupied.astype(np.uint8), kernel) > 0
+    else:
+        near_instances = occupied
+
+    interface = np.zeros_like(occupied)
+    for dy, dx in ((0, 1), (1, 0), (1, 1), (1, -1)):
+        y0, y1 = max(0, -dy), min(labels.shape[0], labels.shape[0] - dy)
+        x0, x1 = max(0, -dx), min(labels.shape[1], labels.shape[1] - dx)
+        source = (slice(y0, y1), slice(x0, x1))
+        target = (slice(y0 + dy, y1 + dy), slice(x0 + dx, x1 + dx))
+        different = (
+            (labels[source] > 0)
+            & (labels[target] > 0)
+            & (labels[source] != labels[target])
+        )
+        interface[source] |= different
+        interface[target] |= different
+
+    boundary = ((~interior) & near_instances) | interface
+    distance = cv2.distanceTransform((~interior).astype(np.uint8), cv2.DIST_L2, 5)
+    boundary_soft = np.exp(-distance / max(float(soft_decay), 1e-3)).astype(
+        np.float32
+    )
+    boundary_soft *= boundary.astype(np.float32)
+    geometry_valid = interior | boundary
+    return interiors, boundary.astype(np.uint8), boundary_soft, geometry_valid
+
 def read_manifest(path: Path) -> List[Dict]:
     if not path.is_file():
         return []
@@ -161,6 +220,9 @@ def main():
     parser.add_argument("--min-area", type=int, default=300)
     parser.add_argument("--max-area-fraction", type=float, default=0.80)
     parser.add_argument("--max-overlap-fraction", type=float, default=0.30)
+    parser.add_argument("--shrink-radius", type=int, default=2)
+    parser.add_argument("--boundary-radius", type=int, default=6)
+    parser.add_argument("--boundary-soft-decay", type=float, default=4.0)
     parser.add_argument("--max-instances", type=int, default=255)
     parser.add_argument("--max-source-images", type=int, default=249)
     args = parser.parse_args()
@@ -185,8 +247,10 @@ def main():
     output_dir = Path(args.output_dir).resolve()
     masks_dir = output_dir / "masks"
     overlays_dir = output_dir / "overlays"
+    boundaries_dir = output_dir / "boundaries"
     masks_dir.mkdir(parents=True, exist_ok=True)
     overlays_dir.mkdir(parents=True, exist_ok=True)
+    boundaries_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = output_dir / "manifest.jsonl"
     existing = read_manifest(manifest_path)
     existing_hashes = {row["source_sha256"] for row in existing}
@@ -234,6 +298,9 @@ def main():
         "min_area": args.min_area,
         "max_area_fraction": args.max_area_fraction,
         "max_overlap_fraction": args.max_overlap_fraction,
+        "shrink_radius": args.shrink_radius,
+        "boundary_radius": args.boundary_radius,
+        "boundary_soft_decay": args.boundary_soft_decay,
     }
 
     for index, image_path, source_hash in zip(indices, selected, source_hashes):
@@ -254,19 +321,33 @@ def main():
             max_overlap_fraction=args.max_overlap_fraction,
             max_instances=args.max_instances,
         )
+        interior_map, boundary, boundary_soft, geometry_valid = (
+            build_class_agnostic_geometry_targets(
+                instance_map,
+                shrink_radius=args.shrink_radius,
+                boundary_radius=args.boundary_radius,
+                soft_decay=args.boundary_soft_decay,
+            )
+        )
         mask_path = masks_dir / f"{image_path.stem}.npz"
         np.savez_compressed(
             mask_path,
             instance_map=instance_map,
-            geometry_valid=(instance_map > 0),
+            interior_instance_map=interior_map,
+            boundary=boundary,
+            boundary_soft=boundary_soft,
+            geometry_valid=geometry_valid,
             instance_predicted_iou=scores,
             instance_stability=stability,
         )
         overlay_path = overlays_dir / f"{image_path.stem}.jpg"
         save_overlay(image, instance_map, overlay_path)
+        boundary_path = boundaries_dir / f"{image_path.stem}.png"
+        cv2.imwrite(str(boundary_path), boundary * 255)
         row = {
             "source_index": index,
             "source_file": str(image_path),
+            "source_relpath": str(image_path.relative_to(input_dir)),
             "source_sha256": source_hash,
             "source_role": "competition_unlabeled_train",
             "class_label": None,
@@ -274,9 +355,12 @@ def main():
             "raw_mask_count": len(records),
             "accepted_instance_count": int(instance_map.max()),
             "covered_fraction": float((instance_map > 0).mean()),
+            "interior_fraction": float((interior_map > 0).mean()),
+            "boundary_fraction": float(boundary.mean()),
             "rejection_counts": rejected,
             "mask_file": str(mask_path.relative_to(output_dir)),
             "overlay_file": str(overlay_path.relative_to(output_dir)),
+            "boundary_file": str(boundary_path.relative_to(output_dir)),
             "generation": generation,
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }

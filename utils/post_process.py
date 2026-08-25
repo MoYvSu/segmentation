@@ -113,6 +113,7 @@ def boundary_watershed_separation(
     marker_boundary_mask: Optional[np.ndarray] = None,
     marker_bridge_width: Optional[int] = None,
     marker_dilate_width: Optional[int] = None,
+    marker_border_seal_width: int = 0,
 ) -> Tuple[np.ndarray, Dict[int, int]]:
     """
     基于边界预测的受阻分水岭实例分割。
@@ -146,6 +147,13 @@ def boundary_watershed_separation(
             bridge_width if marker_bridge_width is None else marker_bridge_width,
             dilate_width if marker_dilate_width is None else marker_dilate_width,
         )
+    border_width = max(0, int(marker_border_seal_width))
+    if border_width > 0:
+        border_width = min(border_width, max(1, min(h, w) // 2))
+        marker_skeleton_belt[:border_width, :] = 255
+        marker_skeleton_belt[-border_width:, :] = 255
+        marker_skeleton_belt[:, :border_width] = 255
+        marker_skeleton_belt[:, -border_width:] = 255
     # Step 3/4: 生成种子。中心峰避免“一个连通核心=一个实例”的欠分割，
     # 仍保留旧核心种子作为旧 checkpoint 和低置信中心热图的安全回退。
     markers = np.zeros((h, w), dtype=np.int32)
@@ -293,6 +301,7 @@ def post_process_prediction_boundary(
     use_center_seeds: bool = True,
     center_threshold: float = 0.25,
     center_nms_kernel: int = 9,
+    marker_border_seal_width: int = 0,
     save_visualization: bool = True,
 ) -> Tuple[Dict[str, str], np.ndarray, Dict[int, int]]:
     """
@@ -344,6 +353,7 @@ def post_process_prediction_boundary(
         center_prob=center_prob,
         center_threshold=center_threshold,
         center_nms_kernel=center_nms_kernel,
+        marker_border_seal_width=marker_border_seal_width,
     )
 
     inst_path = os.path.join(output_dir, f"{image_basename}_inst.png")

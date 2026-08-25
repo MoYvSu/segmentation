@@ -39,3 +39,19 @@ def test_torch_targets_match_same_instance_pairs_and_loss_backpropagates():
     assert metrics["negative_edges"] > 0
     loss.backward()
     assert logits.grad is not None
+
+
+def test_hard_negative_weight_penalizes_false_merge_edges():
+    logits = torch.tensor([[[[0.0, -3.0, 3.0]]]], requires_grad=True)
+    target = torch.tensor([[[[1.0, 0.0, 0.0]]]])
+    valid = torch.ones_like(target, dtype=torch.bool)
+    baseline, _ = balanced_affinity_loss(logits, target, valid)
+    weighted, _ = balanced_affinity_loss(
+        logits,
+        target,
+        valid,
+        negative_weight=1.5,
+        hard_negative_weight=2.0,
+        hard_negative_gamma=2.0,
+    )
+    assert weighted > baseline

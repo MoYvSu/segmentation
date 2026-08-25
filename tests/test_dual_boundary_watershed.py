@@ -54,3 +54,28 @@ def test_none_marker_boundary_preserves_default_output():
 
     assert np.array_equal(actual[0], expected[0])
     assert actual[1] == expected[1]
+
+
+def test_marker_border_seal_prevents_frame_bypass():
+    semantic = np.ones((48, 64), dtype=np.uint8)
+    boundary = np.zeros_like(semantic)
+    boundary[2:, 31:33] = 1
+
+    leaking, _ = boundary_watershed_separation(
+        semantic,
+        boundary,
+        min_area=20,
+        bridge_width=0,
+        dilate_width=0,
+    )
+    sealed, _ = boundary_watershed_separation(
+        semantic,
+        boundary,
+        min_area=20,
+        bridge_width=0,
+        dilate_width=0,
+        marker_border_seal_width=3,
+    )
+
+    assert _instance_count(leaking) == 1
+    assert _instance_count(sealed) == 2

@@ -81,8 +81,16 @@ def skeleton_belt(boundary, bridge_width, dilate_width):
     return skeleton, belt
 
 
-def marker_leak_metrics(gt_map, boundary, bridge_width, dilate_width, min_area):
+def marker_leak_metrics(
+    gt_map, boundary, bridge_width, dilate_width, min_area, border_seal_width=0
+):
     _, belt = skeleton_belt(boundary, bridge_width, dilate_width)
+    border_width = max(0, int(border_seal_width))
+    if border_width > 0:
+        belt[:border_width, :] = 255
+        belt[-border_width:, :] = 255
+        belt[:, :border_width] = 255
+        belt[:, -border_width:] = 255
     count, labels, stats, _ = cv2.connectedComponentsWithStats(
         cv2.bitwise_not(belt), connectivity=8
     )
@@ -156,6 +164,10 @@ def variants(probability):
                 marker_bridge_width,
                 1,
             )
+    for border_width in (1, 2, 3, 4, 6, 8):
+        base[f"border_seal_w{border_width}"] = (
+            primary, 1, 1, None, None, None, border_width
+        )
     return base
 
 
@@ -199,6 +211,8 @@ def main():
         for variant_name, variant in variants(probability).items():
             if args.only_prefix and not variant_name.startswith(args.only_prefix):
                 continue
+            if len(variant) == 6:
+                variant = (*variant, 0)
             (
                 boundary,
                 bridge_width,
@@ -206,6 +220,7 @@ def main():
                 marker_boundary,
                 marker_bridge_width,
                 marker_dilate_width,
+                marker_border_seal_width,
             ) = variant
             pred_map, pred_class_map = boundary_watershed_separation(
                 semantic,
@@ -218,6 +233,7 @@ def main():
                 marker_boundary_mask=marker_boundary,
                 marker_bridge_width=marker_bridge_width,
                 marker_dilate_width=marker_dilate_width,
+                marker_border_seal_width=marker_border_seal_width,
             )
             metrics = evaluate_instance_pair(
                 gt_map, gt_class_map, pred_map, pred_class_map
@@ -228,6 +244,7 @@ def main():
                 bridge_width if marker_bridge_width is None else marker_bridge_width,
                 dilate_width if marker_dilate_width is None else marker_dilate_width,
                 args.min_area,
+                marker_border_seal_width,
             )
             metrics_by_variant.setdefault(variant_name, []).append(metrics)
             rows.append({

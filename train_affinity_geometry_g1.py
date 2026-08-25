@@ -14,7 +14,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import ConcatDataset, DataLoader, WeightedRandomSampler
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
@@ -23,6 +23,7 @@ if PROJECT_ROOT not in sys.path:
 from data.affinity_geometry_augmentation import AffinityGeometryAugmentedDataset
 from data.dataset import letterbox
 from data.offset_geometry_dataset import OffsetGeometryDataset
+from data.sam2_geometry_dataset import SAM2GeometryDataset
 from inference import build_model as build_reference_model
 from models.affinity_geometry import AffinityGeometryDecoder
 from models.offset_geometry import FrozenSemanticGeometrySystem, semantic_state_digest
@@ -232,14 +233,75 @@ def main():
         "output_grid": int(cfg.get("output_grid", 512)),
         "cache_in_memory": True,
     }
-    train_base = OffsetGeometryDataset(raw_dir, sample_names=train_names, **dataset_kwargs)
+    manual_train_base = OffsetGeometryDataset(
+        raw_dir, sample_names=train_names, **dataset_kwargs
+    )
+    combined_base = manual_train_base
+    sampler = None
+    sam2_geometry_cfg = cfg.get("sam2_geometry", {})
+    if bool(sam2_geometry_cfg.get("enabled", False)):
+        pseudo_base = SAM2GeometryDataset(
+            project_path(config, sam2_geometry_cfg["dataset_dir"]),
+            project_path(
+                config,
+                sam2_geometry_cfg.get(
+                    "source_dir", cfg.get("unlabeled_dir", "data/unlabeled")
+                ),
+            ),
+            image_size=dataset_kwargs["image_size"],
+            output_grid=dataset_kwargs["output_grid"],
+            use_eroded_interiors=bool(
+                sam2_geometry_cfg.get("use_eroded_interiors", False)
+            ),
+            cache_in_memory=True,
+        )
+        combined_base = ConcatDataset([manual_train_base, pseudo_base])
+        pseudo_fraction = float(sam2_geometry_cfg.get("pseudo_fraction", 0.5))
+        if not 0.0 < pseudo_fraction < 1.0:
+            raise ValueError("sam2_geometry.pseudo_fraction must be within (0, 1)")
+        weights = torch.cat([
+            torch.full(
+                (len(manual_train_base),),
+                (1.0 - pseudo_fraction) / len(manual_train_base),
+            ),
+            torch.full(
+                (len(pseudo_base),), pseudo_fraction / len(pseudo_base)
+            ),
+        ]).double()
+        epoch_samples = int(
+            sam2_geometry_cfg.get("samples_per_epoch", 2 * len(manual_train_base))
+        )
+        sampler = WeightedRandomSampler(
+            weights,
+            num_samples=epoch_samples,
+            replacement=True,
+            generator=torch.Generator().manual_seed(seed),
+        )
+        split["sam2_geometry"] = {
+            "count": len(pseudo_base),
+            "pseudo_fraction": pseudo_fraction,
+            "samples_per_epoch": epoch_samples,
+            "dataset_dir": os.path.abspath(
+                project_path(config, sam2_geometry_cfg["dataset_dir"])
+            ),
+        }
+        logger.info(
+            "SAM2 geometry mix enabled: manual=%d pseudo=%d fraction=%.3f "
+            "samples_per_epoch=%d",
+            len(manual_train_base), len(pseudo_base), pseudo_fraction, epoch_samples,
+        )
     train_dataset = AffinityGeometryAugmentedDataset(
-        train_base, cfg.get("augmentation", {})
+        combined_base, cfg.get("augmentation", {})
     )
     val_dataset = OffsetGeometryDataset(raw_dir, sample_names=val_names, **dataset_kwargs)
     loader = DataLoader(
-        train_dataset, batch_size=int(cfg.get("batch_size", 2)), shuffle=True,
-        num_workers=0, pin_memory=device.type == "cuda", drop_last=False,
+        train_dataset,
+        batch_size=int(cfg.get("batch_size", 2)),
+        shuffle=sampler is None,
+        sampler=sampler,
+        num_workers=0,
+        pin_memory=device.type == "cuda",
+        drop_last=False,
     )
     unlabeled_dir = Path(project_path(config, cfg.get("unlabeled_dir", "data/unlabeled")))
     labeled_set = set(all_names)
@@ -314,8 +376,18 @@ def main():
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type=device.type, enabled=amp_enabled):
                 output = system.geometry_forward(image)
+                loss_cfg = cfg.get("loss", {})
                 loss, train_metrics = balanced_affinity_loss(
-                    output["affinity_logits"], target, edge_valid
+                    output["affinity_logits"],
+                    target,
+                    edge_valid,
+                    negative_weight=float(loss_cfg.get("negative_weight", 1.0)),
+                    hard_negative_weight=float(
+                        loss_cfg.get("hard_negative_weight", 0.0)
+                    ),
+                    hard_negative_gamma=float(
+                        loss_cfg.get("hard_negative_gamma", 2.0)
+                    ),
                 )
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)

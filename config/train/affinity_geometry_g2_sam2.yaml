@@ -1,0 +1,25 @@
+_base: affinity_geometry_g1.yaml
+
+affinity_geometry_g1:
+  geometry_init_checkpoint: outputs/affinity_geometry_g1/best_affinity.pth
+  output_dir: outputs/affinity_geometry_g2_sam2
+  epochs: 30
+  learning_rate: 3.0e-5
+  min_learning_rate: 5.0e-6
+
+  # Keep the proven V6 semantic system frozen. SAM2 masks are class-agnostic
+  # and only update the independent affinity geometry decoder.
+  sam2_geometry:
+    enabled: true
+    dataset_dir: data/sam2_geometry_g2
+    source_dir: data/unlabeled
+    pseudo_fraction: 0.50
+    samples_per_epoch: 52
+    use_eroded_interiors: false
+
+  # A false high affinity across a real interface causes a whole-instance
+  # merge, so it is more expensive than a missed positive edge.
+  loss:
+    negative_weight: 1.5
+    hard_negative_weight: 1.0
+    hard_negative_gamma: 2.0
