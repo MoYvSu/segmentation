@@ -67,7 +67,9 @@ def edge_metrics(probability, target, valid):
 
 
 @torch.no_grad()
-def write_monitor(system, dataset, output_dir: Path, step: int):
+def write_monitor(
+    system, dataset, output_dir: Path, step: int, graph_thresholds=0.5,
+):
     system.eval()
     device = next(system.geometry_decoder.parameters()).device
     rows = []
@@ -80,7 +82,8 @@ def write_monitor(system, dataset, output_dir: Path, step: int):
             labels, sample["valid_content"][0].numpy().astype(bool)
         )
         instances, graph_audit = reconstruct_affinity_components(
-            labels > 0, probability, threshold=0.5, max_instances=255
+            labels > 0, probability, threshold=graph_thresholds,
+            max_instances=255,
         )
         recovery = audit_instance_recovery(labels, instances)
         gt_ids = [int(value) for value in np.unique(labels) if int(value) != 0]
@@ -116,6 +119,7 @@ def write_monitor(system, dataset, output_dir: Path, step: int):
         )
     summary = {
         "step": int(step),
+        "graph_thresholds": graph_thresholds,
         "mean_edge_precision": float(np.mean([row["edge_precision"] for row in rows])),
         "mean_edge_recall": float(np.mean([row["edge_recall"] for row in rows])),
         "mean_edge_specificity": float(np.mean([row["edge_specificity"] for row in rows])),
@@ -168,6 +172,16 @@ def main():
     if cfg.get("init_from_v6_boundary_fpn", True):
         decoder.initialize_fpn_from_boundary(reference_model.decoder.boundary_fpn)
         logger.info("Affinity FPN initialized from V6 boundary FPN")
+    init_checkpoint = cfg.get("geometry_init_checkpoint")
+    if init_checkpoint:
+        init_path = project_path(config, init_checkpoint)
+        init_payload = torch.load(
+            init_path, map_location="cpu", weights_only=False
+        )
+        decoder.load_state_dict(
+            init_payload["geometry_state_dict"], strict=True
+        )
+        logger.info("Affinity decoder initialized from %s", init_path)
     system = FrozenSemanticGeometrySystem(reference_model, decoder).to(device)
     logger.info(
         "Device=%s trainable_affinity_params=%.3fM",
@@ -206,7 +220,8 @@ def main():
         "positive_probability", "negative_probability",
     ])
     writer.writeheader()
-    write_monitor(system, dataset, output_dir, 0)
+    graph_thresholds = cfg.get("graph_thresholds", 0.5)
+    write_monitor(system, dataset, output_dir, 0, graph_thresholds)
     max_steps = int(cfg.get("max_steps", 400))
     step = 0
     while step < max_steps:
@@ -254,7 +269,9 @@ def main():
                     system, audit_image, semantic_baseline, digest,
                     float(cfg.get("semantic_tolerance", 1e-6)),
                 )
-                summary = write_monitor(system, dataset, output_dir, step)
+                summary = write_monitor(
+                    system, dataset, output_dir, step, graph_thresholds
+                )
                 logger.info(
                     "monitor step=%d exact_fraction=%.4f penalized_miou=%.4f all_exact=%s",
                     step, summary["mean_exact_gt_fraction"],

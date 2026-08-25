@@ -1,0 +1,11 @@
+_base: affinity_geometry_g0.yaml
+
+affinity_geometry:
+  geometry_init_checkpoint: outputs/affinity_geometry_g0/latest_affinity.pth
+  output_dir: outputs/affinity_geometry_g0_long
+  max_steps: 1600
+  learning_rate: 5.0e-5
+
+  # Short edges provide local connectivity; long links require stronger
+  # evidence because one false distance-4 edge can merge whole instances.
+  graph_thresholds: [0.20, 0.20, 0.20, 0.20, 0.25, 0.25, 0.50, 0.50]
