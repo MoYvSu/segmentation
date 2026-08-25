@@ -60,7 +60,11 @@ def main():
     )
     args = parser.parse_args()
     config = load_config(args.config)
-    cfg = config["affinity_geometry"]
+    cfg = config.get("affinity_geometry") or config.get("affinity_geometry_g1")
+    if cfg is None:
+        raise KeyError(
+            "config must define 'affinity_geometry' or 'affinity_geometry_g1'"
+        )
     device = torch.device(
         "cuda" if torch.cuda.is_available() and config["sam2"].get("device") == "cuda"
         else "cpu"
