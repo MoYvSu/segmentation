@@ -33,6 +33,25 @@ def sha256_file(path: str | Path, chunk_size: int = 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
+def collect_labelme_source_hashes(data_dir: str | Path) -> Dict[str, Path]:
+    """Return source-image hashes for every LabelMe JSON in a directory."""
+    data_dir = Path(data_dir)
+    extensions = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
+    sources = {}
+    for annotation in sorted(data_dir.glob("*.json")):
+        image_path = next(
+            (
+                annotation.with_suffix(ext)
+                for ext in extensions
+                if annotation.with_suffix(ext).is_file()
+            ),
+            None,
+        )
+        if image_path is None:
+            raise FileNotFoundError(f"LabelMe source image missing for {annotation}")
+        sources[sha256_file(image_path)] = image_path
+    return sources
+
 def enforce_source_limit(
     source_hashes: Iterable[str],
     existing_hashes: Iterable[str] = (),
@@ -231,6 +250,7 @@ def main():
     parser.add_argument("--max-instances", type=int, default=255)
     parser.add_argument("--cap-instances", action="store_true")
     parser.add_argument("--max-source-images", type=int, default=249)
+    parser.add_argument("--exclude-labelme-dir", default="")
     args = parser.parse_args()
 
     input_dir = Path(args.input_dir).resolve()
@@ -250,6 +270,21 @@ def main():
     if len(source_hashes) != len(set(source_hashes)):
         raise ValueError("selected files contain duplicate image content")
 
+    manual_sources = (
+        collect_labelme_source_hashes(Path(args.exclude_labelme_dir).resolve())
+        if args.exclude_labelme_dir
+        else {}
+    )
+    manual_hashes = set(manual_sources)
+    selected_stems = {path.stem for path in selected}
+    manual_stems = {path.stem for path in manual_sources.values()}
+    overlap_hashes = manual_hashes & set(source_hashes)
+    overlap_stems = manual_stems & selected_stems
+    if overlap_hashes or overlap_stems:
+        raise ValueError(
+            "selected SAM2 sources overlap LabelMe-labeled images: "
+            f"stems={sorted(overlap_stems)} hashes={len(overlap_hashes)}"
+        )
     output_dir = Path(args.output_dir).resolve()
     masks_dir = output_dir / "masks"
     overlays_dir = output_dir / "overlays"
@@ -262,7 +297,7 @@ def main():
     existing_hashes = {row["source_sha256"] for row in existing}
     enforce_source_limit(
         source_hashes,
-        existing_hashes,
+        existing_hashes | manual_hashes,
         limit=args.max_source_images,
     )
     duplicates = existing_hashes & set(source_hashes)
@@ -308,6 +343,7 @@ def main():
         "shrink_radius": args.shrink_radius,
         "boundary_radius": args.boundary_radius,
         "boundary_soft_decay": args.boundary_soft_decay,
+        "excluded_manual_source_count": len(manual_hashes),
     }
 
     for index, image_path, source_hash in zip(indices, selected, source_hashes):

@@ -3,6 +3,7 @@ import pytest
 
 from tools.build_sam2_geometry_dataset import (
     build_class_agnostic_geometry_targets,
+    collect_labelme_source_hashes,
     enforce_source_limit,
     partition_mask_records,
 )
@@ -98,3 +99,13 @@ def test_partition_can_apply_explicit_recorded_instance_cap():
     )
     assert labels.max() == 2
     assert rejected["instance_cap"] == 1
+
+def test_collect_labelme_sources_hashes_only_annotated_images(tmp_path):
+    annotated = tmp_path / "annotated.jpg"
+    unannotated = tmp_path / "unannotated.jpg"
+    annotated.write_bytes(b"annotated-image")
+    unannotated.write_bytes(b"unannotated-image")
+    (tmp_path / "annotated.json").write_text("{}", encoding="utf-8")
+    sources = collect_labelme_source_hashes(tmp_path)
+    assert len(sources) == 1
+    assert next(iter(sources.values())) == annotated
