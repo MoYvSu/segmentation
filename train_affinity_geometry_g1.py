@@ -236,38 +236,90 @@ def main():
     manual_train_base = OffsetGeometryDataset(
         raw_dir, sample_names=train_names, **dataset_kwargs
     )
-    combined_base = manual_train_base
+    augmentation_cfg = cfg.get("augmentation", {})
+    dataset_parts = [manual_train_base]
+    augmentation_parts = [augmentation_cfg]
+    sampling_masses = [1.0]
     sampler = None
     sam2_geometry_cfg = cfg.get("sam2_geometry", {})
     if bool(sam2_geometry_cfg.get("enabled", False)):
-        pseudo_base = SAM2GeometryDataset(
-            project_path(config, sam2_geometry_cfg["dataset_dir"]),
-            project_path(
-                config,
-                sam2_geometry_cfg.get(
-                    "source_dir", cfg.get("unlabeled_dir", "data/unlabeled")
-                ),
+        pseudo_dataset_dir = project_path(config, sam2_geometry_cfg["dataset_dir"])
+        pseudo_source_dir = project_path(
+            config,
+            sam2_geometry_cfg.get(
+                "source_dir", cfg.get("unlabeled_dir", "data/unlabeled")
             ),
-            image_size=dataset_kwargs["image_size"],
-            output_grid=dataset_kwargs["output_grid"],
-            use_eroded_interiors=bool(
+        )
+        pseudo_common = {
+            "image_size": dataset_kwargs["image_size"],
+            "output_grid": dataset_kwargs["output_grid"],
+            "use_eroded_interiors": bool(
                 sam2_geometry_cfg.get("use_eroded_interiors", False)
             ),
+        }
+        pseudo_base = SAM2GeometryDataset(
+            pseudo_dataset_dir,
+            pseudo_source_dir,
+            **pseudo_common,
             cache_in_memory=True,
         )
-        combined_base = ConcatDataset([manual_train_base, pseudo_base])
         pseudo_fraction = float(sam2_geometry_cfg.get("pseudo_fraction", 0.5))
         if not 0.0 < pseudo_fraction < 1.0:
             raise ValueError("sam2_geometry.pseudo_fraction must be within (0, 1)")
-        weights = torch.cat([
-            torch.full(
-                (len(manual_train_base),),
-                (1.0 - pseudo_fraction) / len(manual_train_base),
-            ),
-            torch.full(
-                (len(pseudo_base),), pseudo_fraction / len(pseudo_base)
-            ),
-        ]).double()
+        dataset_parts.append(pseudo_base)
+        augmentation_parts.append(augmentation_cfg)
+
+        native_crop_cfg = sam2_geometry_cfg.get("native_crop", {})
+        crop_base = None
+        crop_fraction = 0.0
+        if bool(native_crop_cfg.get("enabled", False)):
+            crop_fraction = float(
+                native_crop_cfg.get("fraction_within_pseudo", 0.5)
+            )
+            if not 0.0 < crop_fraction < 1.0:
+                raise ValueError(
+                    "sam2_geometry.native_crop.fraction_within_pseudo must be "
+                    "within (0, 1)"
+                )
+            crop_base = SAM2GeometryDataset(
+                pseudo_dataset_dir,
+                pseudo_source_dir,
+                **pseudo_common,
+                cache_in_memory=False,
+                native_crop_size=int(native_crop_cfg.get("size", 1024)),
+                native_crop_min_coverage=float(
+                    native_crop_cfg.get("min_coverage", 0.92)
+                ),
+                native_crop_min_instances=int(
+                    native_crop_cfg.get("min_instances", 12)
+                ),
+                native_crop_min_negative_edge_pixels=int(
+                    native_crop_cfg.get("min_negative_edge_pixels", 128)
+                ),
+                native_crop_stride_fraction=float(
+                    native_crop_cfg.get("stride_fraction", 0.5)
+                ),
+                native_crop_max_candidates=int(
+                    native_crop_cfg.get("max_candidates_per_image", 8)
+                ),
+            )
+            crop_augmentation = dict(augmentation_cfg)
+            crop_augmentation["crop_probability"] = 0.0
+            dataset_parts.append(crop_base)
+            augmentation_parts.append(crop_augmentation)
+
+        sampling_masses = [
+            1.0 - pseudo_fraction,
+            pseudo_fraction * (1.0 - crop_fraction),
+        ]
+        if crop_base is not None:
+            sampling_masses.append(pseudo_fraction * crop_fraction)
+        weights = torch.cat(
+            [
+                torch.full((len(part),), mass / len(part))
+                for part, mass in zip(dataset_parts, sampling_masses)
+            ]
+        ).double()
         epoch_samples = int(
             sam2_geometry_cfg.get("samples_per_epoch", 2 * len(manual_train_base))
         )
@@ -285,13 +337,26 @@ def main():
                 project_path(config, sam2_geometry_cfg["dataset_dir"])
             ),
         }
+        if crop_base is not None:
+            split["sam2_geometry"]["native_crop"] = {
+                **native_crop_cfg,
+                "eligible_source_count": len(crop_base),
+            }
         logger.info(
-            "SAM2 geometry mix enabled: manual=%d pseudo=%d fraction=%.3f "
-            "samples_per_epoch=%d",
-            len(manual_train_base), len(pseudo_base), pseudo_fraction, epoch_samples,
+            "SAM2 geometry mix enabled: manual=%d pseudo_full=%d "
+            "pseudo_crop=%d masses=%s samples_per_epoch=%d",
+            len(manual_train_base),
+            len(pseudo_base),
+            len(crop_base) if crop_base is not None else 0,
+            [round(value, 3) for value in sampling_masses],
+            epoch_samples,
         )
-    train_dataset = AffinityGeometryAugmentedDataset(
-        combined_base, cfg.get("augmentation", {})
+    train_parts = [
+        AffinityGeometryAugmentedDataset(dataset, augmentation)
+        for dataset, augmentation in zip(dataset_parts, augmentation_parts)
+    ]
+    train_dataset = (
+        train_parts[0] if len(train_parts) == 1 else ConcatDataset(train_parts)
     )
     val_dataset = OffsetGeometryDataset(raw_dir, sample_names=val_names, **dataset_kwargs)
     loader = DataLoader(

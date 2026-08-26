@@ -5,8 +5,34 @@ import cv2
 import numpy as np
 import torch
 
-from data.sam2_geometry_dataset import SAM2GeometryDataset
+from data.sam2_geometry_dataset import (
+    SAM2GeometryDataset,
+    find_high_coverage_crop_candidates,
+)
 
+
+def test_high_coverage_crop_candidates_keep_dense_instance_interfaces():
+    labels = np.zeros((64, 64), dtype=np.int32)
+    labels[:16, :16] = 1
+    labels[:16, 16:32] = 2
+    labels[16:32, :16] = 3
+    labels[16:32, 16:32] = 4
+
+    candidates = find_high_coverage_crop_candidates(
+        labels,
+        crop_size=32,
+        min_coverage=0.95,
+        min_instances=4,
+        min_negative_edge_pixels=32,
+        stride=16,
+        max_candidates=4,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["top"] == 0
+    assert candidates[0]["left"] == 0
+    assert candidates[0]["coverage"] == 1.0
+    assert candidates[0]["instance_count"] == 4
 
 def test_sam2_geometry_dataset_loads_portable_manifest(tmp_path):
     source_dir = tmp_path / "unlabeled"

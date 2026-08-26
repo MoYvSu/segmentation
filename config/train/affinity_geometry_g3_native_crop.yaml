@@ -1,0 +1,29 @@
+_base: affinity_geometry_g2_sam2.yaml
+
+affinity_geometry_g1:
+  geometry_init_checkpoint: outputs/affinity_geometry_g2_sam2/best_affinity.pth
+  output_dir: outputs/affinity_geometry_g3_native_crop
+  epochs: 20
+  learning_rate: 2.0e-5
+  min_learning_rate: 3.0e-6
+  unlabeled_monitor_count: 6
+
+  sam2_geometry:
+    samples_per_epoch: 64
+    native_crop:
+      enabled: true
+      fraction_within_pseudo: 0.50
+      size: 1024
+      min_coverage: 0.92
+      min_instances: 12
+      min_negative_edge_pixels: 128
+      stride_fraction: 0.50
+      max_candidates_per_image: 8
+
+  # Lab L* is strongly phase-separable, but exposure shifts the per-image
+  # threshold. Keep monotonic photometric jitter mild so geometry training
+  # covers exposure variation without erasing the stable brightness ordering.
+  augmentation:
+    brightness: 0.08
+    contrast: 0.08
+    gamma: 0.06
