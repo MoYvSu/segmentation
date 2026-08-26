@@ -65,3 +65,21 @@ G3 不改变冻结的 V6 语义系统，也不增加新的源图像。训练采�
 实验配置：`config/train/affinity_geometry_g3_native_crop.yaml`。主要判据仍是
 固定人工验证集的亲和力/图划分指标与固定无标签 monitor；测试集只用于盲目检
 查明显欠分割、细小噪点和 255 实例上限，不参与梯度或 checkpoint 选择。
+
+### 2026-08-26 G3 结果
+
+- 64 张 SAM2 源图中有 47 张满足裁剪门槛，共得到 303 个原生
+  1024x1024 候选窗口。
+- 最佳 checkpoint 出现在 epoch 9，验证集 `gt_penalized_miou=0.600094`；
+  G2 起点为 `0.588192`，绝对提升 0.011902。训练期间指标波动较大，
+  因而这里只视为受控验证集上的小幅正信号，不能等同于赛题增益。
+- 固定 12 张测试 monitor 上，gated mean/0.55 的实例总数由 G2 的 1074
+  变为 G3 的 1068；gated top2/0.60 由 1023 变为 1029。原生裁剪没有造成
+  整体实例密度漂移。
+- `visualize_instances.py` 彩图显示，G3 在 `test_044`、`test_024`
+  等弱边界图上仍有明显大块合并；top2 在部分难样本上比 mean 更容易合并。
+  当前继续保留 mean/0.55 为稳定主臂，top2/0.60 只作诊断对照。
+- 服务器产物位于
+  `outputs/experiments/affinity_test_monitor12_g3_mean` 与
+  `outputs/experiments/affinity_test_monitor12_g3_top2`，每组均包含
+  12 张 `*_inst_color.png`。
