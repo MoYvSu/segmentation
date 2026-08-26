@@ -148,6 +148,15 @@ inference:
   bridge_width: 1             # 骨架化前膨胀（桥接双线成单线）
   # 仅用于 marker 连通域：封住图像最外圈，防止边界端点沿画幅边缘绕行。
   marker_border_seal_width: 0
+  # marker-only 局部滞后重建。high 使用 boundary_threshold；low 仅允许在
+  # 强边附近有限步生长，补细小断口而不把整片雾状弱响应纳入 barrier。
+  marker_boundary_low_threshold: null
+  marker_boundary_reconstruction_steps: 0
+  # 实例类别投票：默认保持旧硬投票；概率均值模式可配合核心腐蚀减少边界
+  # 混色，并输出每个实例的 class_confidence.json 供低置信审计。
+  semantic_vote_mode: "hard_majority"
+  semantic_vote_erode_width: 0
+  semantic_vote_threshold: 0.5
   checkpoint_stage: "stage2"
   stage1_checkpoint: "outputs/stage1/best_model.pth"
   stage2_checkpoint: "outputs/stage2_v6/best_model_stage2.pth"

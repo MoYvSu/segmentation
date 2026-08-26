@@ -100,6 +100,215 @@ def _boundary_skeleton_belt(
     return skeleton, skeleton_belt
 
 
+def reconstruct_marker_boundary(
+    boundary_probability: np.ndarray,
+    low_threshold: float,
+    high_threshold: float,
+    max_steps: int,
+) -> np.ndarray:
+    """Locally grow strong marker edges through nearby weak responses.
+
+    Unlike unbounded hysteresis, the finite growth radius cannot absorb an
+    entire foggy weak-edge component merely because it touches one strong edge.
+    The reconstructed mask is used for marker topology only; the watershed
+    elevation/barrier continues to use the high-threshold boundary mask.
+    """
+    probability = np.asarray(boundary_probability, dtype=np.float32)
+    strong = probability > float(high_threshold)
+    steps = max(0, int(max_steps))
+    if steps == 0 or float(low_threshold) >= float(high_threshold):
+        return strong.astype(np.uint8)
+
+    weak = probability > float(low_threshold)
+    reconstructed = strong.astype(np.uint8)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    for _ in range(steps):
+        grown = cv2.dilate(reconstructed, kernel)
+        grown = ((grown > 0) & weak).astype(np.uint8)
+        if np.array_equal(grown, reconstructed):
+            break
+        reconstructed = grown
+    return reconstructed
+
+
+def _instance_semantic_vote(
+    instance_mask: np.ndarray,
+    semantic_mask: np.ndarray,
+    semantic_probability: Optional[np.ndarray] = None,
+    mode: str = "hard_majority",
+    erode_width: int = 0,
+    threshold: float = 0.5,
+) -> Tuple[int, float]:
+    """Classify one instance and return ferrite score in ``[0, 1]``."""
+    vote_mask = np.asarray(instance_mask, dtype=bool)
+    area = int(vote_mask.sum())
+    if area <= 0:
+        return CLASS_PEARLITE, 0.0
+
+    erode_width = max(0, int(erode_width))
+    if erode_width > 0:
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (2 * erode_width + 1, 2 * erode_width + 1)
+        )
+        eroded = cv2.erode(vote_mask.astype(np.uint8), kernel) > 0
+        minimum_core = min(64, max(8, area // 10))
+        if int(eroded.sum()) >= minimum_core:
+            vote_mask = eroded
+
+    hard_ratio = float(np.mean(np.asarray(semantic_mask)[vote_mask] > 0))
+    normalized_mode = str(mode).strip().lower()
+    if normalized_mode == "hard_majority" or semantic_probability is None:
+        score = hard_ratio
+    else:
+        probability_score = float(
+            np.mean(np.asarray(semantic_probability, dtype=np.float32)[vote_mask])
+        )
+        if normalized_mode == "probability_mean":
+            score = probability_score
+        elif normalized_mode == "hybrid":
+            score = 0.5 * (hard_ratio + probability_score)
+        else:
+            raise ValueError(
+                "semantic_vote_mode must be hard_majority, probability_mean, "
+                f"or hybrid; got {mode!r}"
+            )
+    score = float(np.clip(score, 0.0, 1.0))
+    cls = CLASS_FERRITE if score > float(threshold) else CLASS_PEARLITE
+    return cls, score
+
+
+def _region_adjacency(region_map: np.ndarray, radius: int = 2):
+    """Build a contact-weighted graph, bridging one-pixel watershed seams."""
+    labels = [int(v) for v in np.unique(region_map) if int(v) > 0]
+    graph = {label: {} for label in labels}
+    h, w = region_map.shape
+    radius = max(1, int(radius))
+    for dy in range(0, radius + 1):
+        for dx in range(-radius, radius + 1):
+            if dy == 0 and dx <= 0:
+                continue
+            y0a, y1a = 0, h - dy
+            y0b, y1b = dy, h
+            if dx >= 0:
+                x0a, x1a = 0, w - dx
+                x0b, x1b = dx, w
+            else:
+                x0a, x1a = -dx, w
+                x0b, x1b = 0, w + dx
+            a = region_map[y0a:y1a, x0a:x1a]
+            b = region_map[y0b:y1b, x0b:x1b]
+            valid = (a > 0) & (b > 0) & (a != b)
+            if not np.any(valid):
+                continue
+            pairs = np.stack((a[valid], b[valid]), axis=1).astype(np.int64)
+            pairs.sort(axis=1)
+            unique_pairs, counts = np.unique(pairs, axis=0, return_counts=True)
+            for (left, right), count in zip(unique_pairs, counts):
+                left, right, count = int(left), int(right), int(count)
+                graph[left][right] = graph[left].get(right, 0) + count
+                graph[right][left] = graph[right].get(left, 0) + count
+    return graph
+
+
+def _merge_region_map_to_cap(
+    region_map: np.ndarray,
+    max_regions: int,
+) -> Tuple[np.ndarray, list]:
+    """Agglomerate smallest adjacent regions without creating a global ID."""
+    source_map = np.asarray(region_map, dtype=np.int32)
+    labels, counts = np.unique(source_map[source_map > 0], return_counts=True)
+    active = {int(label): int(count) for label, count in zip(labels, counts)}
+    max_regions = max(1, int(max_regions))
+    if len(active) <= max_regions:
+        return source_map.copy(), []
+
+    graph = _region_adjacency(source_map, radius=2)
+    parent = {label: label for label in active}
+    merge_edges = []
+    while len(active) > max_regions:
+        source = min(active, key=lambda label: (active[label], label))
+        neighbours = {
+            label: contact for label, contact in graph.get(source, {}).items()
+            if label in active and label != source
+        }
+        if neighbours:
+            target = max(
+                neighbours,
+                key=lambda label: (neighbours[label], active[label], -label),
+            )
+            parent[source] = target
+            merge_edges.append((source, target))
+            active[target] += active[source]
+            for neighbour, contact in list(graph.get(source, {}).items()):
+                if neighbour not in active or neighbour == target:
+                    continue
+                graph[target][neighbour] = graph[target].get(neighbour, 0) + contact
+                graph[neighbour][target] = graph[neighbour].get(target, 0) + contact
+                graph[neighbour].pop(source, None)
+            graph[target].pop(source, None)
+        else:
+            parent[source] = 0
+        graph.pop(source, None)
+        active.pop(source)
+
+    def root(label):
+        path = []
+        while parent[label] not in (0, label):
+            path.append(label)
+            label = parent[label]
+        resolved = parent[label] if parent[label] == 0 else label
+        for item in path:
+            parent[item] = resolved
+        return resolved
+
+    label_lookup = np.zeros(int(source_map.max()) + 1, dtype=np.int32)
+    for label in parent:
+        resolved = root(label)
+        if resolved > 0:
+            label_lookup[label] = resolved
+    merged = label_lookup[source_map]
+
+    # Vectorized one-pixel seam fill. A zero pixel is filled only when at least
+    # two distinct original regions touch it and all touching regions now share
+    # the same agglomerated root. Boundaries between retained roots stay zero.
+    zero = source_map == 0
+    root_min = np.full(source_map.shape, np.iinfo(np.int32).max, dtype=np.int32)
+    root_max = np.zeros(source_map.shape, dtype=np.int32)
+    source_min = root_min.copy()
+    source_max = np.zeros(source_map.shape, dtype=np.int32)
+    merged_pad = np.pad(merged, 1, mode="constant")
+    source_pad = np.pad(source_map, 1, mode="constant")
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            if dy == 0 and dx == 0:
+                continue
+            neighbour_root = merged_pad[
+                1 + dy : 1 + dy + merged.shape[0],
+                1 + dx : 1 + dx + merged.shape[1],
+            ]
+            neighbour_source = source_pad[
+                1 + dy : 1 + dy + merged.shape[0],
+                1 + dx : 1 + dx + merged.shape[1],
+            ]
+            valid = zero & (neighbour_root > 0)
+            root_min[valid] = np.minimum(root_min[valid], neighbour_root[valid])
+            root_max[valid] = np.maximum(root_max[valid], neighbour_root[valid])
+            source_min[valid] = np.minimum(
+                source_min[valid], neighbour_source[valid]
+            )
+            source_max[valid] = np.maximum(
+                source_max[valid], neighbour_source[valid]
+            )
+    fill = (
+        zero
+        & (root_max > 0)
+        & (root_min == root_max)
+        & (source_min < source_max)
+    )
+    merged[fill] = root_max[fill]
+    return merged, merge_edges
+
+
 def boundary_watershed_separation(
     semantic_mask: np.ndarray,
     boundary_mask: np.ndarray,
@@ -114,6 +323,10 @@ def boundary_watershed_separation(
     marker_bridge_width: Optional[int] = None,
     marker_dilate_width: Optional[int] = None,
     marker_border_seal_width: int = 0,
+    semantic_probability: Optional[np.ndarray] = None,
+    semantic_vote_mode: str = "hard_majority",
+    semantic_vote_erode_width: int = 0,
+    semantic_vote_threshold: float = 0.5,
 ) -> Tuple[np.ndarray, Dict[int, int]]:
     """
     基于边界预测的受阻分水岭实例分割。
@@ -192,8 +405,8 @@ def boundary_watershed_separation(
     ws_result = cv2.watershed(img_for_ws, markers.copy())
     ws_result[ws_result < 0] = 0
 
-    # Step 6: 语义投票 -> 晶粒类别
-    instances = []
+    # Step 6: 面积过滤；类别在上限拓扑合并后重新投票。
+    candidate_map = np.zeros((h, w), dtype=np.int32)
     unique_labels = np.unique(ws_result)
     unique_labels = unique_labels[unique_labels > 0]
 
@@ -202,41 +415,34 @@ def boundary_watershed_separation(
         area = int(inst_mask.sum())
         if area < min_area:
             continue
-        ferrite_ratio = float((semantic_mask[inst_mask] > 0).sum()) / area
-        cls = CLASS_FERRITE if ferrite_ratio > 0.5 else CLASS_PEARLITE
-        instances.append((area, cls, inst_mask))
+        candidate_map[inst_mask] = int(label_id)
 
-    # Step 7: 按面积降序分配 ID。若候选超过 8-bit 提交格式上限，
-    # 保留最大的 max_instance_id-1 个，剩余区域统一写入最后一个 ID。
-    # 最后一个 ID 的类别由全部溢出像素重新投票，避免历史逻辑中类别被
-    # 最后一个小碎片覆盖。这里不以目标实例数或平均面积反向调节分割参数。
-    instances.sort(key=lambda x: x[0], reverse=True)
+    # Step 7: 超过 8-bit 上限时按局部邻接合并最小区域。严禁把所有溢出
+    # 区域写入同一个 ID，否则会制造跨图像的不连通伪实例。
+    candidate_map, _ = _merge_region_map_to_cap(candidate_map, max_instance_id)
+    final_labels, final_counts = np.unique(
+        candidate_map[candidate_map > 0], return_counts=True
+    )
+    final_labels = [
+        int(label)
+        for label, _ in sorted(
+            zip(final_labels, final_counts), key=lambda item: int(item[1]), reverse=True
+        )
+    ]
     inst_map = np.zeros((h, w), dtype=np.uint8)
     class_map = {}
-    if len(instances) <= max_instance_id:
-        for current_id, (_, cls, inst_mask) in enumerate(instances, start=1):
-            inst_map[inst_mask] = current_id
-            class_map[current_id] = int(cls)
-    else:
-        keep_count = max_instance_id - 1
-        for current_id, (_, cls, inst_mask) in enumerate(
-            instances[:keep_count], start=1
-        ):
-            inst_map[inst_mask] = current_id
-            class_map[current_id] = int(cls)
-
-        overflow_mask = np.zeros((h, w), dtype=bool)
-        for _, _, inst_mask in instances[keep_count:]:
-            overflow_mask |= inst_mask
-        overflow_area = int(overflow_mask.sum())
-        if overflow_area > 0:
-            overflow_ferrite = int((semantic_mask[overflow_mask] > 0).sum())
-            inst_map[overflow_mask] = max_instance_id
-            class_map[max_instance_id] = int(
-                CLASS_FERRITE
-                if overflow_ferrite / overflow_area > 0.5
-                else CLASS_PEARLITE
-            )
+    for current_id, label in enumerate(final_labels, start=1):
+        instance_mask = candidate_map == label
+        cls, _ = _instance_semantic_vote(
+            instance_mask,
+            semantic_mask,
+            semantic_probability=semantic_probability,
+            mode=semantic_vote_mode,
+            erode_width=semantic_vote_erode_width,
+            threshold=semantic_vote_threshold,
+        )
+        inst_map[instance_mask] = current_id
+        class_map[current_id] = int(cls)
 
     if int(inst_map.max()) > max_instance_id or len(class_map) > max_instance_id:
         raise RuntimeError(
@@ -302,6 +508,11 @@ def post_process_prediction_boundary(
     center_threshold: float = 0.25,
     center_nms_kernel: int = 9,
     marker_border_seal_width: int = 0,
+    marker_boundary_low_threshold: Optional[float] = None,
+    marker_boundary_reconstruction_steps: int = 0,
+    semantic_vote_mode: str = "hard_majority",
+    semantic_vote_erode_width: int = 0,
+    semantic_vote_threshold: float = 0.5,
     save_visualization: bool = True,
 ) -> Tuple[Dict[str, str], np.ndarray, Dict[int, int]]:
     """
@@ -341,8 +552,19 @@ def post_process_prediction_boundary(
         boundary_prob = semantic_edge_boost(
             boundary_prob, seg_prob, alpha=sem_edge_boost_alpha
         )
-    # 单阈值二值化
+    # 高阈值仍控制真实 barrier；低阈值只在强边附近有限步补全 marker 断口。
     boundary_mask = (boundary_prob > boundary_threshold).astype(np.uint8)
+    marker_boundary_mask = None
+    if (
+        marker_boundary_low_threshold is not None
+        and int(marker_boundary_reconstruction_steps) > 0
+    ):
+        marker_boundary_mask = reconstruct_marker_boundary(
+            boundary_prob,
+            low_threshold=float(marker_boundary_low_threshold),
+            high_threshold=float(boundary_threshold),
+            max_steps=int(marker_boundary_reconstruction_steps),
+        )
     inst_map, class_map = boundary_watershed_separation(
         semantic_mask,
         boundary_mask,
@@ -353,7 +575,12 @@ def post_process_prediction_boundary(
         center_prob=center_prob,
         center_threshold=center_threshold,
         center_nms_kernel=center_nms_kernel,
+        marker_boundary_mask=marker_boundary_mask,
         marker_border_seal_width=marker_border_seal_width,
+        semantic_probability=seg_prob,
+        semantic_vote_mode=semantic_vote_mode,
+        semantic_vote_erode_width=semantic_vote_erode_width,
+        semantic_vote_threshold=semantic_vote_threshold,
     )
 
     inst_path = os.path.join(output_dir, f"{image_basename}_inst.png")
@@ -365,6 +592,40 @@ def post_process_prediction_boundary(
         json.dump(class_json, f, ensure_ascii=False, indent=2)
 
     output_paths = {"inst_path": inst_path, "class_json_path": class_json_path}
+
+    vote_audit = {}
+    for instance_id, cls in class_map.items():
+        instance_mask = inst_map == int(instance_id)
+        _, score = _instance_semantic_vote(
+            instance_mask,
+            semantic_mask,
+            semantic_probability=seg_prob,
+            mode=semantic_vote_mode,
+            erode_width=semantic_vote_erode_width,
+            threshold=semantic_vote_threshold,
+        )
+        vote_audit[str(instance_id)] = {
+            "class": int(cls),
+            "ferrite_score": score,
+            "confidence": float(abs(score - semantic_vote_threshold) * 2.0),
+            "area": int(instance_mask.sum()),
+        }
+    vote_audit_path = os.path.join(
+        output_dir, f"{image_basename}_class_confidence.json"
+    )
+    with open(vote_audit_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "mode": semantic_vote_mode,
+                "threshold": float(semantic_vote_threshold),
+                "erode_width": int(semantic_vote_erode_width),
+                "instances": vote_audit,
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+    output_paths["class_confidence_path"] = vote_audit_path
 
     if save_visualization:
         mask_path = os.path.join(output_dir, f"{image_basename}_mask.png")
@@ -378,6 +639,13 @@ def post_process_prediction_boundary(
         boundary_vis = (boundary_prob * 255).astype(np.uint8)
         cv2.imwrite(boundary_path, boundary_vis)
         output_paths["boundary_path"] = boundary_path
+
+        if marker_boundary_mask is not None:
+            marker_boundary_path = os.path.join(
+                output_dir, f"{image_basename}_marker_boundary.png"
+            )
+            cv2.imwrite(marker_boundary_path, marker_boundary_mask * 255)
+            output_paths["marker_boundary_path"] = marker_boundary_path
 
         if center_prob is not None:
             center_path = os.path.join(output_dir, f"{image_basename}_center.png")

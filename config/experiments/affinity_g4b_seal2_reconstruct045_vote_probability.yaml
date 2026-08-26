@@ -1,0 +1,8 @@
+_base: affinity_g4b_seal2_reconstruct045.yaml
+
+# Combined candidate after the two single-variable arms have been audited.
+inference:
+  semantic_vote_mode: "probability_mean"
+  semantic_vote_erode_width: 2
+  semantic_vote_threshold: 0.5
+

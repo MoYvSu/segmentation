@@ -93,3 +93,36 @@ def test_affinity_postprocess_forwards_marker_border_seal(monkeypatch, tmp_path)
         False,
     )
     assert captured["marker_border_seal_width"] == 2
+
+
+def test_affinity_postprocess_forwards_marker_reconstruction_and_vote(
+    monkeypatch, tmp_path
+):
+    captured = {}
+
+    def fake_postprocess(**kwargs):
+        captured.update(kwargs)
+        return {}, None, {}
+
+    monkeypatch.setattr(
+        affinity_deployment, "post_process_prediction_boundary", fake_postprocess
+    )
+    affinity_deployment.postprocess(
+        torch.zeros(1, 2, 4, 4),
+        (4, 4),
+        tmp_path,
+        "sample",
+        {
+            "marker_boundary_low_threshold": 0.45,
+            "marker_boundary_reconstruction_steps": 8,
+            "semantic_vote_mode": "probability_mean",
+            "semantic_vote_erode_width": 2,
+        },
+        0.72,
+        False,
+    )
+
+    assert captured["marker_boundary_low_threshold"] == 0.45
+    assert captured["marker_boundary_reconstruction_steps"] == 8
+    assert captured["semantic_vote_mode"] == "probability_mean"
+    assert captured["semantic_vote_erode_width"] == 2

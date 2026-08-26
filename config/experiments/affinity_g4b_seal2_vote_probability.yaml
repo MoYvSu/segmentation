@@ -1,0 +1,9 @@
+_base: affinity_border_seal2.yaml
+
+# Inference-only semantic classification A/B. Geometry is unchanged.
+inference:
+  boundary_threshold: 0.72
+  semantic_vote_mode: "probability_mean"
+  semantic_vote_erode_width: 2
+  semantic_vote_threshold: 0.5
+

@@ -241,6 +241,21 @@ def main():
             "marker_border_seal_width": int(
                 infer_cfg.get("marker_border_seal_width", 0)
             ),
+            "marker_boundary_low_threshold": infer_cfg.get(
+                "marker_boundary_low_threshold"
+            ),
+            "marker_boundary_reconstruction_steps": int(
+                infer_cfg.get("marker_boundary_reconstruction_steps", 0)
+            ),
+            "semantic_vote_mode": str(
+                infer_cfg.get("semantic_vote_mode", "hard_majority")
+            ),
+            "semantic_vote_erode_width": int(
+                infer_cfg.get("semantic_vote_erode_width", 0)
+            ),
+            "semantic_vote_threshold": float(
+                infer_cfg.get("semantic_vote_threshold", 0.5)
+            ),
             "center_seeds": False,
             "max_instance_id": int(infer_cfg.get("max_instance_id", 255)),
         },

@@ -85,6 +85,31 @@ affinity 训练读取其特征但把 reference model 和 LoRA 全部冻结，只
 LoRA/adapter 实验应在固定新的推理协议后进行：`marker_border_seal_width=2`、固定阈值臂、
 修复 255 邻接合并，并按完整部署指标选模。否则训练收益会继续被后处理缺陷混淆。
 
+## G4+封边后的推理协议实验
+
+本轮先不更新 checkpoint，固定 G4b 和 2 px marker 封边，拆成三个可归因改动：
+
+1. **255 上限拓扑合并**：候选超过上限时，从最小区域开始按局部接触长度合并；只填被
+   选中邻接区域之间的一像素分水岭缝。若区域没有任何局部邻居，则丢为背景，而不是与
+   远处区域共享 ID。该修复对未达到上限的图完全不改变输出。
+2. **marker-only 局部弱边重建**：`boundary_threshold=0.72` 仍是最终 barrier；以 0.72
+   以上响应为强边，只允许它在 `>0.45` 的弱响应中生长最多 8 px。低阈值结果只用于
+   marker 连通性，不直接扩大最终 barrier，避免全局降阈值放大雾状背景。
+3. **语义概率核心投票**：保留旧 `hard_majority` 基线，实验臂使用实例腐蚀 2 px 后的
+   V6 ferrite 概率均值。每张图额外输出 `*_class_confidence.json`，记录 ferrite score、
+   分类置信度和实例面积，便于定位接近 0.5 的误判，而不是仅看最终类别颜色。
+
+严格 A/B 配置：
+
+- 基线：`config/experiments/affinity_border_seal2.yaml`，运行时阈值固定 0.72；
+- 仅补口：`config/experiments/affinity_g4b_seal2_reconstruct045.yaml`；
+- 仅概率投票：`config/experiments/affinity_g4b_seal2_vote_probability.yaml`；
+- 组合臂：`config/experiments/affinity_g4b_seal2_reconstruct045_vote_probability.yaml`。
+
+先分别判断几何有效匹配/拆并统计和类别感知 mIoU/铁素体面积，再看组合臂；不能只按
+预测实例总数挑选。若局部补口仍引入碎片，下一轮只调 low threshold 与生长步数，不改
+训练。只有推理协议稳定后才启动 affinity 专属 feature adapter 或 geometry-only LoRA。
+
 ## 目检产物
 
 本地目录：

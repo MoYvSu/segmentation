@@ -223,6 +223,11 @@ def predict_single_image(
     bridge_width=1,
     watershed_dilate_width=2,
     marker_border_seal_width=0,
+    marker_boundary_low_threshold=None,
+    marker_boundary_reconstruction_steps=0,
+    semantic_vote_mode="hard_majority",
+    semantic_vote_erode_width=0,
+    semantic_vote_threshold=0.5,
     use_center_seeds=True, center_threshold=0.25, center_nms_kernel=9,
     min_instance_area_policy=None,
     quality_aware_config=None,
@@ -310,6 +315,11 @@ def predict_single_image(
             watershed_dilate_width=watershed_dilate_width,
             bridge_width=bridge_width,
             marker_border_seal_width=marker_border_seal_width,
+            marker_boundary_low_threshold=marker_boundary_low_threshold,
+            marker_boundary_reconstruction_steps=marker_boundary_reconstruction_steps,
+            semantic_vote_mode=semantic_vote_mode,
+            semantic_vote_erode_width=semantic_vote_erode_width,
+            semantic_vote_threshold=semantic_vote_threshold,
             use_center_seeds=use_center_seeds,
             center_threshold=center_threshold,
             center_nms_kernel=center_nms_kernel,
@@ -478,6 +488,21 @@ def main():
             watershed_dilate_width=infer_cfg.get("watershed_dilate_width", 2),
             bridge_width=infer_cfg.get("bridge_width", 1),
             marker_border_seal_width=infer_cfg.get("marker_border_seal_width", 0),
+            marker_boundary_low_threshold=infer_cfg.get(
+                "marker_boundary_low_threshold"
+            ),
+            marker_boundary_reconstruction_steps=infer_cfg.get(
+                "marker_boundary_reconstruction_steps", 0
+            ),
+            semantic_vote_mode=infer_cfg.get(
+                "semantic_vote_mode", "hard_majority"
+            ),
+            semantic_vote_erode_width=infer_cfg.get(
+                "semantic_vote_erode_width", 0
+            ),
+            semantic_vote_threshold=infer_cfg.get(
+                "semantic_vote_threshold", 0.5
+            ),
             use_center_seeds=effective["center_seeds"],
             center_threshold=effective["center_threshold"],
             center_nms_kernel=infer_cfg.get("center_nms_kernel", 9),
