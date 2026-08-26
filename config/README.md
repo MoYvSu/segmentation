@@ -5,6 +5,11 @@
 验证 `gated + mean + boundary_threshold=0.55` 晋级；Oracle GT 前景图重建仅用于诊断。
 完整协议见 `docs/AFFINITY_DEPLOYMENT_EVALUATION.md`。V6/B2 配置仍保留为基线和回退。
 
+`train/affinity_geometry_g4_manual_gap.yaml` 是当前断边合并单变量实验：完全复用 G3 的
+G2 初始化、数据比例、增强、学习率和 20 epoch，只对人工 LabelMe 样本启用
+“实例与未覆盖带之间为负 affinity”；SAM2 未覆盖区和人工 `0-0` 像素对继续 ignore。
+设计与判定标准见 `docs/AFFINITY_G4_MANUAL_GAP.md`。
+
 - `default_config.yaml`：可训练、可推理的当前 V6 参考基线；路径跨本机/服务器可移植。
 - `inference/`：只改变推理输出与后处理参数，不改变模型架构。
 - `train/`：明确区分 Stage 1 与 Stage 2 的可训练参数和输出目录。

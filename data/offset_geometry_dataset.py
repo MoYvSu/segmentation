@@ -134,6 +134,8 @@ class OffsetGeometryDataset(Dataset):
             "foreground": torch.from_numpy(foreground).unsqueeze(0),
             "valid_content": torch.from_numpy(valid_content).unsqueeze(0),
             "instance_map": torch.from_numpy(geometry_map.astype(np.int64)),
+            # Human LabelMe polygons may leave interface bands uncovered.
+            "uncovered_boundary_source": torch.tensor(True),
             "image_name": image_path.name,
             "instance_count": int(len(np.unique(geometry_map)) - 1),
             "uncovered_pixels": int(audit["uncovered_pixels"]),

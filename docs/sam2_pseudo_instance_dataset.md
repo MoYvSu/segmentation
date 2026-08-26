@@ -83,3 +83,9 @@ G3 不改变冻结的 V6 语义系统，也不增加新的源图像。训练采�
   `outputs/experiments/affinity_test_monitor12_g3_mean` 与
   `outputs/experiments/affinity_test_monitor12_g3_top2`，每组均包含
   12 张 `*_inst_color.png`。
+## G4 人工未覆盖带实验
+
+G4 不改变 SAM2 伪实例处理：SAM2 未覆盖像素仍为 ignore，不新增伪负边。实验只修正
+人工 LabelMe 多边形之间未覆盖带缺少短程 affinity 监督的问题，并从与 G3 相同的 G2
+checkpoint 重跑 20 epoch。详细定义、监督量审计和部署判据见
+`docs/AFFINITY_G4_MANUAL_GAP.md`。

@@ -27,6 +27,7 @@ def build_affinity_targets_torch(
     instance_map: torch.Tensor,
     valid_content: torch.Tensor,
     offsets: Sequence[Tuple[int, int]] = DEFAULT_AFFINITY_OFFSETS,
+    uncovered_as_boundary: torch.Tensor | None = None,
 ):
     if instance_map.ndim != 3:
         raise ValueError(f"instance_map must be [B,H,W], got {instance_map.shape}")
@@ -40,6 +41,18 @@ def build_affinity_targets_torch(
         raise ValueError(
             f"valid shape {valid_pixels.shape} != labels {instance_map.shape}"
         )
+    if uncovered_as_boundary is None:
+        boundary_samples = torch.zeros(
+            (instance_map.shape[0],), dtype=torch.bool, device=instance_map.device
+        )
+    else:
+        boundary_samples = uncovered_as_boundary.to(
+            device=instance_map.device, dtype=torch.bool
+        ).reshape(-1)
+        if boundary_samples.numel() != instance_map.shape[0]:
+            raise ValueError(
+                "uncovered_as_boundary must contain one flag per batch sample"
+            )
     batch, height, width = instance_map.shape
     target = torch.zeros(
         (batch, len(offsets), height, width),
@@ -53,12 +66,19 @@ def build_affinity_targets_torch(
         destination_index = (slice(None), *destination)
         source_label = instance_map[source_index]
         destination_label = instance_map[destination_index]
-        pair_valid = (
+        labeled_pair = (
             valid_pixels[source_index]
             & valid_pixels[destination_index]
             & (source_label > 0)
             & (destination_label > 0)
         )
+        uncovered_pair = (
+            boundary_samples[:, None, None]
+            & valid_pixels[source_index]
+            & valid_pixels[destination_index]
+            & ((source_label > 0) ^ (destination_label > 0))
+        )
+        pair_valid = labeled_pair | uncovered_pair
         edge_valid[(slice(None), channel, *source)] = pair_valid
         target[(slice(None), channel, *source)] = (
             pair_valid & (source_label == destination_label)

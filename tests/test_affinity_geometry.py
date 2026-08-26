@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from models.affinity_geometry import AffinityGeometryDecoder
@@ -55,3 +56,30 @@ def test_hard_negative_weight_penalizes_false_merge_edges():
         hard_negative_gamma=2.0,
     )
     assert weighted > baseline
+
+
+def test_manual_uncovered_band_can_be_negative_without_supervising_zero_zero():
+    labels = torch.tensor([[[1, 0, 0, 2]], [[1, 0, 0, 2]]], dtype=torch.int64)
+    valid = torch.ones((2, 1, 1, 4), dtype=torch.bool)
+    flags = torch.tensor([True, False])
+    target, edge_valid = build_affinity_targets_torch(
+        labels,
+        valid,
+        offsets=[(0, 1)],
+        uncovered_as_boundary=flags,
+    )
+
+    assert edge_valid[0, 0, 0].tolist() == [True, False, True, False]
+    assert target[0, 0, 0].tolist() == [0.0, 0.0, 0.0, 0.0]
+    assert not edge_valid[1].any()
+
+
+def test_uncovered_boundary_flag_requires_one_value_per_sample():
+    labels = torch.ones((2, 2, 2), dtype=torch.int64)
+    valid = torch.ones((2, 1, 2, 2), dtype=torch.bool)
+    with pytest.raises(ValueError, match="one flag per batch sample"):
+        build_affinity_targets_torch(
+            labels,
+            valid,
+            uncovered_as_boundary=torch.tensor([True]),
+        )

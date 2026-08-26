@@ -244,6 +244,8 @@ class SAM2GeometryDataset(Dataset):
             "foreground": torch.from_numpy(foreground).unsqueeze(0),
             "valid_content": torch.from_numpy(valid_content).unsqueeze(0),
             "instance_map": torch.from_numpy(geometry_map.astype(np.int64)),
+            # SAM2 uncovered pixels may be missed instances and stay ignore.
+            "uncovered_boundary_source": torch.tensor(False),
             "image_name": image_name,
             "instance_count": int(len(np.unique(geometry_map)) - 1),
             "uncovered_pixels": int(

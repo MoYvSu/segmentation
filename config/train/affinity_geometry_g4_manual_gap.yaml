@@ -1,0 +1,9 @@
+_base: affinity_geometry_g3_native_crop.yaml
+
+affinity_geometry_g1:
+  # Controlled G4: same G2 initialization, data mix, augmentation, LR and
+  # duration as G3. The only target change is that human LabelMe
+  # polygon-to-uncovered pairs become negative affinity; SAM2 gaps stay ignore.
+  geometry_init_checkpoint: outputs/affinity_geometry_g2_sam2/best_affinity.pth
+  output_dir: outputs/affinity_geometry_g4_manual_gap
+  manual_uncovered_as_boundary: true

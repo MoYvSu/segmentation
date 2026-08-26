@@ -533,7 +533,16 @@ def main():
             image = batch["image"].to(device, non_blocking=True)
             labels = batch["instance_map"].to(device, non_blocking=True)
             valid = batch["valid_content"].to(device, non_blocking=True)
-            target, edge_valid = build_affinity_targets_torch(labels, valid)
+            uncovered_as_boundary = None
+            if bool(cfg.get("manual_uncovered_as_boundary", False)):
+                uncovered_as_boundary = batch["uncovered_boundary_source"].to(
+                    device, non_blocking=True
+                )
+            target, edge_valid = build_affinity_targets_torch(
+                labels,
+                valid,
+                uncovered_as_boundary=uncovered_as_boundary,
+            )
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type=device.type, enabled=amp_enabled):
                 output = system.geometry_forward(image)
