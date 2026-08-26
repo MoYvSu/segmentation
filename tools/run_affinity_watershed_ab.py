@@ -238,6 +238,9 @@ def main():
             "min_instance_area": int(infer_cfg.get("min_instance_area", 50)),
             "bridge_width": int(infer_cfg.get("bridge_width", 1)),
             "watershed_dilate_width": int(infer_cfg.get("watershed_dilate_width", 1)),
+            "marker_border_seal_width": int(
+                infer_cfg.get("marker_border_seal_width", 0)
+            ),
             "center_seeds": False,
             "max_instance_id": int(infer_cfg.get("max_instance_id", 255)),
         },

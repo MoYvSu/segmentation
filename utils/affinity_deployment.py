@@ -104,6 +104,9 @@ def postprocess(
         sem_edge_merge_weight=0.0,
         watershed_dilate_width=int(infer_cfg.get("watershed_dilate_width", 1)),
         bridge_width=int(infer_cfg.get("bridge_width", 1)),
+        marker_border_seal_width=int(
+            infer_cfg.get("marker_border_seal_width", 0)
+        ),
         use_center_seeds=False,
         save_visualization=save_visualization,
     )

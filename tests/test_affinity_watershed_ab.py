@@ -1,5 +1,7 @@
 import torch
 
+from utils import affinity_deployment
+
 from utils.affinity_fusion import affinity_boundary_probability
 from tools.run_affinity_watershed_ab import (
     affinity_mean_boundary_probability,
@@ -69,3 +71,25 @@ def test_softmax_reduction_is_between_mean_and_max():
         short_softmax_temperature=0.15,
     )
     assert float(mean) < float(softmax) < 0.95
+
+
+def test_affinity_postprocess_forwards_marker_border_seal(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_postprocess(**kwargs):
+        captured.update(kwargs)
+        return {}, None, {}
+
+    monkeypatch.setattr(
+        affinity_deployment, "post_process_prediction_boundary", fake_postprocess
+    )
+    affinity_deployment.postprocess(
+        torch.zeros(1, 2, 4, 4),
+        (4, 4),
+        tmp_path,
+        "sample",
+        {"marker_border_seal_width": 2},
+        0.65,
+        False,
+    )
+    assert captured["marker_border_seal_width"] == 2

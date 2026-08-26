@@ -1,0 +1,5 @@
+_base: ../train/affinity_geometry_g4b_gap_weight020.yaml
+
+# Inference-only topology audit. No training parameter or checkpoint changes.
+inference:
+  marker_border_seal_width: 1

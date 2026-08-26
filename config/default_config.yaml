@@ -146,6 +146,8 @@ inference:
       unsharp_amount: 0.35
   watershed_dilate_width: 1
   bridge_width: 1             # 骨架化前膨胀（桥接双线成单线）
+  # 仅用于 marker 连通域：封住图像最外圈，防止边界端点沿画幅边缘绕行。
+  marker_border_seal_width: 0
   checkpoint_stage: "stage2"
   stage1_checkpoint: "outputs/stage1/best_model.pth"
   stage2_checkpoint: "outputs/stage2_v6/best_model_stage2.pth"
