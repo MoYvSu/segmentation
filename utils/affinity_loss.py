@@ -28,6 +28,7 @@ def build_affinity_targets_torch(
     valid_content: torch.Tensor,
     offsets: Sequence[Tuple[int, int]] = DEFAULT_AFFINITY_OFFSETS,
     uncovered_as_boundary: torch.Tensor | None = None,
+    return_uncovered_mask: bool = False,
 ):
     if instance_map.ndim != 3:
         raise ValueError(f"instance_map must be [B,H,W], got {instance_map.shape}")
@@ -60,6 +61,7 @@ def build_affinity_targets_torch(
         device=instance_map.device,
     )
     edge_valid = torch.zeros_like(target, dtype=torch.bool)
+    uncovered_mask = torch.zeros_like(target, dtype=torch.bool)
     for channel, (dy, dx) in enumerate(offsets):
         source, destination = _edge_slices(height, width, int(dy), int(dx))
         source_index = (slice(None), *source)
@@ -80,9 +82,12 @@ def build_affinity_targets_torch(
         )
         pair_valid = labeled_pair | uncovered_pair
         edge_valid[(slice(None), channel, *source)] = pair_valid
+        uncovered_mask[(slice(None), channel, *source)] = uncovered_pair
         target[(slice(None), channel, *source)] = (
             pair_valid & (source_label == destination_label)
         ).float()
+    if return_uncovered_mask:
+        return target, edge_valid, uncovered_mask
     return target, edge_valid
 
 
@@ -93,12 +98,23 @@ def balanced_affinity_loss(
     negative_weight: float = 1.0,
     hard_negative_weight: float = 0.0,
     hard_negative_gamma: float = 2.0,
+    edge_weight: torch.Tensor | None = None,
 ):
     if logits.shape != target.shape or logits.shape != edge_valid.shape:
         raise ValueError(
             f"shape mismatch logits={logits.shape} target={target.shape} "
             f"valid={edge_valid.shape}"
         )
+    if edge_weight is None:
+        supervision_weight = torch.ones_like(logits)
+    else:
+        if edge_weight.shape != logits.shape:
+            raise ValueError(
+                f"edge_weight shape {edge_weight.shape} != logits {logits.shape}"
+            )
+        supervision_weight = edge_weight.to(device=logits.device, dtype=logits.dtype)
+        if torch.any(supervision_weight < 0):
+            raise ValueError("edge_weight must be non-negative")
     raw = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
     channel_losses = []
     for channel in range(logits.shape[1]):
@@ -108,18 +124,27 @@ def balanced_affinity_loss(
         terms = []
         term_weights = []
         if positive.any():
-            terms.append(raw[:, channel][positive].mean())
+            positive_raw = raw[:, channel][positive]
+            positive_weights = supervision_weight[:, channel][positive]
+            terms.append(
+                (positive_raw * positive_weights).sum()
+                / positive_weights.sum().clamp_min(1.0e-12)
+            )
             term_weights.append(1.0)
         if negative.any():
             negative_raw = raw[:, channel][negative]
+            weights = supervision_weight[:, channel][negative]
             if hard_negative_weight > 0:
                 hardness = torch.sigmoid(logits[:, channel][negative]).detach()
-                weights = 1.0 + float(hard_negative_weight) * hardness.pow(
-                    float(hard_negative_gamma)
+                weights = weights * (
+                    1.0 + float(hard_negative_weight) * hardness.pow(
+                        float(hard_negative_gamma)
+                    )
                 )
-                negative_term = (negative_raw * weights).sum() / weights.sum()
-            else:
-                negative_term = negative_raw.mean()
+            negative_term = (
+                (negative_raw * weights).sum()
+                / weights.sum().clamp_min(1.0e-12)
+            )
             terms.append(negative_term)
             term_weights.append(float(negative_weight))
         if terms:

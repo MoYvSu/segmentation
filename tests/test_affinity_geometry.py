@@ -62,16 +62,19 @@ def test_manual_uncovered_band_can_be_negative_without_supervising_zero_zero():
     labels = torch.tensor([[[1, 0, 0, 2]], [[1, 0, 0, 2]]], dtype=torch.int64)
     valid = torch.ones((2, 1, 1, 4), dtype=torch.bool)
     flags = torch.tensor([True, False])
-    target, edge_valid = build_affinity_targets_torch(
+    target, edge_valid, uncovered = build_affinity_targets_torch(
         labels,
         valid,
         offsets=[(0, 1)],
         uncovered_as_boundary=flags,
+        return_uncovered_mask=True,
     )
 
     assert edge_valid[0, 0, 0].tolist() == [True, False, True, False]
     assert target[0, 0, 0].tolist() == [0.0, 0.0, 0.0, 0.0]
+    assert uncovered[0, 0, 0].tolist() == [True, False, True, False]
     assert not edge_valid[1].any()
+    assert not uncovered[1].any()
 
 
 def test_uncovered_boundary_flag_requires_one_value_per_sample():
@@ -83,3 +86,17 @@ def test_uncovered_boundary_flag_requires_one_value_per_sample():
             valid,
             uncovered_as_boundary=torch.tensor([True]),
         )
+
+
+def test_edge_weight_can_soften_new_gap_negatives():
+    logits = torch.tensor([[[[-3.0, 3.0]]]], requires_grad=True)
+    target = torch.zeros_like(logits)
+    valid = torch.ones_like(logits, dtype=torch.bool)
+    full, _ = balanced_affinity_loss(logits, target, valid)
+    softened, _ = balanced_affinity_loss(
+        logits,
+        target,
+        valid,
+        edge_weight=torch.tensor([[[[1.0, 0.2]]]]),
+    )
+    assert softened < full

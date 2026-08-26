@@ -8,7 +8,9 @@
 `train/affinity_geometry_g4_manual_gap.yaml` 是当前断边合并单变量实验：完全复用 G3 的
 G2 初始化、数据比例、增强、学习率和 20 epoch，只对人工 LabelMe 样本启用
 “实例与未覆盖带之间为负 affinity”；SAM2 未覆盖区和人工 `0-0` 像素对继续 ignore。
-设计与判定标准见 `docs/AFFINITY_G4_MANUAL_GAP.md`。
+设计与判定标准见 `docs/AFFINITY_G4_MANUAL_GAP.md`。G4 完整权重已证实过强；
+`train/affinity_geometry_g4b_gap_weight020.yaml` 只把新增人工缺口负边降权至 `0.20`，
+其余设置不变，是当前后续实验。
 
 - `default_config.yaml`：可训练、可推理的当前 V6 参考基线；路径跨本机/服务器可移植。
 - `inference/`：只改变推理输出与后处理参数，不改变模型架构。

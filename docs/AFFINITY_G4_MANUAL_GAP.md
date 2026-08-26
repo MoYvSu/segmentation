@@ -51,3 +51,34 @@ conda activate sam2_env
 python train_affinity_geometry_g1.py \
   --config config/train/affinity_geometry_g4_manual_gap.yaml
 ```
+## 结果：完整监督过强
+
+20 epoch 正常结束，但没有任何 epoch 超过 epoch 0 的 G2 部署基线，因此
+`best_affinity.pth` 正确保留为起点权重。
+
+| 候选 | 阈值 | 总分 | 有效 mIoU | 面积误差 | 预测实例 | 有效匹配 |
+|---|---:|---:|---:|---:|---:|---:|
+| G2 epoch 0 | 0.55 | 87.8559 | 0.8495 | 0.0923 | 1158 | 658 |
+| G4 latest | 0.55 | 78.0475 | 0.8467 | 0.2858 | 1321 | 781 |
+| G4 latest | 0.60 | 80.0300 | 0.8492 | 0.2486 | 1281 | 769 |
+| G4 latest | 0.65 | 84.0079 | 0.8506 | 0.1704 | 1227 | 727 |
+
+G4 显著增加有效匹配并提高 GT 覆盖，证明未覆盖带监督确实减少了一部分合并；但 ferrite
+预测实例过多、平均面积过小，新增轮廓被过度学习。提高全局阈值只能部分缓解，0.65 仍未达到
+G2 基线，因此 G4 latest 不晋级。
+
+monitor 同样显示 affinity 全局下沉，而非只修补少量断点：无标签 `train_000` 的
+short/distance2/distance4 平均 affinity 从 `0.694/0.685/0.647` 降至
+`0.634/0.627/0.592`。验证图负边概率改善，但同实例正边概率也由 `0.775` 降至
+`0.709`，与碎裂增加一致。
+
+## G4b：缺口负边权重 0.20
+
+下一轮保留 G4 的目标覆盖，但仅把新增加的人工 polygon-to-uncovered 负边权重设为
+`0.20`；原始不同实例负边、正边和全部 SAM2 监督保持权重不变。仍从同一 G2 best
+初始化，复用 G3/G4 的 20 epoch、数据比例、增强和学习率。
+
+配置：`config/train/affinity_geometry_g4b_gap_weight020.yaml`。
+
+目标是让有效匹配数高于 G2，同时把 ferrite 面积误差控制回接近 `0.09`，并避免无标签
+affinity 均值再次整体下降。

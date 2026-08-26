@@ -538,11 +538,23 @@ def main():
                 uncovered_as_boundary = batch["uncovered_boundary_source"].to(
                     device, non_blocking=True
                 )
-            target, edge_valid = build_affinity_targets_torch(
+            target, edge_valid, uncovered_edge = build_affinity_targets_torch(
                 labels,
                 valid,
                 uncovered_as_boundary=uncovered_as_boundary,
+                return_uncovered_mask=True,
             )
+            edge_weight = None
+            if uncovered_as_boundary is not None:
+                gap_weight = float(
+                    cfg.get("manual_uncovered_boundary_weight", 1.0)
+                )
+                if not 0.0 <= gap_weight <= 1.0:
+                    raise ValueError(
+                        "manual_uncovered_boundary_weight must be within [0, 1]"
+                    )
+                edge_weight = torch.ones_like(target)
+                edge_weight[uncovered_edge] = gap_weight
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type=device.type, enabled=amp_enabled):
                 output = system.geometry_forward(image)
@@ -558,6 +570,7 @@ def main():
                     hard_negative_gamma=float(
                         loss_cfg.get("hard_negative_gamma", 2.0)
                     ),
+                    edge_weight=edge_weight,
                 )
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)

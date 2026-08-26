@@ -1,0 +1,7 @@
+_base: affinity_geometry_g4_manual_gap.yaml
+
+affinity_geometry_g1:
+  # G4b keeps G4 target coverage but reduces only the newly introduced
+  # human polygon-to-uncovered negative-edge contribution.
+  output_dir: outputs/affinity_geometry_g4b_gap_weight020
+  manual_uncovered_boundary_weight: 0.20
