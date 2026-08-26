@@ -17,7 +17,17 @@ Python 环境：`conda activate sam2_env`。
 4. 一律 Letterbox（等比缩放 + BORDER_REFLECT），禁止挤压。
 5. 所有变换/增强在线完成，禁止离线改图。
 
-## 3. 当前架构（协议 C：LoRA 全链路）
+## 3. 当前架构
+
+当前候选部署路径是：冻结 V6 语义锚点 + 8 通道 affinity geometry + G2/G3 SAM2
+无类别伪实例监督 → gated-mean affinity boundary → 受阻分水岭 → V6 语义投票分类。
+G3 尚未证明黑盒竞赛成绩提升；V6/B2 边界路线保留为可复现基线和回退。
+
+checkpoint 晋级必须使用固定 `gated + mean + boundary_threshold=0.55` 的完整部署验证。
+GT 前景上的 affinity 连通分量重建属于 Oracle 诊断，禁止作为选模指标。详细协议见
+`docs/AFFINITY_DEPLOYMENT_EVALUATION.md`。
+
+### V6 语义锚点来源（协议 C：LoRA 全链路）
 
 1. **自监督 LoRA 预训练**（`tools/pretrain_lora_ssl.py`）：1000 无标签图 MAE 掩码重建，只训 LoRA + 重建头 → `outputs/lora_pretrain/lora_state_dict.pth`。
 2. **Stage-1 监督**（`train.py`）：冻结 trunk + LoRA，双 FPN 随机初始化，语义 BCE+Dice / 边界 Focal×EDT。

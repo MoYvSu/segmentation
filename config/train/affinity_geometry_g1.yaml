@@ -29,6 +29,21 @@ affinity_geometry_g1:
   # Conservative long-edge bridge selected after the G0 threshold audit.
   graph_thresholds: [0.20, 0.20, 0.20, 0.20, 0.25, 0.25, 0.60, 0.60]
 
+  # Canonical checkpoint-selection path. GT is loaded only after a complete
+  # submission-style prediction and is never used as graph foreground.
+  # Keep this recipe fixed during training; threshold sweeps are post-training
+  # deployment diagnostics and must not select per-image parameters.
+  deployment_validation:
+    enabled: true
+    fusion_mode: gated
+    short_reduction: mean
+    boundary_threshold: 0.55
+    distance2_weight: 0.50
+    distance4_weight: 0.25
+    support_threshold: 0.20
+    support_temperature: 0.05
+    short_softmax_temperature: 0.15
+
   augmentation:
     horizontal_flip: true
     vertical_flip: true

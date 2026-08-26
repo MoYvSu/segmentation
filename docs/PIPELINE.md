@@ -2,8 +2,15 @@
 
 ## 结论与主线
 
-当前可用参考是 `outputs/stage2_v6/best_model_stage2.pth`：语义完整性与边界连续性明显优于
-中心热图多任务模型，但实例结果仍同时存在图样中心碎裂式过分割和外围欠分割，不能视为最终方案。
+当前语义锚点仍是 `outputs/stage2_v6/best_model_stage2.pth`；几何候选主线已转为
+“冻结 V6 语义 + 8 通道 affinity + G2/G3 SAM2 无类别伪实例监督 → gated-mean boundary
+→ 受阻分水岭 → 语义投票”。V6/B2 边界路线继续作为可复现基线与回退，不应误写成已经被
+G3 完全替代。
+
+G3 在完整部署代理指标上有正信号，但测试目检仍明显欠分割，尚不能证明黑盒竞赛成绩提升。
+训练选模固定走 `gated + mean + boundary_threshold=0.55` 的完整部署路径；GT 前景上的 Oracle
+图重建仅作诊断。协议、G2/G3 结果和阈值风险见
+[`docs/AFFINITY_DEPLOYMENT_EVALUATION.md`](AFFINITY_DEPLOYMENT_EVALUATION.md)。
 
 `outputs/stage2_center_heatmap/best_model_stage2.pth` 只保留为负面对照。现有中心 GT 由每个
 Labelme polygon 生成一个种子，polygon 与物理晶粒并不等价；同时中心损失和边界损失共享

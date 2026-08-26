@@ -1,19 +1,23 @@
 # 低碳钢金相图像相区分割
 
-> 技术路线：冻结 SAM 2 Image Encoder + LoRA 域适配 + 独立语义/边界 FPN + 两阶段训练 +
-> 受阻分水岭实例分割。当前状态、入口与产物约定以 [docs/PIPELINE.md](docs/PIPELINE.md) 为准。
+> 当前候选路线：冻结 V6 语义锚点 + 8 通道 affinity geometry + SAM2 无类别伪实例监督
+> → affinity boundary → 受阻分水岭 → 语义投票分类。V6/B2 边界路线保留为基线与回退。
+> 当前状态、入口与产物约定以 [docs/PIPELINE.md](docs/PIPELINE.md) 为准。
 
 颜色先验分析已记录在 [docs/COLOR_SEPARABILITY.md](docs/COLOR_SEPARABILITY.md)。后续对话进程在
 讨论语义阈值、颜色辅助或数据增强前应先阅读该文档。
 
 ## 当前进度
 
-- **当前参考模型**：`outputs/stage2_v6/best_model_stage2.pth`。它仍同时存在中心区域
-  碎裂式过分割与外围欠分割，但边界结构完整性明显优于中心多任务模型。
+- **语义锚点与参考基线**：`outputs/stage2_v6/best_model_stage2.pth`。其语义分支仍是当前
+  可复现锚点，原边界分支作为回退基线。
+- **当前几何候选**：G3 native-crop affinity。完整部署复核显示小幅正信号，但测试图仍有
+  明显欠分割，尚未证明黑盒竞赛分数提升。详见
+  [docs/AFFINITY_DEPLOYMENT_EVALUATION.md](docs/AFFINITY_DEPLOYMENT_EVALUATION.md)。
 - **中心热图实验已降级为负面对照**：共享 `boundary_fpn` 的中心辅助任务破坏了边界表征；
   `outputs/stage2_center_heatmap/best_model_stage2.pth` 不作为后续初始化主线。
-- **当前目标**：保护已经优秀的语义/LoRA 表征，独立增强边界召回、拓扑连续性与高置信输出，
-  再针对黑盒的铁素体平均面积指标进行少量推理参数校准。
+- **当前目标**：先以完整部署路径闭环 checkpoint 选择，再改进 affinity 的断边召回与
+  合并错误；Oracle GT 前景图重建指标仅作诊断，不得用于模型晋级。
 
 ## 环境配置
 

@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 import cv2
@@ -42,8 +43,13 @@ from utils.affinity_graph import (
     reconstruct_affinity_components,
 )
 from utils.affinity_loss import balanced_affinity_loss, build_affinity_targets_torch
+from utils.affinity_deployment import postprocess, predict_maps
 from utils.config import load_config, project_path
-from utils.instance_metrics import evaluate_instance_pair
+from utils.instance_metrics import (
+    evaluate_instance_pair,
+    load_labelme_instances,
+    summarize_instance_results,
+)
 from utils.offset_letterbox import geometry_letterbox_metadata
 
 
@@ -186,14 +192,74 @@ def aggregate_validation(rows):
     return {key: float(np.mean([row[key] for row in rows])) for key in keys}
 
 
+def deployment_validation_recipe(cfg):
+    deployment = cfg.get("deployment_validation", {})
+    return {
+        "enabled": bool(deployment.get("enabled", False)),
+        "fusion_mode": deployment.get("fusion_mode", "gated"),
+        "boundary_threshold": float(deployment.get("boundary_threshold", 0.55)),
+        "fusion_kwargs": {
+            "distance2_weight": float(deployment.get("distance2_weight", 0.50)),
+            "distance4_weight": float(deployment.get("distance4_weight", 0.25)),
+            "support_threshold": float(deployment.get("support_threshold", 0.20)),
+            "support_temperature": float(
+                deployment.get("support_temperature", 0.05)
+            ),
+            "short_reduction": deployment.get("short_reduction", "mean"),
+            "short_softmax_temperature": float(
+                deployment.get("short_softmax_temperature", 0.15)
+            ),
+        },
+    }
+
+
+@torch.no_grad()
+def evaluate_deployment_validation(
+    system, image_paths, image_size, device, infer_cfg, recipe
+):
+    """Score the exact deployment path; GT is loaded only after prediction."""
+    metrics = []
+    with tempfile.TemporaryDirectory(prefix="affinity-deploy-val-") as temp_dir:
+        for image_path in image_paths:
+            image, _, affinity_output, _ = predict_maps(
+                system,
+                image_path,
+                image_size,
+                device,
+                recipe["fusion_mode"],
+                recipe["fusion_kwargs"],
+            )
+            _, pred_map, pred_class_map = postprocess(
+                affinity_output,
+                image.shape[:2],
+                temp_dir,
+                image_path.stem,
+                infer_cfg,
+                recipe["boundary_threshold"],
+                False,
+            )
+            gt_map, gt_class_map, _ = load_labelme_instances(
+                image_path.with_suffix(".json"), image.shape[:2]
+            )
+            metrics.append(
+                evaluate_instance_pair(
+                    gt_map, gt_class_map, pred_map, pred_class_map
+                )
+            )
+    return summarize_instance_results(metrics)
+
+
 def save_checkpoint(
     path, system, config, epoch, best_score, reference_path, reference_sha,
-    init_path, digest, split,
+    init_path, digest, split, selection_metric, best_oracle_score,
 ):
     torch.save({
-        "format": "affinity_geometry_g1_v1",
+        "format": "affinity_geometry_g1_v2",
         "epoch": int(epoch),
-        "best_val_gt_penalized_miou": float(best_score),
+        "best_selection_metric": selection_metric,
+        "best_selection_score": float(best_score),
+        "best_val_gt_penalized_miou": float(best_oracle_score),
+        "deployment_promotion_required": selection_metric != "deployment_score_total",
         "affinity_offsets": [list(value) for value in DEFAULT_AFFINITY_OFFSETS],
         "geometry_state_dict": system.geometry_decoder.state_dict(),
         "reference_checkpoint": os.path.abspath(reference_path),
@@ -388,6 +454,8 @@ def main():
         json.dumps(split, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     graph_thresholds = cfg.get("graph_thresholds")
+    deployment_recipe = deployment_validation_recipe(cfg)
+    val_image_paths = [Path(raw_dir) / f"{name}.jpg" for name in val_names]
     system.eval()
     baseline_rows = [
         evaluate_sample(system, val_dataset[index], graph_thresholds)
@@ -397,10 +465,34 @@ def main():
     (output_dir / "baseline.json").write_text(
         json.dumps(baseline, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    best_score = baseline["gt_penalized_miou"]
+    best_oracle_score = baseline["gt_penalized_miou"]
+    deployment_baseline = None
+    if deployment_recipe["enabled"]:
+        deployment_baseline = evaluate_deployment_validation(
+            system,
+            val_image_paths,
+            int(cfg.get("input_size", 1024)),
+            device,
+            config["inference"],
+            deployment_recipe,
+        )
+        (output_dir / "deployment_baseline.json").write_text(
+            json.dumps(deployment_baseline, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        selection_metric = "deployment_score_total"
+        best_score = deployment_baseline["score_total"]
+    else:
+        logger.warning(
+            "Deployment validation disabled: best_affinity.pth remains an "
+            "oracle-geometry diagnostic and requires external promotion"
+        )
+        selection_metric = "oracle_gt_penalized_miou"
+        best_score = best_oracle_score
     save_checkpoint(
         output_dir / "best_affinity.pth", system, config, 0, best_score,
         reference_path, reference_sha, init_path, digest, split,
+        selection_metric, best_oracle_score,
     )
     write_val_monitor(system, val_dataset, output_dir, 0, graph_thresholds)
     for path in unlabeled_monitors:
@@ -425,7 +517,11 @@ def main():
         "val_instance_count_abs_error", "val_split_gt_instance_count",
         "val_merged_pred_instance_count", "val_raw_component_count",
         "val_merged_components_for_cap", "val_edge_precision", "val_edge_recall",
-        "val_edge_specificity", "learning_rate",
+        "val_edge_specificity", "val_deployment_score_total",
+        "val_deployment_instance_miou", "val_deployment_gt_penalized_miou",
+        "val_deployment_ferrite_area_relative_error",
+        "val_deployment_pred_count", "val_deployment_valid_matches",
+        "val_deployment_macro_image_score_total", "learning_rate",
     ]
     writer = csv.DictWriter(metrics_file, fieldnames=fields)
     writer.writeheader()
@@ -472,18 +568,54 @@ def main():
             for index in range(len(val_dataset))
         ]
         val = aggregate_validation(val_rows)
+        deployment = None
+        if deployment_recipe["enabled"]:
+            deployment = evaluate_deployment_validation(
+                system,
+                val_image_paths,
+                int(cfg.get("input_size", 1024)),
+                device,
+                config["inference"],
+                deployment_recipe,
+            )
+        deployment_values = {
+            "val_deployment_score_total": (
+                deployment["score_total"] if deployment is not None else None
+            ),
+            "val_deployment_instance_miou": (
+                deployment["instance_miou_valid"] if deployment is not None else None
+            ),
+            "val_deployment_gt_penalized_miou": (
+                deployment["gt_penalized_miou"] if deployment is not None else None
+            ),
+            "val_deployment_ferrite_area_relative_error": (
+                deployment["ferrite_area_relative_error"]
+                if deployment is not None else None
+            ),
+            "val_deployment_pred_count": (
+                deployment["pred_count"] if deployment is not None else None
+            ),
+            "val_deployment_valid_matches": (
+                deployment["valid_matches"] if deployment is not None else None
+            ),
+            "val_deployment_macro_image_score_total": (
+                deployment["macro_image_score_total"]
+                if deployment is not None else None
+            ),
+        }
         row = {
             "epoch": epoch,
             "train_loss": totals["loss"] / totals["batches"],
             "train_edge_precision": totals["precision"] / totals["batches"],
             "train_edge_recall": totals["recall"] / totals["batches"],
             **{f"val_{key}": value for key, value in val.items()},
+            **deployment_values,
             "learning_rate": optimizer.param_groups[0]["lr"],
         }
         writer.writerow(row)
         metrics_file.flush()
         logger.info(
-            "epoch=%d train=%.4f val_pen=%.4f valid=%.4f count_err=%.1f "
+            "epoch=%d train=%.4f oracle_pen=%.4f valid=%.4f count_err=%.1f "
             "split=%.1f merge=%.1f raw=%.1f cap=%.1f edge_p=%.4f edge_r=%.4f",
             epoch, row["train_loss"], row["val_gt_penalized_miou"],
             row["val_instance_miou_valid"], row["val_instance_count_abs_error"],
@@ -491,11 +623,32 @@ def main():
             row["val_raw_component_count"], row["val_merged_components_for_cap"],
             row["val_edge_precision"], row["val_edge_recall"],
         )
-        if row["val_gt_penalized_miou"] > best_score:
-            best_score = row["val_gt_penalized_miou"]
+        if deployment is not None:
+            logger.info(
+                "epoch=%d deployment_score=%.4f miou=%.4f gt_pen=%.4f "
+                "area_err=%.4f pred=%d valid=%d macro=%.4f",
+                epoch,
+                deployment["score_total"],
+                deployment["instance_miou_valid"],
+                deployment["gt_penalized_miou"],
+                deployment["ferrite_area_relative_error"],
+                deployment["pred_count"],
+                deployment["valid_matches"],
+                deployment["macro_image_score_total"],
+            )
+        best_oracle_score = max(
+            best_oracle_score, row["val_gt_penalized_miou"]
+        )
+        selection_score = (
+            deployment["score_total"]
+            if deployment is not None else row["val_gt_penalized_miou"]
+        )
+        if selection_score > best_score:
+            best_score = selection_score
             save_checkpoint(
                 output_dir / "best_affinity.pth", system, config, epoch, best_score,
                 reference_path, reference_sha, init_path, digest, split,
+                selection_metric, best_oracle_score,
             )
         if epoch % int(cfg.get("monitor_interval", 5)) == 0 or epoch == epochs:
             semantic_contract_audit(
@@ -505,6 +658,7 @@ def main():
             save_checkpoint(
                 output_dir / "latest_affinity.pth", system, config, epoch, best_score,
                 reference_path, reference_sha, init_path, digest, split,
+                selection_metric, best_oracle_score,
             )
             write_val_monitor(system, val_dataset, output_dir, epoch, graph_thresholds)
             for path in unlabeled_monitors:
@@ -513,7 +667,10 @@ def main():
                     int(cfg.get("input_size", 1024)), int(cfg.get("output_grid", 512)),
                 )
     metrics_file.close()
-    logger.info("Affinity G1 complete best_val=%.6f output=%s", best_score, output_dir)
+    logger.info(
+        "Affinity G1 complete selection=%s best=%.6f output=%s",
+        selection_metric, best_score, output_dir,
+    )
 
 
 if __name__ == "__main__":

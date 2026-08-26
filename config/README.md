@@ -1,5 +1,10 @@
 # 配置目录
 
+当前几何候选为 `train/affinity_geometry_g3_native_crop.yaml`：冻结 V6 语义锚点，使用
+8 通道 affinity 与 G2/G3 SAM2 无类别伪实例监督。训练 checkpoint 只能按固定的完整部署
+验证 `gated + mean + boundary_threshold=0.55` 晋级；Oracle GT 前景图重建仅用于诊断。
+完整协议见 `docs/AFFINITY_DEPLOYMENT_EVALUATION.md`。V6/B2 配置仍保留为基线和回退。
+
 - `default_config.yaml`：可训练、可推理的当前 V6 参考基线；路径跨本机/服务器可移植。
 - `inference/`：只改变推理输出与后处理参数，不改变模型架构。
 - `train/`：明确区分 Stage 1 与 Stage 2 的可训练参数和输出目录。
@@ -12,8 +17,8 @@
 推理会严格比较配置和 checkpoint 的 `boundary_refine`、`center_head`、LoRA 等架构字段。
 只有明确进行消融时才使用 `--allow-architecture-mismatch`。
 
-当前 B2 主线使用 `train/stage2_refine_v6.yaml`：从 V6 best 初始化，只增加独立高分辨率
-refine residual，关闭中心头并保持原后处理不变。
+历史 B2 边界主线使用 `train/stage2_refine_v6.yaml`：从 V6 best 初始化，只增加独立高分辨率
+refine residual，关闭中心头并保持原后处理不变；当前不再把它描述为唯一主线。
 
 当前建议的下一轮单变量实验是 `train/stage2_refine_v6_physaug.yaml`：继续从 V6 best
 初始化 B2，但在 5 个 epoch 内只训练 refine head，关闭无标签一致性，加入显微成像物理增强。
