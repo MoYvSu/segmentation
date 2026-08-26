@@ -7,6 +7,25 @@ import torch
 import torch.nn.functional as F
 
 
+def _reduce_boundary_channels(
+    boundary_channels: torch.Tensor,
+    reduction: str,
+    softmax_temperature: float,
+) -> torch.Tensor:
+    if reduction == "mean":
+        return boundary_channels.mean(dim=1, keepdim=True)
+    if reduction == "top2":
+        return boundary_channels.topk(k=2, dim=1).values.mean(dim=1, keepdim=True)
+    if reduction == "softmax":
+        if float(softmax_temperature) <= 0:
+            raise ValueError("short softmax temperature must be positive")
+        weights = torch.softmax(
+            boundary_channels / float(softmax_temperature), dim=1
+        )
+        return (weights * boundary_channels).sum(dim=1, keepdim=True)
+    raise ValueError(f"unknown short boundary reduction: {reduction}")
+
+
 def _soft_dilated_support(
     boundary: torch.Tensor,
     radius: int,
@@ -35,11 +54,14 @@ def affinity_boundary_probability(
     distance4_weight: float = 0.25,
     support_threshold: float = 0.20,
     support_temperature: float = 0.05,
+    short_reduction: str = "mean",
+    short_softmax_temperature: float = 0.15,
 ) -> torch.Tensor:
     """Return one boundary channel from the eight standard affinity channels.
 
     ``mean`` preserves the original ``1 - mean(affinity)`` behavior.
-    ``short`` uses only the four unit-offset channels.
+    ``short`` uses only the four unit-offset channels. Their boundary
+    probabilities can be reduced by mean, top-2 mean, or softmax weighting.
     ``gated`` lets distance-2/4 channels reinforce or bridge only the dilated
     neighborhood of a short-range boundary. Long-range texture responses
     therefore cannot create standalone fog far from a localized interface.
@@ -52,7 +74,11 @@ def affinity_boundary_probability(
     if mode == "mean":
         return 1.0 - probability.mean(dim=1, keepdim=True)
 
-    short = 1.0 - probability[:, :4].mean(dim=1, keepdim=True)
+    short = _reduce_boundary_channels(
+        1.0 - probability[:, :4],
+        reduction=short_reduction,
+        softmax_temperature=short_softmax_temperature,
+    )
     if mode == "short":
         return short
     if mode != "gated":

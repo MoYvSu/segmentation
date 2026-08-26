@@ -153,3 +153,22 @@ only slightly. On the same 12 label-free monitor images, gated fusion reduces
 mean boundary probability from about 0.271 to 0.266 while leaving the mean final
 instance count nearly unchanged. Raw components above 255 are diagnostic only;
 the exported map must still enforce `max_instance_id=255`.
+
+### Direction-aware short-range reduction
+
+Four short-range boundary channels need not contribute equally at a directed
+interface. Two alternatives were evaluated without retraining: top-2 mean and
+softmax-weighted mean. Both retain the gated distance-2/4 reinforcement.
+
+| Reduction / threshold | Proxy total | mIoU term | Ferrite-area term | Predictions | Macro-image total |
+|---|---:|---:|---:|---:|---:|
+| mean / 0.55 | 89.40 | 41.49 | 47.91 | 1177 | 85.29 |
+| top-2 / 0.60 | 90.32 | 41.47 | 48.85 | 1152 | 85.89 |
+| softmax-0.15 / 0.60 | 91.31 | 41.41 | 49.89 | 1121 | 84.46 |
+
+Softmax obtains its aggregate gain almost entirely by matching validation
+ferrite mean area and lowers both the mIoU term and macro-image score. On the
+same 12 unlabeled monitors, mean/top-2/softmax produce about 208.0/204.4/200.0
+instances per image. Therefore softmax remains diagnostic only. Top-2 at 0.60
+is the preferred visual A/B candidate, while mean at 0.55 remains the stable
+fallback until test-set visual review or official submissions confirm it.

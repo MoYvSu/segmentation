@@ -182,6 +182,10 @@ def main():
     parser.add_argument("--distance4-weight", type=float, default=0.25)
     parser.add_argument("--support-threshold", type=float, default=0.20)
     parser.add_argument("--support-temperature", type=float, default=0.05)
+    parser.add_argument(
+        "--short-reduction", choices=("mean", "top2", "softmax"), default="mean"
+    )
+    parser.add_argument("--short-softmax-temperature", type=float, default=0.15)
     parser.add_argument("--monitor-dir", default="data/test")
     parser.add_argument("--monitor-count", type=int, default=10)
     args = parser.parse_args()
@@ -218,6 +222,8 @@ def main():
         "distance4_weight": args.distance4_weight,
         "support_threshold": args.support_threshold,
         "support_temperature": args.support_temperature,
+        "short_reduction": args.short_reduction,
+        "short_softmax_temperature": args.short_softmax_temperature,
     }
     baseline_threshold = float(infer_cfg.get("boundary_threshold", 0.35))
     arms = [("v6_boundary", baseline_threshold, "reference")]

@@ -44,3 +44,28 @@ def test_gated_fusion_uses_long_range_signal_near_short_boundary():
     short = affinity_boundary_probability(logits, mode="short")
     gated = affinity_boundary_probability(logits, mode="gated")
     assert float(gated[0, 0, 4, 4]) > float(short[0, 0, 4, 4]) + 0.05
+
+
+def test_top2_reduction_preserves_directional_boundary_signal():
+    probability = torch.full((1, 8, 1, 1), 0.95)
+    probability[:, 0, 0, 0] = 0.05
+    logits = probability_to_logit(probability)
+    mean = affinity_boundary_probability(logits, mode="short")
+    top2 = affinity_boundary_probability(
+        logits, mode="short", short_reduction="top2"
+    )
+    assert float(top2) > float(mean) + 0.15
+
+
+def test_softmax_reduction_is_between_mean_and_max():
+    probability = torch.full((1, 8, 1, 1), 0.95)
+    probability[:, 0, 0, 0] = 0.05
+    logits = probability_to_logit(probability)
+    mean = affinity_boundary_probability(logits, mode="short")
+    softmax = affinity_boundary_probability(
+        logits,
+        mode="short",
+        short_reduction="softmax",
+        short_softmax_temperature=0.15,
+    )
+    assert float(mean) < float(softmax) < 0.95

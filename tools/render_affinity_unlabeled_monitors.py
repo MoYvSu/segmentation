@@ -121,6 +121,10 @@ def main():
     parser.add_argument("--support-threshold", type=float, default=0.20)
     parser.add_argument("--support-temperature", type=float, default=0.05)
     parser.add_argument(
+        "--short-reduction", choices=("mean", "top2", "softmax"), default="mean"
+    )
+    parser.add_argument("--short-softmax-temperature", type=float, default=0.15)
+    parser.add_argument(
         "--output-dir", default="outputs/experiments/affinity_unlabeled_monitor12"
     )
     args = parser.parse_args()
@@ -157,6 +161,8 @@ def main():
         "distance4_weight": args.distance4_weight,
         "support_threshold": args.support_threshold,
         "support_temperature": args.support_temperature,
+        "short_reduction": args.short_reduction,
+        "short_softmax_temperature": args.short_softmax_temperature,
     }
     system, _, _, digest = build_system(config, cfg, device)
     rows = []
