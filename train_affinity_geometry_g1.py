@@ -335,6 +335,7 @@ def evaluate_deployment_validation(
                 infer_cfg,
                 recipe["boundary_threshold"],
                 False,
+                image_rgb=image,
             )
             gt_map, gt_class_map, _ = load_labelme_instances(
                 image_path.with_suffix(".json"), image.shape[:2]

@@ -1,0 +1,11 @@
+_base: ../inference/final_affinity_g4b_high065.yaml
+
+# E7a-1: geometry is identical to the high-0.65 hard-majority arm.
+inference:
+  output_dir: outputs/submission_affinity_g4b_high065_adaptive_core
+  semantic_vote_mode: adaptive_core
+  semantic_vote_erode_width: 0
+  semantic_vote_threshold: 0.5
+  semantic_vote_core_fraction: 0.40
+  semantic_vote_core_min_pixels: 8
+  semantic_vote_core_distance_power: 2.0

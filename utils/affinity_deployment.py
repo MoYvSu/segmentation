@@ -89,6 +89,7 @@ def postprocess(
     infer_cfg,
     boundary_threshold,
     save_visualization,
+    image_rgb=None,
 ):
     return post_process_prediction_boundary(
         output=output,
@@ -122,6 +123,30 @@ def postprocess(
         semantic_vote_threshold=float(
             infer_cfg.get("semantic_vote_threshold", 0.5)
         ),
+        semantic_vote_options={
+            "core_fraction": float(
+                infer_cfg.get("semantic_vote_core_fraction", 0.40)
+            ),
+            "core_min_pixels": int(
+                infer_cfg.get("semantic_vote_core_min_pixels", 8)
+            ),
+            "core_distance_power": float(
+                infer_cfg.get("semantic_vote_core_distance_power", 2.0)
+            ),
+            "color_uncertain_low": float(
+                infer_cfg.get("semantic_vote_color_uncertain_low", 0.35)
+            ),
+            "color_uncertain_high": float(
+                infer_cfg.get("semantic_vote_color_uncertain_high", 0.65)
+            ),
+            "color_weight": float(
+                infer_cfg.get("semantic_vote_color_weight", 0.25)
+            ),
+            "color_min_separation": float(
+                infer_cfg.get("semantic_vote_color_min_separation", 1.0)
+            ),
+        },
+        original_image_rgb=image_rgb,
         use_center_seeds=False,
         save_visualization=save_visualization,
     )

@@ -180,6 +180,7 @@ def main():
                 arm_infer_cfg,
                 threshold,
                 True,
+                image_rgb=image,
             )
             if source == "affinity":
                 cv2.imwrite(
@@ -229,6 +230,7 @@ def main():
                 infer_cfg,
                 threshold,
                 True,
+                image_rgb=image,
             )
             cv2.imwrite(
                 str(arm_dir / f"{basename}_affinity_{args.fusion_mode}_boundary.png"),

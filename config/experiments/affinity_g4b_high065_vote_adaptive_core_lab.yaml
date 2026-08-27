@@ -1,0 +1,11 @@
+_base: affinity_g4b_high065_vote_adaptive_core.yaml
+
+# E7a-2: Lab may affect only semantically ambiguous instances.  Otsu is fitted
+# independently per image and disabled when its two brightness modes overlap.
+inference:
+  output_dir: outputs/submission_affinity_g4b_high065_adaptive_core_lab
+  semantic_vote_mode: adaptive_core_lab
+  semantic_vote_color_uncertain_low: 0.35
+  semantic_vote_color_uncertain_high: 0.65
+  semantic_vote_color_weight: 0.25
+  semantic_vote_color_min_separation: 1.0

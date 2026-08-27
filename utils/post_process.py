@@ -21,6 +21,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from utils.semantic_vote import build_adaptive_lab_prior, instance_semantic_vote
+
 
 CLASS_PEARLITE = 0
 CLASS_FERRITE = 1
@@ -131,50 +133,7 @@ def reconstruct_marker_boundary(
     return reconstructed
 
 
-def _instance_semantic_vote(
-    instance_mask: np.ndarray,
-    semantic_mask: np.ndarray,
-    semantic_probability: Optional[np.ndarray] = None,
-    mode: str = "hard_majority",
-    erode_width: int = 0,
-    threshold: float = 0.5,
-) -> Tuple[int, float]:
-    """Classify one instance and return ferrite score in ``[0, 1]``."""
-    vote_mask = np.asarray(instance_mask, dtype=bool)
-    area = int(vote_mask.sum())
-    if area <= 0:
-        return CLASS_PEARLITE, 0.0
-
-    erode_width = max(0, int(erode_width))
-    if erode_width > 0:
-        kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (2 * erode_width + 1, 2 * erode_width + 1)
-        )
-        eroded = cv2.erode(vote_mask.astype(np.uint8), kernel) > 0
-        minimum_core = min(64, max(8, area // 10))
-        if int(eroded.sum()) >= minimum_core:
-            vote_mask = eroded
-
-    hard_ratio = float(np.mean(np.asarray(semantic_mask)[vote_mask] > 0))
-    normalized_mode = str(mode).strip().lower()
-    if normalized_mode == "hard_majority" or semantic_probability is None:
-        score = hard_ratio
-    else:
-        probability_score = float(
-            np.mean(np.asarray(semantic_probability, dtype=np.float32)[vote_mask])
-        )
-        if normalized_mode == "probability_mean":
-            score = probability_score
-        elif normalized_mode == "hybrid":
-            score = 0.5 * (hard_ratio + probability_score)
-        else:
-            raise ValueError(
-                "semantic_vote_mode must be hard_majority, probability_mean, "
-                f"or hybrid; got {mode!r}"
-            )
-    score = float(np.clip(score, 0.0, 1.0))
-    cls = CLASS_FERRITE if score > float(threshold) else CLASS_PEARLITE
-    return cls, score
+_instance_semantic_vote = instance_semantic_vote
 
 
 def _region_adjacency(region_map: np.ndarray, radius: int = 2):
@@ -327,6 +286,9 @@ def boundary_watershed_separation(
     semantic_vote_mode: str = "hard_majority",
     semantic_vote_erode_width: int = 0,
     semantic_vote_threshold: float = 0.5,
+    semantic_vote_options: Optional[Dict] = None,
+    semantic_lab_prior: Optional[Dict] = None,
+    semantic_vote_audit: Optional[Dict] = None,
 ) -> Tuple[np.ndarray, Dict[int, int]]:
     """
     基于边界预测的受阻分水岭实例分割。
@@ -433,14 +395,25 @@ def boundary_watershed_separation(
     class_map = {}
     for current_id, label in enumerate(final_labels, start=1):
         instance_mask = candidate_map == label
-        cls, _ = _instance_semantic_vote(
+        vote_result = _instance_semantic_vote(
             instance_mask,
             semantic_mask,
             semantic_probability=semantic_probability,
             mode=semantic_vote_mode,
             erode_width=semantic_vote_erode_width,
             threshold=semantic_vote_threshold,
+            lab_prior=semantic_lab_prior,
+            return_details=semantic_vote_audit is not None,
+            **(semantic_vote_options or {}),
         )
+        if semantic_vote_audit is None:
+            cls, _ = vote_result
+        else:
+            cls, score, details = vote_result
+            semantic_vote_audit[current_id] = {
+                "ferrite_score": float(score),
+                **details,
+            }
         inst_map[instance_mask] = current_id
         class_map[current_id] = int(cls)
 
@@ -513,6 +486,8 @@ def post_process_prediction_boundary(
     semantic_vote_mode: str = "hard_majority",
     semantic_vote_erode_width: int = 0,
     semantic_vote_threshold: float = 0.5,
+    semantic_vote_options: Optional[Dict] = None,
+    original_image_rgb: Optional[np.ndarray] = None,
     save_visualization: bool = True,
 ) -> Tuple[Dict[str, str], np.ndarray, Dict[int, int]]:
     """
@@ -541,6 +516,12 @@ def post_process_prediction_boundary(
     )
 
     semantic_mask = (seg_prob > threshold).astype(np.uint8)
+    semantic_lab_prior = None
+    if (
+        str(semantic_vote_mode).strip().lower() == "adaptive_core_lab"
+        and original_image_rgb is not None
+    ):
+        semantic_lab_prior = build_adaptive_lab_prior(original_image_rgb)
     # 语义补缺式融合（可选）：只在边界分支弱处补 |∇seg|，不增厚强边界
     if sem_edge_merge_weight > 0:
         edge = semantic_edge_map(seg_prob, smooth=sem_edge_smooth)
@@ -565,6 +546,7 @@ def post_process_prediction_boundary(
             high_threshold=float(boundary_threshold),
             max_steps=int(marker_boundary_reconstruction_steps),
         )
+    semantic_vote_audit = {}
     inst_map, class_map = boundary_watershed_separation(
         semantic_mask,
         boundary_mask,
@@ -581,6 +563,9 @@ def post_process_prediction_boundary(
         semantic_vote_mode=semantic_vote_mode,
         semantic_vote_erode_width=semantic_vote_erode_width,
         semantic_vote_threshold=semantic_vote_threshold,
+        semantic_vote_options=semantic_vote_options,
+        semantic_lab_prior=semantic_lab_prior,
+        semantic_vote_audit=semantic_vote_audit,
     )
 
     inst_path = os.path.join(output_dir, f"{image_basename}_inst.png")
@@ -596,19 +581,13 @@ def post_process_prediction_boundary(
     vote_audit = {}
     for instance_id, cls in class_map.items():
         instance_mask = inst_map == int(instance_id)
-        _, score = _instance_semantic_vote(
-            instance_mask,
-            semantic_mask,
-            semantic_probability=seg_prob,
-            mode=semantic_vote_mode,
-            erode_width=semantic_vote_erode_width,
-            threshold=semantic_vote_threshold,
-        )
+        details = semantic_vote_audit[int(instance_id)]
+        score = float(details["ferrite_score"])
         vote_audit[str(instance_id)] = {
             "class": int(cls),
-            "ferrite_score": score,
             "confidence": float(abs(score - semantic_vote_threshold) * 2.0),
             "area": int(instance_mask.sum()),
+            **details,
         }
     vote_audit_path = os.path.join(
         output_dir, f"{image_basename}_class_confidence.json"
@@ -619,6 +598,11 @@ def post_process_prediction_boundary(
                 "mode": semantic_vote_mode,
                 "threshold": float(semantic_vote_threshold),
                 "erode_width": int(semantic_vote_erode_width),
+                "options": semantic_vote_options or {},
+                "lab_prior": None if semantic_lab_prior is None else {
+                    key: value for key, value in semantic_lab_prior.items()
+                    if key != "ferrite_probability"
+                },
                 "instances": vote_audit,
             },
             f,

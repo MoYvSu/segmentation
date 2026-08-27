@@ -101,6 +101,7 @@ def main():
             config["inference"],
             threshold,
             save_visualization,
+            image_rgb=image,
         )
         results.append({
             "image": image_path.name,
@@ -137,6 +138,19 @@ def main():
             "semantic_vote_mode": config["inference"].get(
                 "semantic_vote_mode", "hard_majority"
             ),
+            "semantic_vote": {
+                key: config["inference"].get(key, default)
+                for key, default in {
+                    "semantic_vote_threshold": 0.5,
+                    "semantic_vote_core_fraction": 0.40,
+                    "semantic_vote_core_min_pixels": 8,
+                    "semantic_vote_core_distance_power": 2.0,
+                    "semantic_vote_color_uncertain_low": 0.35,
+                    "semantic_vote_color_uncertain_high": 0.65,
+                    "semantic_vote_color_weight": 0.25,
+                    "semantic_vote_color_min_separation": 1.0,
+                }.items()
+            },
             "max_instance_id": int(
                 config["inference"].get("max_instance_id", 255)
             ),

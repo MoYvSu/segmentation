@@ -216,6 +216,7 @@ def main():
                 _, instance_map, _ = postprocess(
                     affinity_output, image.shape[:2], arm_dir, image_path.stem,
                     config["inference"], threshold, True,
+                    image_rgb=image,
                 )
                 row[f"instances_{arm}"] = int(np.unique(instance_map).size - 1)
             rows.append(row)
