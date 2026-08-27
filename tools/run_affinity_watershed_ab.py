@@ -113,6 +113,21 @@ def main():
     system.geometry_decoder.load_state_dict(
         checkpoint["geometry_state_dict"], strict=True
     )
+    adapter_state = checkpoint.get("geometry_feature_adapter_state_dict")
+    if system.geometry_feature_adapter is not None:
+        if adapter_state is not None:
+            system.geometry_feature_adapter.load_state_dict(
+                adapter_state, strict=True
+            )
+        else:
+            # A pre-adapter checkpoint is a valid identity baseline because all
+            # feature-adapter gates are zero initialized.
+            system.geometry_feature_adapter.gates.data.zero_()
+    elif adapter_state is not None:
+        raise RuntimeError(
+            "checkpoint contains a geometry feature adapter, but the selected "
+            "config has feature_adapter.enabled=false"
+        )
     system.eval()
 
     image_size = int(cfg.get("input_size", config["data"]["image_size"]))
