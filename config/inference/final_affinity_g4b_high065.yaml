@@ -1,0 +1,6 @@
+_base: final_affinity_g4b.yaml
+
+# Recall-oriented single-variable challenger to the stable 0.72 deployment.
+inference:
+  output_dir: outputs/submission_affinity_g4b_high065
+  boundary_threshold: 0.65
