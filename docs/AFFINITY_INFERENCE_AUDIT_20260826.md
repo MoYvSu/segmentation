@@ -110,6 +110,37 @@ LoRA/adapter 实验应在固定新的推理协议后进行：`marker_border_seal
 预测实例总数挑选。若局部补口仍引入碎片，下一轮只调 low threshold 与生长步数，不改
 训练。只有推理协议稳定后才启动 affinity 专属 feature adapter 或 geometry-only LoRA。
 
+### 实测结果（G4b epoch 20）
+
+必须使用 `outputs/affinity_geometry_g4b_gap_weight020/latest_affinity.pth`：其 epoch 为 20，
+SHA-256 为 `1334fdcc8472b4da67386b76b25d9099ad6bcef10b6bd9c77ae6908658b8c619`。
+同目录 `best_affinity.pth` 实际是 epoch 0，不能代表用户目检认可的 G4b。所有报告必须同时
+记录 checkpoint 路径、epoch 和哈希，不能只写 `best/latest` 别名。
+
+固定 gated fusion、2 px 封边、高阈值 0.72，六张有标签验证图：
+
+| marker 方案 | 预测数 | 有效匹配 | 有效 mIoU | GT 惩罚 mIoU | 铁素体面积误差 | 代理总分 | 单图宏分 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 无弱边重建 | 1121 | 663 | 0.8503 | 0.6202 | 3.51% | 90.759 | 86.731 |
+| 无重建 + 概率核心投票 | 1121 | 663 | 0.8503 | 0.6202 | 3.05% | 90.992 | 86.717 |
+| low 0.55 / 2 px | 1142 | 673 | 0.8444 | 0.6251 | 5.86% | 89.287 | 86.399 |
+| low 0.55 / 4 px | 1162 | 694 | 0.8409 | 0.6420 | 8.66% | 87.714 | 85.901 |
+| low 0.50 / 4 px | 1156 | 691 | 0.8385 | 0.6374 | 8.07% | 87.887 | 86.200 |
+| low 0.45 / 8 px | 1224 | 741 | 0.8390 | 0.6839 | 16.97% | 83.464 | 83.907 |
+
+弱边重建呈现清楚的连续权衡：越强，GT 覆盖和有效匹配越高、合并越少，但铁素体被拆小，
+平均面积误差和有效匹配 IoU 持续恶化。即使最保守的 0.55/2px 也未超过无重建基线，故
+当前不应把 marker 重建设为默认；它保留为欠分割诊断臂。概率核心投票只改变少量类别，
+聚合分提高 0.233，但单图宏平均下降 0.014，且有效匹配完全不变，属于弱正信号而不是
+已证实泛化收益。默认仍保留 hard majority，概率投票保留为提交 A/B 候选和置信审计。
+
+本地可视化报告目录：
+
+`C:/Users/danmo/.codex/visualizations/2026/08/20/01a02173-28e6-7930-873d-c7a5ce1bbf2f/g4b_inference_protocol_report`
+
+其中 `overview_metrics.png` 为指标表，`geometry_comparison.png` 对比补口前后实例，
+`semantic_vote_comparison.png` 只展示测试集中发生类别翻转的样本。
+
 ## 目检产物
 
 本地目录：
