@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from typing import Dict, Sequence, Tuple
+import math
 
 import torch
 import torch.nn.functional as F
@@ -178,5 +179,64 @@ def balanced_affinity_loss(
             ),
             "positive_edges": int(positive.sum()),
             "negative_edges": int(negative.sum()),
+        }
+    return loss, metrics
+
+
+def negative_affinity_tail_loss(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    edge_valid: torch.Tensor,
+    *,
+    margin: float = 0.45,
+    top_fraction: float = 0.05,
+    sample_mask: torch.Tensor | None = None,
+    edge_weight: torch.Tensor | None = None,
+):
+    """Penalize only the worst high-affinity real-boundary leakage edges.
+
+    A single false connection can merge two complete instances. Mean BCE can
+    hide that sparse tail, so this CVaR-like term selects only the largest
+    margin violations among supervised negative edges.
+    """
+    if logits.shape != target.shape or logits.shape != edge_valid.shape:
+        raise ValueError("logits, target, and edge_valid must share shape")
+    if not 0.0 < float(top_fraction) <= 1.0:
+        raise ValueError("top_fraction must be within (0, 1]")
+    if not 0.0 <= float(margin) <= 1.0:
+        raise ValueError("margin must be within [0, 1]")
+    negative = edge_valid.bool() & (target <= 0.5)
+    if sample_mask is not None:
+        mask = sample_mask.to(device=logits.device, dtype=torch.bool).reshape(-1)
+        if mask.numel() != logits.shape[0]:
+            raise ValueError("sample_mask must contain one value per batch sample")
+        negative = negative & mask[:, None, None, None]
+    probability = torch.sigmoid(logits)
+    violation = torch.relu(probability - float(margin)).square()
+    if edge_weight is not None:
+        if edge_weight.shape != logits.shape:
+            raise ValueError("edge_weight must share logits shape")
+        violation = violation * edge_weight.to(
+            device=logits.device, dtype=logits.dtype
+        )
+    selected = violation[negative]
+    if selected.numel() == 0:
+        zero = logits.sum() * 0.0
+        return zero, {
+            "tail_loss": zero.detach(),
+            "tail_edges": 0,
+            "tail_selected": 0,
+            "tail_max_affinity": 0.0,
+        }
+    count = max(1, int(math.ceil(selected.numel() * float(top_fraction))))
+    tail = torch.topk(selected, count, sorted=False).values
+    loss = tail.mean()
+    with torch.no_grad():
+        affinity_values = probability[negative]
+        metrics = {
+            "tail_loss": loss.detach(),
+            "tail_edges": int(selected.numel()),
+            "tail_selected": int(count),
+            "tail_max_affinity": float(affinity_values.max()),
         }
     return loss, metrics

@@ -1,0 +1,33 @@
+_base: ../train/affinity_geometry_g4b_gap_weight020.yaml
+
+# Current reproducible deployment contract. Training history remains staged,
+# but inference is one config and one command.
+affinity_geometry_g1:
+  geometry_init_checkpoint: outputs/affinity_geometry_g4b_gap_weight020/latest_affinity.pth
+
+affinity_deployment:
+  checkpoint: outputs/affinity_geometry_g4b_gap_weight020/latest_affinity.pth
+  fusion_mode: gated
+  distance2_weight: 0.50
+  distance4_weight: 0.25
+  support_threshold: 0.20
+  support_temperature: 0.05
+  short_reduction: mean
+  short_softmax_temperature: 0.15
+
+inference:
+  test_dir: data/test
+  output_dir: outputs/submission_affinity_g4b
+  boundary_threshold: 0.72
+  min_instance_area: 50
+  max_instance_id: 255
+  bridge_width: 1
+  watershed_dilate_width: 1
+  marker_border_seal_width: 2
+  marker_boundary_low_threshold: 0.45
+  marker_boundary_reconstruction_steps: 8
+  semantic_vote_mode: hard_majority
+  semantic_vote_erode_width: 0
+
+post_process:
+  save_visualization: true

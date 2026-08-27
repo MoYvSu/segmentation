@@ -1,0 +1,158 @@
+# -*- coding: utf-8 -*-
+"""Single-command, GT-free affinity submission inference."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+import torch
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from data.mim_dataset import list_images
+from train_affinity_geometry_g1 import (
+    build_system,
+    load_geometry_checkpoint_state,
+)
+from train_offset_geometry import file_sha256
+from utils.affinity_deployment import postprocess, predict_maps
+from utils.config import load_config, project_path
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--config",
+        default="config/inference/final_affinity_g4b.yaml",
+    )
+    parser.add_argument("--checkpoint", default=None)
+    parser.add_argument("--test-dir", default=None)
+    parser.add_argument("--output-dir", default=None)
+    args = parser.parse_args()
+    config = load_config(args.config)
+    cfg = config["affinity_geometry_g1"]
+    deployment = config["affinity_deployment"]
+    checkpoint_path = Path(project_path(
+        config, args.checkpoint or deployment["checkpoint"]
+    ))
+    test_dir = Path(project_path(
+        config, args.test_dir or config["inference"]["test_dir"]
+    ))
+    output_dir = Path(project_path(
+        config, args.output_dir or config["inference"]["output_dir"]
+    ))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    device = torch.device(
+        "cuda"
+        if config["sam2"].get("device") == "cuda" and torch.cuda.is_available()
+        else "cpu"
+    )
+    system, reference_path, _, digest = build_system(config, cfg, device)
+    checkpoint = torch.load(
+        checkpoint_path, map_location="cpu", weights_only=False
+    )
+    load_geometry_checkpoint_state(system, checkpoint)
+    expected = checkpoint.get("semantic_state_digest")
+    if expected and expected != digest:
+        raise RuntimeError("affinity checkpoint semantic digest mismatch")
+    system.eval()
+    fusion_mode = str(deployment.get("fusion_mode", "gated"))
+    fusion_kwargs = {
+        "distance2_weight": float(deployment.get("distance2_weight", 0.50)),
+        "distance4_weight": float(deployment.get("distance4_weight", 0.25)),
+        "support_threshold": float(deployment.get("support_threshold", 0.20)),
+        "support_temperature": float(
+            deployment.get("support_temperature", 0.05)
+        ),
+        "short_reduction": str(deployment.get("short_reduction", "mean")),
+        "short_softmax_temperature": float(
+            deployment.get("short_softmax_temperature", 0.15)
+        ),
+    }
+    threshold = float(config["inference"]["boundary_threshold"])
+    save_visualization = bool(
+        config.get("post_process", {}).get("save_visualization", True)
+    )
+    results = []
+    for image_name in list_images(str(test_dir)):
+        image_path = Path(image_name)
+        started = time.time()
+        image, _, affinity_output, _ = predict_maps(
+            system,
+            image_path,
+            int(cfg.get("input_size", 1024)),
+            device,
+            fusion_mode,
+            fusion_kwargs,
+        )
+        _, instance_map, class_map = postprocess(
+            affinity_output,
+            image.shape[:2],
+            output_dir,
+            image_path.stem,
+            config["inference"],
+            threshold,
+            save_visualization,
+        )
+        results.append({
+            "image": image_path.name,
+            "instances": int(len(class_map)),
+            "ferrite": int(sum(int(value) == 1 for value in class_map.values())),
+            "pearlite": int(sum(int(value) == 0 for value in class_map.values())),
+            "max_instance_id": int(instance_map.max()),
+            "seconds": time.time() - started,
+        })
+    manifest = {
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "format": "affinity_submission_v1",
+        "config": os.path.abspath(args.config),
+        "checkpoint": os.path.abspath(checkpoint_path),
+        "checkpoint_sha256": file_sha256(checkpoint_path),
+        "checkpoint_epoch": int(checkpoint.get("epoch", -1)),
+        "reference_checkpoint": os.path.abspath(reference_path),
+        "reference_checkpoint_sha256": file_sha256(reference_path),
+        "semantic_state_digest": digest,
+        "fusion": {"mode": fusion_mode, **fusion_kwargs},
+        "inference": {
+            "boundary_threshold": threshold,
+            "marker_border_seal_width": int(
+                config["inference"].get("marker_border_seal_width", 0)
+            ),
+            "marker_boundary_low_threshold": config["inference"].get(
+                "marker_boundary_low_threshold"
+            ),
+            "marker_boundary_reconstruction_steps": int(
+                config["inference"].get(
+                    "marker_boundary_reconstruction_steps", 0
+                )
+            ),
+            "semantic_vote_mode": config["inference"].get(
+                "semantic_vote_mode", "hard_majority"
+            ),
+            "max_instance_id": int(
+                config["inference"].get("max_instance_id", 255)
+            ),
+        },
+        "images": results,
+    }
+    (output_dir / "submission_manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    print(json.dumps({
+        "output_dir": str(output_dir),
+        "images": len(results),
+        "instances": sum(row["instances"] for row in results),
+        "checkpoint_epoch": manifest["checkpoint_epoch"],
+    }, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    main()

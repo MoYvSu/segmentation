@@ -20,7 +20,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from data.mim_dataset import list_images
-from train_affinity_geometry_g1 import build_system
+from train_affinity_geometry_g1 import (
+    build_system,
+    load_geometry_checkpoint_state,
+)
 from utils.affinity_deployment import (
     affinity_mean_boundary_probability,
     crop_letterbox_output,
@@ -110,24 +113,7 @@ def main():
     system, _, _, _ = build_system(config, cfg, device)
     checkpoint_path = project_path(config, args.affinity_checkpoint)
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    system.geometry_decoder.load_state_dict(
-        checkpoint["geometry_state_dict"], strict=True
-    )
-    adapter_state = checkpoint.get("geometry_feature_adapter_state_dict")
-    if system.geometry_feature_adapter is not None:
-        if adapter_state is not None:
-            system.geometry_feature_adapter.load_state_dict(
-                adapter_state, strict=True
-            )
-        else:
-            # A pre-adapter checkpoint is a valid identity baseline because all
-            # feature-adapter gates are zero initialized.
-            system.geometry_feature_adapter.gates.data.zero_()
-    elif adapter_state is not None:
-        raise RuntimeError(
-            "checkpoint contains a geometry feature adapter, but the selected "
-            "config has feature_adapter.enabled=false"
-        )
+    load_geometry_checkpoint_state(system, checkpoint)
     system.eval()
 
     image_size = int(cfg.get("input_size", config["data"]["image_size"]))

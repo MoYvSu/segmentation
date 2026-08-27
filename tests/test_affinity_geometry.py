@@ -6,6 +6,7 @@ from utils.affinity_graph import DEFAULT_AFFINITY_OFFSETS
 from utils.affinity_loss import (
     balanced_affinity_loss,
     build_affinity_targets_torch,
+    negative_affinity_tail_loss,
 )
 
 
@@ -100,3 +101,34 @@ def test_edge_weight_can_soften_new_gap_negatives():
         edge_weight=torch.tensor([[[[1.0, 0.2]]]]),
     )
     assert softened < full
+
+
+def test_negative_tail_loss_focuses_sparse_false_merge_edges():
+    logits = torch.tensor([[[[-3.0, -1.0, 0.0, 3.0]]]], requires_grad=True)
+    target = torch.zeros_like(logits)
+    valid = torch.ones_like(logits, dtype=torch.bool)
+    loss, metrics = negative_affinity_tail_loss(
+        logits, target, valid, margin=0.45, top_fraction=0.25
+    )
+    assert metrics["tail_edges"] == 4
+    assert metrics["tail_selected"] == 1
+    loss.backward()
+    assert logits.grad[0, 0, 0, 3] > 0
+    assert torch.count_nonzero(logits.grad) == 1
+
+
+def test_negative_tail_loss_can_select_manual_samples_only():
+    logits = torch.full((2, 1, 1, 2), 3.0, requires_grad=True)
+    target = torch.zeros_like(logits)
+    valid = torch.ones_like(logits, dtype=torch.bool)
+    loss, metrics = negative_affinity_tail_loss(
+        logits,
+        target,
+        valid,
+        sample_mask=torch.tensor([True, False]),
+        top_fraction=1.0,
+    )
+    assert metrics["tail_edges"] == 2
+    loss.backward()
+    assert logits.grad[0].abs().sum() > 0
+    assert logits.grad[1].abs().sum() == 0

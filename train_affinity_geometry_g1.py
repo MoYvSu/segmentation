@@ -43,7 +43,11 @@ from utils.affinity_graph import (
     build_affinity_targets,
     reconstruct_affinity_components,
 )
-from utils.affinity_loss import balanced_affinity_loss, build_affinity_targets_torch
+from utils.affinity_loss import (
+    balanced_affinity_loss,
+    build_affinity_targets_torch,
+    negative_affinity_tail_loss,
+)
 from utils.affinity_deployment import postprocess, predict_maps
 from utils.config import load_config, project_path
 from utils.instance_metrics import (
@@ -60,6 +64,26 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("train_affinity_geometry_g1")
+
+
+def load_geometry_checkpoint_state(system, checkpoint):
+    """Load decoder and optional feature adapter with strict compatibility."""
+    system.geometry_decoder.load_state_dict(
+        checkpoint["geometry_state_dict"], strict=True
+    )
+    adapter_state = checkpoint.get("geometry_feature_adapter_state_dict")
+    if system.geometry_feature_adapter is not None:
+        if adapter_state is not None:
+            system.geometry_feature_adapter.load_state_dict(
+                adapter_state, strict=True
+            )
+        else:
+            system.geometry_feature_adapter.gates.data.zero_()
+    elif adapter_state is not None:
+        raise RuntimeError(
+            "checkpoint contains a geometry feature adapter, but the selected "
+            "config has feature_adapter.enabled=false"
+        )
 
 
 def build_system(config, cfg, device):
@@ -598,6 +622,7 @@ def main():
         "val_deployment_ferrite_area_relative_error",
         "val_deployment_pred_count", "val_deployment_valid_matches",
         "val_deployment_macro_image_score_total", "learning_rate",
+        "train_negative_tail_loss",
         "adapter_gate_mean_abs", "adapter_gate_max_abs",
         "adapter_gate_scale0_abs", "adapter_gate_scale1_abs",
         "adapter_gate_scale2_abs", "adapter_gate_scale3_abs",
@@ -607,7 +632,10 @@ def main():
     logger.info("Baseline val=%s", baseline)
     for epoch in range(1, epochs + 1):
         system.train()
-        totals = {"loss": 0.0, "precision": 0.0, "recall": 0.0, "batches": 0}
+        totals = {
+            "loss": 0.0, "precision": 0.0, "recall": 0.0,
+            "negative_tail_loss": 0.0, "batches": 0,
+        }
         for batch in loader:
             image = batch["image"].to(device, non_blocking=True)
             labels = batch["instance_map"].to(device, non_blocking=True)
@@ -651,6 +679,34 @@ def main():
                     ),
                     edge_weight=edge_weight,
                 )
+                tail_weight = float(
+                    loss_cfg.get("negative_tail_weight", 0.0)
+                )
+                if tail_weight > 0:
+                    tail_loss, tail_metrics = negative_affinity_tail_loss(
+                        output["affinity_logits"],
+                        target,
+                        edge_valid,
+                        margin=float(
+                            loss_cfg.get("negative_tail_margin", 0.45)
+                        ),
+                        top_fraction=float(
+                            loss_cfg.get("negative_tail_fraction", 0.05)
+                        ),
+                        sample_mask=(
+                            uncovered_as_boundary
+                            if bool(
+                                loss_cfg.get(
+                                    "negative_tail_manual_only", True
+                                )
+                            )
+                            else None
+                        ),
+                        edge_weight=edge_weight,
+                    )
+                    loss = loss + tail_weight * tail_loss
+                    train_metrics.update(tail_metrics)
+                    train_metrics["loss"] = loss.detach()
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(
@@ -662,6 +718,9 @@ def main():
             totals["loss"] += float(train_metrics["loss"])
             totals["precision"] += float(train_metrics["precision"])
             totals["recall"] += float(train_metrics["recall"])
+            totals["negative_tail_loss"] += float(
+                train_metrics.get("tail_loss", 0.0)
+            )
             totals["batches"] += 1
         scheduler.step()
         system.eval()
@@ -713,6 +772,9 @@ def main():
             **{f"val_{key}": value for key, value in val.items()},
             **deployment_values,
             "learning_rate": optimizer.param_groups[0]["lr"],
+            "train_negative_tail_loss": (
+                totals["negative_tail_loss"] / totals["batches"]
+            ),
             **adapter_metrics(system),
         }
         writer.writerow(row)

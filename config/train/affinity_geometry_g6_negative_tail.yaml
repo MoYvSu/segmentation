@@ -1,0 +1,31 @@
+_base: affinity_geometry_g4b_gap_weight020.yaml
+
+affinity_geometry_g1:
+  # G6 returns to the approved G4b checkpoint. It changes only the loss on the
+  # worst supervised negative-affinity tail; no adapter or LoRA is trainable.
+  geometry_init_checkpoint: outputs/affinity_geometry_g4b_gap_weight020/latest_affinity.pth
+  output_dir: outputs/affinity_geometry_g6_negative_tail
+  epochs: 10
+  learning_rate: 5.0e-6
+  min_learning_rate: 1.0e-6
+  unlabeled_monitor_count: 6
+
+  loss:
+    negative_tail_weight: 0.15
+    negative_tail_margin: 0.45
+    negative_tail_fraction: 0.05
+    negative_tail_manual_only: true
+
+  deployment_validation:
+    enabled: true
+    fusion_mode: gated
+    short_reduction: mean
+    boundary_threshold: 0.72
+
+inference:
+  boundary_threshold: 0.72
+  marker_border_seal_width: 2
+  marker_boundary_low_threshold: 0.45
+  marker_boundary_reconstruction_steps: 8
+  semantic_vote_mode: hard_majority
+  semantic_vote_erode_width: 0

@@ -159,6 +159,35 @@ gated + seal2 + high0.72 + low0.45/8px reconstruction + hard majority。
 六张人工验证 GT 的完整部署分仍记录，但不能作为唯一晋级依据；必须同时比较 epoch 0、
 latest 的无标签 monitor、gate 开启幅度和测试侧新增切缝质量。
 
+G5 实测不晋级。最佳 epoch 5 虽将六图代理总分从 83.464 提到 85.418，但有效匹配
+从 741 降至 716；十张测试图实例从 951 降至 923，减少主要来自铁素体（595→571）。
+逐图目检确认每张图都有轻微但稳定的欠分割。adapter gate 峰值仅约 0.0013，说明新增
+特征容量不是当前瓶颈，代理分上升主要是实例合并后铁素体平均面积碰巧更接近人工 GT。
+
+tools/audit_affinity_checkpoint_shift.py 进一步在 G4b 重建形成、且具有原图证据的新切缝上
+比较 checkpoint：G5 的融合边界均值从 0.793 降至 0.764，74934 个原本超过 0.45 的
+支撑像素中有 777 个（1.04%）跌破阈值。分水岭只需少量泄漏点就会合并完整实例，因此
+这一稀疏掉点足以解释稳定欠分割。
+
+### G6 最差负边尾部损失
+
+G6 从 G4b epoch 20 重新初始化，不开放 adapter 或 LoRA。基础 BCE 保持不变，只对人工
+样本中监督负 affinity 边的最差 5% 增加 margin loss：affinity 超过 0.45 才产生惩罚，
+权重 0.15；人工多边形未覆盖带继续沿用 0.20 低可信权重。目标是修复少量会造成整实例
+合并的高连接泄漏，而不是全局抬升边界背景。配置：
+config/train/affinity_geometry_g6_negative_tail.yaml。
+
+### 单命令部署
+
+当前稳定主线固定为 G4b epoch 20，统一配置：
+config/inference/final_affinity_g4b.yaml。GT-free 提交推理只需：
+
+    python tools/run_affinity_submission.py --config config/inference/final_affinity_g4b.yaml
+
+入口会严格加载语义 reference、LoRA、affinity decoder 和后处理协议，并在输出目录写入
+submission_manifest.json，记录两个 checkpoint 的 SHA-256、语义 digest、epoch、fusion、
+阈值、逐图实例数和 255 上限。训练历史仍可分阶段，部署不再要求人工拼接多个命令。
+
 本地可视化报告目录：
 
 `C:/Users/danmo/.codex/visualizations/2026/08/20/01a02173-28e6-7930-873d-c7a5ce1bbf2f/g4b_inference_protocol_report`
