@@ -1,0 +1,12 @@
+# E7c-R: fixed V6/G4b geometry with a broader E7b class-only challenger.
+# Selected from cached strict/medium/relaxed scans. No instance-area gate is
+# used: large instances may also be genuine V6 classification errors.
+_base: affinity_g4b_high065_semantic_dual_e7c.yaml
+
+inference:
+  output_dir: outputs/submission_affinity_g4b_high065_semantic_dual_e7c_relaxed
+  semantic_vote_dual_p2f_base_min: 0.25
+  semantic_vote_dual_p2f_candidate_min: 0.75
+  semantic_vote_dual_p2f_min_core_gain: 0.03
+  semantic_vote_dual_f2p_base_max: 0.75
+  semantic_vote_dual_f2p_candidate_max: 0.25

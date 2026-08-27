@@ -117,8 +117,9 @@ segmentationv2/
 当前 hard 基线的 `79.1800` 小幅降至 `78.8379`（阈值 `0.65`）。详见
 [docs/SEMANTIC_TRAINING_E7B_20260827.md](docs/SEMANTIC_TRAINING_E7B_20260827.md)。
 
-下一步 E7c 不丢弃 E7b 的局部纠错能力，而是让 V6 固定实例几何与默认类别，仅允许 E7b
-通过保守门控修正少数低置信/黑边实例。方案与判定标准见
+E7c 不丢弃 E7b 的局部纠错能力，而是让 V6 固定实例几何与默认类别，仅允许 E7b
+通过门控修正低置信/黑边实例。缓存扫参已选择 E7c-R 进入目检：六图验证仅翻转 1 个且
+新增一个正确铁素体匹配，68 张测试图翻转 67/6178 个实例；不设置实例面积门槛。详见
 [docs/SEMANTIC_EXPERIMENT_E7C_20260828.md](docs/SEMANTIC_EXPERIMENT_E7C_20260828.md)。
 
 如需复现实验，按既定约定可直接在训练服务器运行：
@@ -147,8 +148,15 @@ python tools/run_affinity_submission.py \
   --config config/experiments/affinity_g4b_high065_semantic_e7b.yaml
 ```
 
-该配置只替换 semantic decoder。代码会验证 E7b 与 V6 的 LoRA 张量逐字节一致；若 LoRA
-发生变化，将拒绝复用 G4b affinity checkpoint。V6 双头历史推理仍可使用
+当前 E7c-R 类别纠错目检候选（实例几何仍与 G4b 完全一致）：
+
+```bash
+python tools/run_affinity_submission.py \
+  --config config/experiments/affinity_g4b_high065_semantic_dual_e7c_relaxed.yaml
+```
+
+E7b 整体替换配置只替换 semantic decoder；E7c-R 则只允许 E7b 改实例类别。两者都会验证
+E7b 与 V6 的 LoRA 张量逐字节一致；若 LoRA 发生变化，将拒绝复用 G4b affinity checkpoint。V6 双头历史推理仍可使用
 `python inference.py --config config/inference/v6_reference.yaml`。
 
 ## 实例级分类器（已废弃）

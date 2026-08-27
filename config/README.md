@@ -10,6 +10,11 @@ decoder 20 epoch，冻结 boundary/LoRA/affinity，加入实例等权核心损�
 无标签一致性。训练后使用 `experiments/affinity_g4b_high065_semantic_e7b.yaml` 在同一 G4b
 实例几何上做严格对照。详见 `docs/SEMANTIC_TRAINING_E7B_20260827.md`。
 
+当前类别纠错候选为 `experiments/affinity_g4b_high065_semantic_dual_e7c_relaxed.yaml`：固定
+V6 前景与 G4b 实例几何，仅用 E7b core 分数覆盖部分 V6 hard vote。阈值由缓存置信度扫参
+产生，不按实例面积拦截；严格版配置继续保留为反面对照。详见
+`docs/SEMANTIC_EXPERIMENT_E7C_20260828.md`。
+
 `train/affinity_geometry_g4_manual_gap.yaml` 是历史断边合并单变量实验：完全复用 G3 的
 G2 初始化、数据比例、增强、学习率和 20 epoch，只对人工 LabelMe 样本启用
 “实例与未覆盖带之间为负 affinity”；SAM2 未覆盖区和人工 `0-0` 像素对继续 ignore。
