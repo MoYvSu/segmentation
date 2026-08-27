@@ -1,0 +1,8 @@
+_base: affinity_border_seal2.yaml
+
+# Intermediate arm between the conservative 0.55 repair and over-strong 0.45/8px.
+inference:
+  boundary_threshold: 0.72
+  marker_boundary_low_threshold: 0.50
+  marker_boundary_reconstruction_steps: 4
+

@@ -95,6 +95,10 @@ def main():
     parser.add_argument("--short-softmax-temperature", type=float, default=0.15)
     parser.add_argument("--monitor-dir", default="data/test")
     parser.add_argument("--monitor-count", type=int, default=10)
+    parser.add_argument(
+        "--reference-boundary-threshold", type=float, default=0.35,
+        help="Stable V6 reference threshold; affinity-only marker settings are disabled.",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -132,7 +136,16 @@ def main():
         "short_reduction": args.short_reduction,
         "short_softmax_temperature": args.short_softmax_temperature,
     }
-    baseline_threshold = float(infer_cfg.get("boundary_threshold", 0.35))
+    baseline_threshold = float(args.reference_boundary_threshold)
+    reference_infer_cfg = dict(infer_cfg)
+    reference_infer_cfg.update(
+        {
+            "marker_boundary_low_threshold": None,
+            "marker_boundary_reconstruction_steps": 0,
+            "semantic_vote_mode": "hard_majority",
+            "semantic_vote_erode_width": 0,
+        }
+    )
     arms = [("v6_boundary", baseline_threshold, "reference")]
     arms.extend(
         (f"affinity_{args.fusion_mode}_bt{int(round(value * 100)):03d}", value, "affinity")
@@ -157,12 +170,13 @@ def main():
             arm_dir = output_root / "val" / arm_name
             arm_dir.mkdir(parents=True, exist_ok=True)
             selected_output = reference_output if source == "reference" else affinity_output
+            arm_infer_cfg = reference_infer_cfg if source == "reference" else infer_cfg
             _, pred_map, pred_class_map = postprocess(
                 selected_output,
                 image.shape[:2],
                 arm_dir,
                 basename,
-                infer_cfg,
+                arm_infer_cfg,
                 threshold,
                 True,
             )
@@ -234,6 +248,7 @@ def main():
             "foreground, marker, or postprocess input"
         ),
         "fusion": {"mode": args.fusion_mode, **fusion_kwargs},
+        "reference_boundary_threshold": baseline_threshold,
         "fixed_postprocess": {
             "min_instance_area": int(infer_cfg.get("min_instance_area", 50)),
             "bridge_width": int(infer_cfg.get("bridge_width", 1)),
