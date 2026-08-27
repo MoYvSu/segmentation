@@ -110,10 +110,18 @@ segmentationv2/
 └── visualize_instances.py       # 实例图着色可视化
 ```
 
-## 当前训练
+## 当前训练与基线
 
-E7b-A 不从零开始；它从已验证的 V6 checkpoint 初始化，只更新语义 decoder。总轮数 20，
-按既定约定可直接在训练服务器运行：
+当前可复现、默认回退仍是 G4b affinity + V6 语义。E7b-A 已完成验证，但不晋级：它从 V6
+初始化只更新语义 decoder，训练期 semantic loss 虽下降，完整部署代理分数却从 G4b 的
+`88.0551` 降至 `78.8379`（阈值 `0.65`）。详见
+[docs/SEMANTIC_TRAINING_E7B_20260827.md](docs/SEMANTIC_TRAINING_E7B_20260827.md)。
+
+下一步 E7c 不丢弃 E7b 的局部纠错能力，而是让 V6 固定实例几何与默认类别，仅允许 E7b
+通过保守门控修正少数低置信/黑边实例。方案与判定标准见
+[docs/SEMANTIC_EXPERIMENT_E7C_20260828.md](docs/SEMANTIC_EXPERIMENT_E7C_20260828.md)。
+
+如需复现实验，按既定约定可直接在训练服务器运行：
 
 ```bash
 conda activate sam2_env

@@ -89,6 +89,50 @@ def test_lab_prior_does_not_touch_a_confident_semantic_vote():
     assert details["color_used"] is False
 
 
+def test_conservative_dual_repairs_an_uncertain_black_rim_instance():
+    instance = np.ones((21, 21), dtype=bool)
+    base_probability = np.full((21, 21), 0.20, dtype=np.float32)
+    base_probability[4:17, 4:17] = 0.60
+    base_semantic = (base_probability > 0.5).astype(np.uint8)
+    candidate = np.full((21, 21), 0.55, dtype=np.float32)
+    candidate[4:17, 4:17] = 0.95
+
+    cls, score, details = instance_semantic_vote(
+        instance,
+        base_semantic,
+        semantic_probability=base_probability,
+        candidate_semantic_probability=candidate,
+        mode="conservative_dual",
+        core_fraction=0.30,
+        return_details=True,
+    )
+
+    assert cls == 1 and score > 0.85
+    assert details["dual_override"] is True
+    assert details["dual_reason"] == "pearlite_to_ferrite_black_rim"
+
+
+def test_conservative_dual_rejects_uniform_ferrite_bias():
+    instance = np.ones((21, 21), dtype=bool)
+    base_probability = np.full((21, 21), 0.40, dtype=np.float32)
+    base_semantic = np.zeros((21, 21), dtype=np.uint8)
+    base_semantic.flat[::3] = 1
+    candidate = np.full((21, 21), 0.95, dtype=np.float32)
+
+    cls, score, details = instance_semantic_vote(
+        instance,
+        base_semantic,
+        semantic_probability=base_probability,
+        candidate_semantic_probability=candidate,
+        mode="conservative_dual",
+        return_details=True,
+    )
+
+    assert cls == 0 and score < 0.5
+    assert details["dual_override"] is False
+    assert details["dual_reason"] == "gate_rejected"
+
+
 def test_affinity_deployment_forwards_semantic_vote_options(monkeypatch, tmp_path):
     captured = {}
 

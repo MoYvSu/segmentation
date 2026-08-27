@@ -81,6 +81,58 @@ def predict_maps(
     return image, reference_native, affinity_watershed_output, affinity_boundary_native
 
 
+@torch.no_grad()
+def predict_maps_with_challenger(
+    system,
+    semantic_challenger,
+    image_path,
+    image_size,
+    device,
+    fusion_mode="mean",
+    fusion_kwargs=None,
+):
+    """Predict fixed V6 geometry plus a decoder-only semantic challenger.
+
+    V6 remains the foreground source used by watershed.  The challenger sees
+    the same frozen encoder features and is returned only for instance voting.
+    """
+    image, tensor, pad_h, pad_w = prepare_image(image_path, image_size, device)
+    original_size = image.shape[:2]
+    reference_output = system.reference_model(tensor)
+    features = [feature.detach() for feature in system.reference_model.encoder(tensor)]
+    geometry_features = features
+    if system.geometry_feature_adapter is not None:
+        geometry_features = system.geometry_feature_adapter(features, gated=True)
+    affinity_output = system.geometry_decoder(geometry_features)["affinity_logits"]
+    challenger_output = semantic_challenger(features)
+
+    reference_native = crop_letterbox_output(
+        reference_output, image_size, pad_h, pad_w, original_size
+    ).cpu()
+    challenger_native = crop_letterbox_output(
+        challenger_output, image_size, pad_h, pad_w, original_size
+    ).cpu()
+    affinity_boundary = affinity_boundary_probability(
+        affinity_output,
+        mode=fusion_mode,
+        **(fusion_kwargs or {}),
+    )
+    affinity_boundary_native = crop_letterbox_output(
+        affinity_boundary, image_size, pad_h, pad_w, original_size
+    ).cpu()
+    affinity_logits_native = probability_to_logit(affinity_boundary_native)
+    affinity_watershed_output = torch.cat(
+        [reference_native[:, :1], affinity_logits_native], dim=1
+    )
+    return (
+        image,
+        reference_native,
+        affinity_watershed_output,
+        affinity_boundary_native,
+        challenger_native[:, :1],
+    )
+
+
 def postprocess(
     output,
     original_size,
@@ -90,6 +142,7 @@ def postprocess(
     boundary_threshold,
     save_visualization,
     image_rgb=None,
+    semantic_challenger_logits=None,
 ):
     return post_process_prediction_boundary(
         output=output,
@@ -145,7 +198,23 @@ def postprocess(
             "color_min_separation": float(
                 infer_cfg.get("semantic_vote_color_min_separation", 1.0)
             ),
+            "dual_p2f_base_min": float(
+                infer_cfg.get("semantic_vote_dual_p2f_base_min", 0.35)
+            ),
+            "dual_p2f_candidate_min": float(
+                infer_cfg.get("semantic_vote_dual_p2f_candidate_min", 0.85)
+            ),
+            "dual_f2p_base_max": float(
+                infer_cfg.get("semantic_vote_dual_f2p_base_max", 0.65)
+            ),
+            "dual_f2p_candidate_max": float(
+                infer_cfg.get("semantic_vote_dual_f2p_candidate_max", 0.15)
+            ),
+            "dual_p2f_min_core_gain": float(
+                infer_cfg.get("semantic_vote_dual_p2f_min_core_gain", 0.08)
+            ),
         },
+        semantic_challenger_logits=semantic_challenger_logits,
         original_image_rgb=image_rgb,
         use_center_seeds=False,
         save_visualization=save_visualization,

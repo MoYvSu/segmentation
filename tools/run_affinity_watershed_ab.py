@@ -29,9 +29,11 @@ from utils.affinity_deployment import (
     crop_letterbox_output,
     postprocess,
     predict_maps,
+    predict_maps_with_challenger,
     probability_to_logit,
 )
 from utils.config import load_config, project_path
+from utils.semantic_challenger import build_semantic_challenger
 from utils.instance_metrics import (
     evaluate_instance_pair,
     load_labelme_instances,
@@ -110,11 +112,14 @@ def main():
     device = torch.device(
         "cuda" if device_name == "cuda" and torch.cuda.is_available() else "cpu"
     )
-    system, _, _, _ = build_system(config, cfg, device)
+    system, reference_path, _, _ = build_system(config, cfg, device)
     checkpoint_path = project_path(config, args.affinity_checkpoint)
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     load_geometry_checkpoint_state(system, checkpoint)
     system.eval()
+    semantic_challenger, challenger_metadata = build_semantic_challenger(
+        config, system, reference_path, device
+    )
 
     image_size = int(cfg.get("input_size", config["data"]["image_size"]))
     infer_cfg = config["inference"]
@@ -160,9 +165,27 @@ def main():
     for image_path in val_images:
         basename = image_path.stem
         started = time.time()
-        image, reference_output, affinity_output, boundary_prob = predict_maps(
-            system, image_path, image_size, device, args.fusion_mode, fusion_kwargs
-        )
+        challenger_logits = None
+        if semantic_challenger is None:
+            image, reference_output, affinity_output, boundary_prob = predict_maps(
+                system, image_path, image_size, device, args.fusion_mode, fusion_kwargs
+            )
+        else:
+            (
+                image,
+                reference_output,
+                affinity_output,
+                boundary_prob,
+                challenger_logits,
+            ) = predict_maps_with_challenger(
+                system,
+                semantic_challenger,
+                image_path,
+                image_size,
+                device,
+                args.fusion_mode,
+                fusion_kwargs,
+            )
         prediction_seconds = time.time() - started
         gt_map, gt_class_map, _ = load_labelme_instances(
             image_path.with_suffix(".json"), image.shape[:2]
@@ -181,6 +204,9 @@ def main():
                 threshold,
                 True,
                 image_rgb=image,
+                semantic_challenger_logits=(
+                    challenger_logits if source == "affinity" else None
+                ),
             )
             if source == "affinity":
                 cv2.imwrite(
@@ -214,9 +240,23 @@ def main():
     ]
     for image_path in monitor_images:
         basename = image_path.stem
-        image, _, affinity_output, boundary_prob = predict_maps(
-            system, image_path, image_size, device, args.fusion_mode, fusion_kwargs
-        )
+        challenger_logits = None
+        if semantic_challenger is None:
+            image, _, affinity_output, boundary_prob = predict_maps(
+                system, image_path, image_size, device, args.fusion_mode, fusion_kwargs
+            )
+        else:
+            image, _, affinity_output, boundary_prob, challenger_logits = (
+                predict_maps_with_challenger(
+                    system,
+                    semantic_challenger,
+                    image_path,
+                    image_size,
+                    device,
+                    args.fusion_mode,
+                    fusion_kwargs,
+                )
+            )
         for arm_name, threshold, source in arms:
             if source != "affinity":
                 continue
@@ -231,6 +271,7 @@ def main():
                 threshold,
                 True,
                 image_rgb=image,
+                semantic_challenger_logits=challenger_logits,
             )
             cv2.imwrite(
                 str(arm_dir / f"{basename}_affinity_{args.fusion_mode}_boundary.png"),
@@ -251,6 +292,7 @@ def main():
             "foreground, marker, or postprocess input"
         ),
         "fusion": {"mode": args.fusion_mode, **fusion_kwargs},
+        "semantic_challenger": challenger_metadata,
         "reference_boundary_threshold": baseline_threshold,
         "fixed_postprocess": {
             "min_instance_area": int(infer_cfg.get("min_instance_area", 50)),

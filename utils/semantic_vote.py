@@ -132,6 +132,7 @@ def instance_semantic_vote(
     instance_mask: np.ndarray,
     semantic_mask: np.ndarray,
     semantic_probability: Optional[np.ndarray] = None,
+    candidate_semantic_probability: Optional[np.ndarray] = None,
     mode: str = "hard_majority",
     erode_width: int = 0,
     threshold: float = 0.5,
@@ -143,6 +144,11 @@ def instance_semantic_vote(
     color_uncertain_high: float = 0.65,
     color_weight: float = 0.25,
     color_min_separation: float = 1.0,
+    dual_p2f_base_min: float = 0.35,
+    dual_p2f_candidate_min: float = 0.85,
+    dual_f2p_base_max: float = 0.65,
+    dual_f2p_candidate_max: float = 0.15,
+    dual_p2f_min_core_gain: float = 0.08,
     return_details: bool = False,
 ):
     """Classify one instance and optionally expose the vote components."""
@@ -176,6 +182,7 @@ def instance_semantic_vote(
     normalized_mode = str(mode).strip().lower()
     core_mask = vote_mask
     core_weights = np.ones(instance_mask.shape, dtype=np.float32)
+    dual_details = {}
     if normalized_mode == "hard_majority" or semantic_probability is None:
         score = hard_ratio
     else:
@@ -195,10 +202,77 @@ def instance_semantic_vote(
             score = robust_weighted_mean(
                 probability[core_mask], core_weights[core_mask]
             )
+        elif normalized_mode == "conservative_dual":
+            if candidate_semantic_probability is None:
+                raise ValueError(
+                    "conservative_dual requires candidate_semantic_probability"
+                )
+            core_mask, core_weights = adaptive_instance_core(
+                instance_mask,
+                fraction=core_fraction,
+                min_pixels=core_min_pixels,
+                distance_power=core_distance_power,
+            )
+            candidate_probability = np.asarray(
+                candidate_semantic_probability, dtype=np.float32
+            )
+            if candidate_probability.shape != probability.shape:
+                raise ValueError(
+                    "candidate semantic probability shape mismatch: "
+                    f"{candidate_probability.shape} vs {probability.shape}"
+                )
+            base_core_score = robust_weighted_mean(
+                probability[core_mask], core_weights[core_mask]
+            )
+            candidate_core_score = robust_weighted_mean(
+                candidate_probability[core_mask], core_weights[core_mask]
+            )
+            candidate_full_score = float(
+                np.mean(candidate_probability[instance_mask])
+            )
+            base_class = CLASS_FERRITE if hard_ratio > float(threshold) else CLASS_PEARLITE
+            candidate_class = (
+                CLASS_FERRITE
+                if candidate_core_score > float(threshold)
+                else CLASS_PEARLITE
+            )
+            core_gain = max(
+                float(candidate_core_score - candidate_full_score),
+                float(base_core_score - hard_ratio),
+            )
+            override = False
+            reason = "agreement"
+            if base_class != candidate_class:
+                reason = "gate_rejected"
+                if base_class == CLASS_PEARLITE:
+                    override = (
+                        hard_ratio >= float(dual_p2f_base_min)
+                        and candidate_core_score >= float(dual_p2f_candidate_min)
+                        and core_gain >= float(dual_p2f_min_core_gain)
+                    )
+                    if override:
+                        reason = "pearlite_to_ferrite_black_rim"
+                else:
+                    override = (
+                        hard_ratio <= float(dual_f2p_base_max)
+                        and candidate_core_score <= float(dual_f2p_candidate_max)
+                    )
+                    if override:
+                        reason = "ferrite_to_pearlite_high_confidence"
+            score = candidate_core_score if override else hard_ratio
+            dual_details = {
+                "base_core_score": float(base_core_score),
+                "candidate_core_score": float(candidate_core_score),
+                "candidate_full_score": float(candidate_full_score),
+                "candidate_class": int(candidate_class),
+                "dual_core_gain": float(core_gain),
+                "dual_override": bool(override),
+                "dual_reason": reason,
+            }
         else:
             raise ValueError(
                 "semantic_vote_mode must be hard_majority, probability_mean, "
-                "hybrid, adaptive_core, or adaptive_core_lab; "
+                "hybrid, adaptive_core, adaptive_core_lab, or conservative_dual; "
                 f"got {mode!r}"
             )
     semantic_score = float(score)
@@ -240,6 +314,7 @@ def instance_semantic_vote(
                 None if lab_prior is None
                 else float(lab_prior.get("threshold", 0.0))
             ),
+            **dual_details,
         }
         return cls, score, details
     return cls, score

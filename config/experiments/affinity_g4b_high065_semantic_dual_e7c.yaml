@@ -1,0 +1,25 @@
+# E7c-0: preserve the proven V6/G4b geometry and let E7b propose only sparse
+# instance-class corrections.  No challenger probability enters foreground,
+# marker generation, affinity fusion, or watershed.
+_base: ../inference/final_affinity_g4b_high065.yaml
+
+semantic_challenger:
+  enabled: true
+  checkpoint: outputs/stage2_semantic_e7b_decoder20/best_model_stage2.pth
+
+inference:
+  output_dir: outputs/submission_affinity_g4b_high065_semantic_dual_e7c
+  semantic_vote_mode: conservative_dual
+  semantic_vote_threshold: 0.50
+  semantic_vote_core_fraction: 0.40
+  semantic_vote_core_min_pixels: 8
+  semantic_vote_core_distance_power: 2.0
+  # E7b has a strong pearl­ite -> ferrite bias, so that direction requires
+  # an uncertain V6 vote, a very confident E7b core, and a dark-rim signature.
+  semantic_vote_dual_p2f_base_min: 0.35
+  semantic_vote_dual_p2f_candidate_min: 0.85
+  semantic_vote_dual_p2f_min_core_gain: 0.08
+  # The opposite direction is allowed only when both models are decisive.
+  semantic_vote_dual_f2p_base_max: 0.65
+  semantic_vote_dual_f2p_candidate_max: 0.15
+

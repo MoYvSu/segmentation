@@ -283,6 +283,7 @@ def boundary_watershed_separation(
     marker_dilate_width: Optional[int] = None,
     marker_border_seal_width: int = 0,
     semantic_probability: Optional[np.ndarray] = None,
+    candidate_semantic_probability: Optional[np.ndarray] = None,
     semantic_vote_mode: str = "hard_majority",
     semantic_vote_erode_width: int = 0,
     semantic_vote_threshold: float = 0.5,
@@ -399,6 +400,7 @@ def boundary_watershed_separation(
             instance_mask,
             semantic_mask,
             semantic_probability=semantic_probability,
+            candidate_semantic_probability=candidate_semantic_probability,
             mode=semantic_vote_mode,
             erode_width=semantic_vote_erode_width,
             threshold=semantic_vote_threshold,
@@ -487,6 +489,7 @@ def post_process_prediction_boundary(
     semantic_vote_erode_width: int = 0,
     semantic_vote_threshold: float = 0.5,
     semantic_vote_options: Optional[Dict] = None,
+    semantic_challenger_logits: Optional[torch.Tensor] = None,
     original_image_rgb: Optional[np.ndarray] = None,
     save_visualization: bool = True,
 ) -> Tuple[Dict[str, str], np.ndarray, Dict[int, int]]:
@@ -508,6 +511,15 @@ def post_process_prediction_boundary(
         boundary_logits = boundary_logits * boundary_logit_scale
 
     seg_prob = torch.sigmoid(seg_logits).numpy()
+    candidate_seg_prob = None
+    if semantic_challenger_logits is not None:
+        challenger = semantic_challenger_logits
+        if challenger.ndim == 3:
+            challenger = challenger.unsqueeze(0)
+        challenger = F.interpolate(
+            challenger.float(), size=(h, w), mode="bilinear", align_corners=True
+        )
+        candidate_seg_prob = torch.sigmoid(challenger[0, 0].cpu()).numpy()
     boundary_prob = torch.sigmoid(boundary_logits).numpy()
     center_prob = (
         torch.sigmoid(center_logits).numpy()
@@ -560,6 +572,7 @@ def post_process_prediction_boundary(
         marker_boundary_mask=marker_boundary_mask,
         marker_border_seal_width=marker_border_seal_width,
         semantic_probability=seg_prob,
+        candidate_semantic_probability=candidate_seg_prob,
         semantic_vote_mode=semantic_vote_mode,
         semantic_vote_erode_width=semantic_vote_erode_width,
         semantic_vote_threshold=semantic_vote_threshold,

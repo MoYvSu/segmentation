@@ -24,8 +24,13 @@ from train_affinity_geometry_g1 import (
     validate_semantic_geometry_contract,
 )
 from train_offset_geometry import file_sha256
-from utils.affinity_deployment import postprocess, predict_maps
+from utils.affinity_deployment import (
+    postprocess,
+    predict_maps,
+    predict_maps_with_challenger,
+)
 from utils.config import load_config, project_path
+from utils.semantic_challenger import build_semantic_challenger
 
 
 def main():
@@ -64,6 +69,9 @@ def main():
     semantic_contract = validate_semantic_geometry_contract(
         config, cfg, checkpoint, reference_path, digest
     )
+    semantic_challenger, challenger_metadata = build_semantic_challenger(
+        config, system, reference_path, device
+    )
     system.eval()
     fusion_mode = str(deployment.get("fusion_mode", "gated"))
     fusion_kwargs = {
@@ -86,14 +94,28 @@ def main():
     for image_name in list_images(str(test_dir)):
         image_path = Path(image_name)
         started = time.time()
-        image, _, affinity_output, _ = predict_maps(
-            system,
-            image_path,
-            int(cfg.get("input_size", 1024)),
-            device,
-            fusion_mode,
-            fusion_kwargs,
-        )
+        challenger_logits = None
+        if semantic_challenger is None:
+            image, _, affinity_output, _ = predict_maps(
+                system,
+                image_path,
+                int(cfg.get("input_size", 1024)),
+                device,
+                fusion_mode,
+                fusion_kwargs,
+            )
+        else:
+            image, _, affinity_output, _, challenger_logits = (
+                predict_maps_with_challenger(
+                    system,
+                    semantic_challenger,
+                    image_path,
+                    int(cfg.get("input_size", 1024)),
+                    device,
+                    fusion_mode,
+                    fusion_kwargs,
+                )
+            )
         _, instance_map, class_map = postprocess(
             affinity_output,
             image.shape[:2],
@@ -103,6 +125,7 @@ def main():
             threshold,
             save_visualization,
             image_rgb=image,
+            semantic_challenger_logits=challenger_logits,
         )
         results.append({
             "image": image_path.name,
@@ -123,6 +146,7 @@ def main():
         "reference_checkpoint_sha256": file_sha256(reference_path),
         "semantic_state_digest": digest,
         "semantic_geometry_contract": semantic_contract,
+        "semantic_challenger": challenger_metadata,
         "fusion": {"mode": fusion_mode, **fusion_kwargs},
         "inference": {
             "boundary_threshold": threshold,
@@ -151,6 +175,11 @@ def main():
                     "semantic_vote_color_uncertain_high": 0.65,
                     "semantic_vote_color_weight": 0.25,
                     "semantic_vote_color_min_separation": 1.0,
+                    "semantic_vote_dual_p2f_base_min": 0.35,
+                    "semantic_vote_dual_p2f_candidate_min": 0.85,
+                    "semantic_vote_dual_f2p_base_max": 0.65,
+                    "semantic_vote_dual_f2p_candidate_max": 0.15,
+                    "semantic_vote_dual_p2f_min_core_gain": 0.08,
                 }.items()
             },
             "max_instance_id": int(
