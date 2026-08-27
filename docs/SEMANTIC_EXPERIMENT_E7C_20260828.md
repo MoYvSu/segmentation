@@ -69,6 +69,9 @@ GT 新增一个 IoU `0.631` 的有效匹配。总分下降约 `0.061` 并非该�
 已确认 E7b 能逐图纠正少量实例，选择 relaxed 作为下一目检候选；strict 和 medium 均保留。
 
 部署配置为
-`config/experiments/affinity_g4b_high065_semantic_dual_e7c_relaxed.yaml`。它预计只改变
-67/6178 个测试实例的类别，不改变任何实例像素、实例数或 `<=255` 输出约束。最终是否晋级
+`config/experiments/affinity_g4b_high065_semantic_dual_e7c_relaxed.yaml`。它只改变
+67/6178 个测试实例的类别，不改变任何实例像素、实例数或 `<=255` 输出约束。完整 68 图
+重跑已验证：实例图 geometry mismatch 为 0，翻转数与缓存重放均严格等于 67。产物位于
+`outputs/submission_affinity_g4b_high065_semantic_dual_e7c_relaxed/`，审计报告为
+`outputs/analysis_e7c_relaxed_vs_g4b.json`。最终是否晋级
 仍由成对可视化和黑盒提交决定，不能只看六图代理总分。
