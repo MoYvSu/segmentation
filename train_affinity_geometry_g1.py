@@ -28,7 +28,11 @@ from data.sam2_geometry_dataset import SAM2GeometryDataset
 from inference import build_model as build_reference_model
 from models.affinity_geometry import AffinityGeometryDecoder
 from models.gda_mim import GenerativeDomainAdapterPyramid
-from models.offset_geometry import FrozenSemanticGeometrySystem, semantic_state_digest
+from models.offset_geometry import (
+    FrozenSemanticGeometrySystem,
+    lora_state_dict_digest,
+    semantic_state_digest,
+)
 from train_affinity_geometry_g0 import edge_metrics
 from train_offset_geometry import (
     colorize_instances,
@@ -64,6 +68,47 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("train_affinity_geometry_g1")
+
+
+def validate_semantic_geometry_contract(
+    config, cfg, checkpoint, reference_path, actual_semantic_digest
+):
+    """Allow decoder-only semantic overrides while protecting geometry features."""
+
+    expected = checkpoint.get("semantic_state_digest")
+    if not expected or expected == actual_semantic_digest:
+        return "exact"
+
+    override_base = cfg.get("semantic_decoder_override_base", "")
+    if not override_base:
+        raise RuntimeError(
+            "Affinity checkpoint references a different semantic state; set "
+            "semantic_decoder_override_base only for a decoder-only checkpoint"
+        )
+    base_path = project_path(config, override_base)
+    base_checkpoint = torch.load(
+        base_path, map_location="cpu", weights_only=False
+    )
+    override_checkpoint = torch.load(
+        reference_path, map_location="cpu", weights_only=False
+    )
+    base_lora = lora_state_dict_digest(
+        base_checkpoint.get("lora_state_dict", {})
+    )
+    override_lora = lora_state_dict_digest(
+        override_checkpoint.get("lora_state_dict", {})
+    )
+    if base_lora != override_lora:
+        raise RuntimeError(
+            "Semantic override changed encoder LoRA tensors and is incompatible "
+            "with the frozen affinity geometry checkpoint"
+        )
+    logger.warning(
+        "Semantic decoder override accepted: geometry LoRA is byte-identical "
+        "to %s; only semantic decoder differences are allowed",
+        base_path,
+    )
+    return "decoder_only_override"
 
 
 def load_geometry_checkpoint_state(system, checkpoint):
@@ -121,9 +166,9 @@ def build_system(config, cfg, device):
         reference, decoder, geometry_feature_adapter
     ).to(device)
     digest = semantic_state_digest(reference)
-    expected = checkpoint.get("semantic_state_digest")
-    if expected and expected != digest:
-        raise RuntimeError("Affinity checkpoint references a different V6 semantic state")
+    validate_semantic_geometry_contract(
+        config, cfg, checkpoint, reference_path, digest
+    )
     return system, reference_path, init_path, digest
 
 

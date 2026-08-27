@@ -2,15 +2,14 @@
 
 ## 结论与主线
 
-当前语义锚点仍是 `outputs/stage2_v6/best_model_stage2.pth`；几何候选主线已转为
-“冻结 V6 语义 + 8 通道 affinity + G2/G3 SAM2 无类别伪实例监督 → gated-mean boundary
-→ 受阻分水岭 → 语义投票”。V6/B2 边界路线继续作为可复现基线与回退，不应误写成已经被
-G3 完全替代。
+当前语义锚点仍是 `outputs/stage2_v6/best_model_stage2.pth`；可复现部署基线为
+“V6 语义 + G4b 8 通道 affinity → gated boundary → `high=0.65` + seal2 + 局部重建
+→ 受阻分水岭 → hard-majority 分类”。V6/B2 边界路线继续作为回退。
 
-G3 在完整部署代理指标上有正信号，但测试目检仍明显欠分割，尚不能证明黑盒竞赛成绩提升。
-训练选模固定走 `gated + mean + boundary_threshold=0.55` 的完整部署路径；GT 前景上的 Oracle
-图重建仅作诊断。协议、G2/G3 结果和阈值风险见
-[`docs/AFFINITY_DEPLOYMENT_EVALUATION.md`](AFFINITY_DEPLOYMENT_EVALUATION.md)。
+G3/G4b 尚不能证明黑盒竞赛成绩提升，测试目检仍以欠分割为主要风险；GT 前景上的 Oracle
+图重建仅作诊断。当前 E7b-A 在固定 G4b 几何上单独训练 semantic decoder，处理小实例粗黑边
+语义错配。详见 [SEMANTIC_TRAINING_E7B_20260827.md](SEMANTIC_TRAINING_E7B_20260827.md)；
+历史 affinity 审计见 [AFFINITY_DEPLOYMENT_EVALUATION.md](AFFINITY_DEPLOYMENT_EVALUATION.md)。
 
 `outputs/stage2_center_heatmap/best_model_stage2.pth` 只保留为负面对照。现有中心 GT 由每个
 Labelme polygon 生成一个种子，polygon 与物理晶粒并不等价；同时中心损失和边界损失共享
@@ -42,7 +41,19 @@ Lab `L*` 的 pooled 单阈值平衡准确率约 `0.9917`，包含边界混色仍
 ```bash
 conda activate sam2_env
 
-# 当前 V6 参考推理
+# 当前固定 G4b 部署基线
+python tools/run_affinity_submission.py \
+  --config config/inference/final_affinity_g4b_high065.yaml
+
+# 当前 E7b-A 语义专项训练（V6 初始化、decoder-only、20 epoch）
+python train_stage2.py \
+  --config config/train/stage2_semantic_e7b_decoder20.yaml
+
+# E7b 完成后：同一 G4b 几何，只替换 semantic decoder
+python tools/run_affinity_submission.py \
+  --config config/experiments/affinity_g4b_high065_semantic_e7b.yaml
+
+# 历史 V6 参考推理
 python inference.py --config config/inference/v6_reference.yaml
 
 # Stage 1 全监督（LoRA 可训练）

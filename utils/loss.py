@@ -17,6 +17,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from utils.semantic_training import instance_balanced_core_bce
+
 
 class BoundaryLoss(nn.Module):
     """
@@ -42,6 +44,11 @@ class BoundaryLoss(nn.Module):
         alpha_boundary: float = 0.1,
         alpha_focal: float = 0.75,
         seg_dice_weight: float = 0.0,
+        semantic_instance_weight: float = 0.0,
+        semantic_core_radius: int = 3,
+        semantic_core_min_pixels: int = 12,
+        semantic_core_boundary_threshold: float = 0.20,
+        semantic_instance_class_balance: bool = True,
         weight_clamp_min: float = 1.0,
         weight_clamp_max: float = 4.0,
         eps: float = 1e-6,
@@ -96,6 +103,17 @@ class BoundaryLoss(nn.Module):
         self.alpha_boundary = alpha_boundary
         self.alpha_focal = alpha_focal
         self.seg_dice_weight = seg_dice_weight
+        self.semantic_instance_weight = float(semantic_instance_weight)
+        self.semantic_core_radius = int(semantic_core_radius)
+        self.semantic_core_min_pixels = int(semantic_core_min_pixels)
+        self.semantic_core_boundary_threshold = float(
+            semantic_core_boundary_threshold
+        )
+        self.semantic_instance_class_balance = bool(
+            semantic_instance_class_balance
+        )
+        self.last_semantic_instance_loss = 0.0
+        self.last_semantic_instance_stats = {}
         self.weight_clamp_min = weight_clamp_min
         self.weight_clamp_max = weight_clamp_max
         self.eps = eps
@@ -190,7 +208,7 @@ class BoundaryLoss(nn.Module):
         ring_loss = (raised_ring * ring_mask).sum() / ring_mask.sum().clamp_min(1.0)
         return core_loss + self.ridge_ring_weight * ring_loss
 
-    def forward(self, pred, target, weight=None):
+    def forward(self, pred, target, weight=None, instance_map=None):
         """
         Args:
             pred: [B, 2/3, H, W] 模型输出
@@ -214,6 +232,8 @@ class BoundaryLoss(nn.Module):
         boundary_target = target[:, 1]    # [B, H, W] 二值边界掩码
 
         # ---- 语义 BCE Loss ----
+        self.last_semantic_instance_loss = 0.0
+        self.last_semantic_instance_stats = {}
         if self.freeze_seg:
             loss_seg = torch.tensor(0.0, device=pred.device, requires_grad=False)
         else:
@@ -235,6 +255,25 @@ class BoundaryLoss(nn.Module):
                 ) / (seg_prob.sum() + seg_target.sum() + eps)
                 dice = 0.5 * (dice0 + dice1)
                 loss_seg = loss_seg + self.seg_dice_weight * dice
+
+            if self.semantic_instance_weight > 0:
+                if instance_map is None:
+                    raise ValueError(
+                        "semantic_instance_weight > 0 requires instance_map"
+                    )
+                instance_loss, instance_stats = instance_balanced_core_bce(
+                    seg_logits,
+                    seg_target,
+                    instance_map,
+                    boundary_target,
+                    core_radius=self.semantic_core_radius,
+                    boundary_threshold=self.semantic_core_boundary_threshold,
+                    min_core_pixels=self.semantic_core_min_pixels,
+                    class_balance=self.semantic_instance_class_balance,
+                )
+                loss_seg = loss_seg + self.semantic_instance_weight * instance_loss
+                self.last_semantic_instance_loss = float(instance_loss.detach())
+                self.last_semantic_instance_stats = instance_stats
 
         # ---- 边界 Focal Loss × EDT 权重 ----
         if self.freeze_boundary:

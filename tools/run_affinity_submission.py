@@ -21,6 +21,7 @@ from data.mim_dataset import list_images
 from train_affinity_geometry_g1 import (
     build_system,
     load_geometry_checkpoint_state,
+    validate_semantic_geometry_contract,
 )
 from train_offset_geometry import file_sha256
 from utils.affinity_deployment import postprocess, predict_maps
@@ -60,9 +61,9 @@ def main():
         checkpoint_path, map_location="cpu", weights_only=False
     )
     load_geometry_checkpoint_state(system, checkpoint)
-    expected = checkpoint.get("semantic_state_digest")
-    if expected and expected != digest:
-        raise RuntimeError("affinity checkpoint semantic digest mismatch")
+    semantic_contract = validate_semantic_geometry_contract(
+        config, cfg, checkpoint, reference_path, digest
+    )
     system.eval()
     fusion_mode = str(deployment.get("fusion_mode", "gated"))
     fusion_kwargs = {
@@ -121,6 +122,7 @@ def main():
         "reference_checkpoint": os.path.abspath(reference_path),
         "reference_checkpoint_sha256": file_sha256(reference_path),
         "semantic_state_digest": digest,
+        "semantic_geometry_contract": semantic_contract,
         "fusion": {"mode": fusion_mode, **fusion_kwargs},
         "inference": {
             "boundary_threshold": threshold,

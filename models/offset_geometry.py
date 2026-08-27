@@ -158,3 +158,46 @@ def semantic_state_digest(reference_model: nn.Module) -> str:
     if not selected:
         raise ValueError("semantic digest selected no tensors")
     return digest.hexdigest()
+
+
+def geometry_feature_state_digest(reference_model: nn.Module) -> str:
+    """Hash only trainable encoder adapters that affect geometry features.
+
+    A semantic-decoder-only update is compatible with a frozen affinity
+    decoder.  LoRA changes are not, because affinity consumes encoder features.
+    """
+
+    digest = hashlib.sha256()
+    selected = []
+    for name, tensor in reference_model.encoder.trunk.state_dict().items():
+        if "lora_A" in name or "lora_B" in name:
+            selected.append((f"encoder.trunk.{name}", tensor))
+    for name, tensor in sorted(selected, key=lambda item: item[0]):
+        value = tensor.detach().cpu().contiguous()
+        digest.update(name.encode("utf-8"))
+        digest.update(str(value.dtype).encode("ascii"))
+        digest.update(str(tuple(value.shape)).encode("ascii"))
+        digest.update(value.numpy().tobytes())
+    if not selected:
+        raise ValueError("geometry feature digest selected no LoRA tensors")
+    return digest.hexdigest()
+
+
+def lora_state_dict_digest(state_dict: dict) -> str:
+    """Hash a checkpoint ``lora_state_dict`` for override compatibility."""
+
+    selected = [
+        (str(name), tensor)
+        for name, tensor in state_dict.items()
+        if "lora_A" in str(name) or "lora_B" in str(name)
+    ]
+    if not selected:
+        raise ValueError("checkpoint contains no LoRA tensors")
+    digest = hashlib.sha256()
+    for name, tensor in sorted(selected, key=lambda item: item[0]):
+        value = tensor.detach().cpu().contiguous()
+        digest.update(name.encode("utf-8"))
+        digest.update(str(value.dtype).encode("ascii"))
+        digest.update(str(tuple(value.shape)).encode("ascii"))
+        digest.update(value.numpy().tobytes())
+    return digest.hexdigest()

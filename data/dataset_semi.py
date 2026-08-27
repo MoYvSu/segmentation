@@ -29,6 +29,7 @@ from data.dataset import (
     split_train_val_indices,
 )
 from data.native_multiscale import native_multiscale_crop
+from utils.instance_metrics import load_labelme_instances
 
 
 # =============================================================================
@@ -59,6 +60,7 @@ class LabeledDataset(Dataset):
         boundary_target_key: str = "boundary_soft",
         center_sigma: float = 4.0,
         native_multiscale_config: Optional[dict] = None,
+        include_instance_map: bool = False,
     ):
         super().__init__()
         self.data_dir = data_dir
@@ -76,6 +78,14 @@ class LabeledDataset(Dataset):
         self.boundary_target_key = boundary_target_key
         self.center_sigma = center_sigma
         self.native_multiscale_config = native_multiscale_config or {}
+        self.include_instance_map = bool(include_instance_map)
+        if self.include_instance_map and self.native_multiscale_config.get(
+            "enabled", False
+        ):
+            raise ValueError(
+                "instance-aware semantic loss currently requires "
+                "data.native_multiscale.enabled=false"
+            )
 
         valid_exts = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
         self.samples: List[Tuple[str, str]] = []
@@ -115,11 +125,18 @@ class LabeledDataset(Dataset):
             boundary = np.asarray(gt_data[self.boundary_target_key], dtype=np.float32)
         else:
             boundary = boundary_core.astype(np.float32)
+        instance_map = None
+        if self.include_instance_map:
+            json_path = os.path.splitext(img_path)[0] + ".json"
+            instance_map, _, _ = load_labelme_instances(
+                json_path, image_shape=(h_orig, w_orig)
+            )
 
         from data.dataset import letterbox_mask, compute_boundary_weight
         native_cfg = self.native_multiscale_config
         use_native_multiscale = bool(self.augment and native_cfg.get("enabled", False))
         sample_meta = {}
+        instance_lb = None
         if use_native_multiscale:
             (
                 image_lb, semantic_lb, boundary_lb, boundary_core_lb,
@@ -142,6 +159,10 @@ class LabeledDataset(Dataset):
             semantic_lb, _, _, _ = letterbox_mask(semantic, self.image_size)
             boundary_lb, _, _, _ = letterbox_mask(boundary, self.image_size)
             boundary_core_lb, _, _, _ = letterbox_mask(boundary_core, self.image_size)
+            if instance_map is not None:
+                instance_lb, _, _, _ = letterbox_mask(
+                    instance_map, self.image_size
+                )
             center_lb = center_heatmap_from_points(
                 self.instance_centers.get(img_path, []),
                 scale=scale,
@@ -156,13 +177,48 @@ class LabeledDataset(Dataset):
         )
 
         if self.augment and self.crop_size > 0 and not use_native_multiscale:
-            image_lb, semantic_lb, boundary_lb, weight_lb, center_lb = random_crop(
-                image_lb, semantic_lb, boundary_lb, weight_lb, center_lb, self.crop_size
+            cropped = random_crop(
+                image_lb,
+                semantic_lb,
+                boundary_lb,
+                weight_lb,
+                center_lb,
+                self.crop_size,
+                instance_map=instance_lb,
             )
+            if instance_lb is None:
+                (
+                    image_lb,
+                    semantic_lb,
+                    boundary_lb,
+                    weight_lb,
+                    center_lb,
+                ) = cropped
+            else:
+                (
+                    image_lb,
+                    semantic_lb,
+                    boundary_lb,
+                    weight_lb,
+                    center_lb,
+                    instance_lb,
+                ) = cropped
 
         if self.augment:
-            image_lb, semantic_lb, boundary_lb, weight_lb, center_lb = self._augment(
-                image_lb, semantic_lb, boundary_lb, weight_lb, center_lb
+            (
+                image_lb,
+                semantic_lb,
+                boundary_lb,
+                weight_lb,
+                center_lb,
+                instance_lb,
+            ) = self._augment(
+                image_lb,
+                semantic_lb,
+                boundary_lb,
+                weight_lb,
+                center_lb,
+                instance_lb,
             )
 
         image_tensor = torch.from_numpy(image_lb).float().permute(2, 0, 1) / 255.0
@@ -172,7 +228,7 @@ class LabeledDataset(Dataset):
         target_tensor = torch.cat([semantic_tensor, boundary_tensor, center_tensor], dim=0)
         weight_tensor = torch.from_numpy(weight_lb).float().unsqueeze(0)
 
-        return {
+        item = {
             "image": image_tensor,
             "target": target_tensor,
             "weight": weight_tensor,
@@ -183,8 +239,15 @@ class LabeledDataset(Dataset):
                 sample_meta.get("requested_source_crop_size", 0)
             ),
         }
+        if instance_lb is not None:
+            item["instance_map"] = torch.from_numpy(
+                np.asarray(instance_lb, dtype=np.int64)
+            )
+        return item
 
-    def _augment(self, image, semantic, boundary, weight, center):
+    def _augment(
+        self, image, semantic, boundary, weight, center, instance_map=None
+    ):
         cfg = self.augment_config
         if cfg.get("horizontal_flip", False) and np.random.rand() < 0.5:
             image = np.ascontiguousarray(image[:, ::-1])
@@ -192,12 +255,16 @@ class LabeledDataset(Dataset):
             boundary = np.ascontiguousarray(boundary[:, ::-1])
             weight = np.ascontiguousarray(weight[:, ::-1])
             center = np.ascontiguousarray(center[:, ::-1])
+            if instance_map is not None:
+                instance_map = np.ascontiguousarray(instance_map[:, ::-1])
         if cfg.get("vertical_flip", False) and np.random.rand() < 0.5:
             image = np.ascontiguousarray(image[::-1, :])
             semantic = np.ascontiguousarray(semantic[::-1, :])
             boundary = np.ascontiguousarray(boundary[::-1, :])
             weight = np.ascontiguousarray(weight[::-1, :])
             center = np.ascontiguousarray(center[::-1, :])
+            if instance_map is not None:
+                instance_map = np.ascontiguousarray(instance_map[::-1, :])
         if cfg.get("rotation", False) and np.random.rand() < 0.5:
             k = np.random.choice([1, 2, 3])
             image = np.ascontiguousarray(np.rot90(image, k))
@@ -205,7 +272,9 @@ class LabeledDataset(Dataset):
             boundary = np.ascontiguousarray(np.rot90(boundary, k))
             weight = np.ascontiguousarray(np.rot90(weight, k))
             center = np.ascontiguousarray(np.rot90(center, k))
-        return image, semantic, boundary, weight, center
+            if instance_map is not None:
+                instance_map = np.ascontiguousarray(np.rot90(instance_map, k))
+        return image, semantic, boundary, weight, center, instance_map
 
 
 # =============================================================================
@@ -452,13 +521,18 @@ def labeled_collate_fn(batch: List[Dict]) -> Dict:
     images = torch.stack([item["image"] for item in batch])
     targets = torch.stack([item["target"] for item in batch])
     weights = torch.stack([item["weight"] for item in batch])
-    return {
+    out = {
         "image": images,
         "target": targets,
         "weight": weights,
         "original_size": [item["original_size"] for item in batch],
         "image_path": [item["image_path"] for item in batch],
     }
+    if batch[0].get("instance_map") is not None:
+        out["instance_map"] = torch.stack(
+            [item["instance_map"] for item in batch]
+        )
+    return out
 
 
 def unlabeled_collate_fn(batch: List[Dict]) -> Dict:

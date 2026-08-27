@@ -19,11 +19,13 @@ Python 环境：`conda activate sam2_env`。
 
 ## 3. 当前架构
 
-当前候选部署路径是：冻结 V6 语义锚点 + 8 通道 affinity geometry + G2/G3 SAM2
-无类别伪实例监督 → gated-mean affinity boundary → 受阻分水岭 → V6 语义投票分类。
-G3 尚未证明黑盒竞赛成绩提升；V6/B2 边界路线保留为可复现基线和回退。
+当前部署基线是：V6 语义锚点 + G4b 8 通道 affinity geometry → gated affinity boundary
+→ `high=0.65` + seal2 + 局部重建 → 受阻分水岭 → hard-majority 分类。
+G4b 尚未证明黑盒竞赛成绩提升；V6/B2 边界路线保留为可复现回退。
 
-checkpoint 晋级必须使用固定 `gated + mean + boundary_threshold=0.55` 的完整部署验证。
+当前 E7b-A 只训练 semantic decoder，冻结 boundary、LoRA 与 affinity。checkpoint 晋级必须
+在固定 G4b 部署链上同时检查类别 mIoU 和 ferrite 平均面积代理。若 LoRA 变化，禁止直接复用
+G4b geometry；decoder-only 替换必须通过 LoRA 字节级一致性校验。
 GT 前景上的 affinity 连通分量重建属于 Oracle 诊断，禁止作为选模指标。详细协议见
 `docs/AFFINITY_DEPLOYMENT_EVALUATION.md`。
 

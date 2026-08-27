@@ -484,6 +484,9 @@ def build_dataloaders(config, disable_unlabeled_appearance_aug=False,
     boundary_weight_ceil = boundary_cfg.get("edt_weight_ceil", 4.0)
     boundary_target_key = boundary_cfg.get("target_key", "boundary_soft")
     crop_size = data_cfg.get("crop_size", 0)
+    include_instance_map = float(
+        train_cfg.get("semantic_instance_weight", 0.0)
+    ) > 0
 
     labeled_dataset = LabeledDataset(
         data_dir=data_dir,
@@ -501,9 +504,11 @@ def build_dataloaders(config, disable_unlabeled_appearance_aug=False,
         boundary_target_key=boundary_target_key,
         center_sigma=data_cfg.get("center_sigma", 4.0),
         native_multiscale_config=data_cfg.get("native_multiscale", {}),
+        include_instance_map=include_instance_map,
     )
 
-    val_dataset = BoundaryDataset(
+    val_dataset_cls = LabeledDataset if include_instance_map else BoundaryDataset
+    val_kwargs = dict(
         data_dir=data_dir,
         gt_dir=gt_dir,
         image_size=image_size,
@@ -518,6 +523,9 @@ def build_dataloaders(config, disable_unlabeled_appearance_aug=False,
         boundary_target_key=boundary_target_key,
         center_sigma=data_cfg.get("center_sigma", 4.0),
     )
+    if include_instance_map:
+        val_kwargs["include_instance_map"] = True
+    val_dataset = val_dataset_cls(**val_kwargs)
 
     if len(labeled_dataset) == 0:
         logger.error(f"Labeled dataset is empty: {data_dir}")
@@ -568,7 +576,8 @@ def build_dataloaders(config, disable_unlabeled_appearance_aug=False,
 
     val_loader = DataLoader(
         val_dataset, batch_size=bs_labeled, shuffle=False,
-        num_workers=num_workers, collate_fn=collate_fn,
+        num_workers=num_workers,
+        collate_fn=labeled_collate_fn if include_instance_map else collate_fn,
         pin_memory=True, worker_init_fn=seed_dataloader_worker,
     )
 
@@ -597,6 +606,7 @@ def train_one_epoch(
     skeleton_filter_cfg=None, freeze_seg=False, freeze_boundary=False,
     seg_mask_region_weight=2.0, boundary_mask_region_weight=0.3,
     seg_sharpen_temperature=1.0,
+    seg_confidence_threshold=0.5,
     sobel_weight=1.0, tv_weight=0.1, tv_dilate_radius=3,
     tv_bg_weight=1.0, tv_boundary_weight=0.1,
     bg_suppress_weight=0.5, bg_suppress_threshold=0.1,
@@ -643,8 +653,10 @@ def train_one_epoch(
     total_sup_loss = 0.0
     total_unsup_loss = 0.0
     total_seg = 0.0
+    total_semantic_instance = 0.0
     total_boundary = 0.0
     total_seg_consist = 0.0
+    total_seg_conf_coverage = 0.0
     total_boundary_consist = 0.0
     total_bnd_max = 0.0
     total_bnd_pos = 0.0
@@ -727,20 +739,36 @@ def train_one_epoch(
         images_labeled = labeled_batch["image"].to(device)
         targets_labeled = labeled_batch["target"].to(device)
         weights_labeled = labeled_batch["weight"].to(device)
+        instance_maps_labeled = labeled_batch.get("instance_map")
+        if instance_maps_labeled is not None:
+            instance_maps_labeled = instance_maps_labeled.to(device)
 
         # 渐进式外观增强：仅施加于学生输入（有标签路径）
         if augmentor is not None:
-            images_labeled = augmentor(images_labeled)
+            images_labeled = augmentor(
+                images_labeled, boundary_targets=targets_labeled[:, 1]
+            )
 
         optimizer.zero_grad()
 
         if use_amp:
             with autocast('cuda'):
                 out_labeled = student_model(images_labeled, output_size=targets_labeled.shape[-2:])
-                sup_loss, seg_val, boundary_val = criterion(out_labeled, targets_labeled, weights_labeled)
+                sup_loss, seg_val, boundary_val = criterion(
+                    out_labeled,
+                    targets_labeled,
+                    weights_labeled,
+                    instance_map=instance_maps_labeled,
+                )
         else:
             out_labeled = student_model(images_labeled, output_size=targets_labeled.shape[-2:])
-            sup_loss, seg_val, boundary_val = criterion(out_labeled, targets_labeled, weights_labeled)
+            sup_loss, seg_val, boundary_val = criterion(
+                out_labeled,
+                targets_labeled,
+                weights_labeled,
+                instance_map=instance_maps_labeled,
+            )
+        semantic_instance_val = criterion.last_semantic_instance_loss
 
         unsup_loss = torch.tensor(0.0, device=device)
         seg_consist_val = 0.0
@@ -777,6 +805,7 @@ def train_one_epoch(
                                 seg_mask_region_weight=seg_mask_region_weight,
                                 boundary_mask_region_weight=boundary_mask_region_weight,
                                 seg_sharpen_temperature=seg_sharpen_temperature,
+                                seg_confidence_threshold=seg_confidence_threshold,
                                 sobel_weight=sobel_weight,
                                 tv_weight=tv_weight,
                                 tv_dilate_radius=tv_dilate_radius,
@@ -812,6 +841,7 @@ def train_one_epoch(
                             seg_mask_region_weight=seg_mask_region_weight,
                             boundary_mask_region_weight=boundary_mask_region_weight,
                             seg_sharpen_temperature=seg_sharpen_temperature,
+                            seg_confidence_threshold=seg_confidence_threshold,
                             sobel_weight=sobel_weight,
                             tv_weight=tv_weight,
                             tv_dilate_radius=tv_dilate_radius,
@@ -881,8 +911,10 @@ def train_one_epoch(
         total_sup_loss += sup_loss.item()
         total_unsup_loss += unsup_loss.item()
         total_seg += seg_val
+        total_semantic_instance += semantic_instance_val
         total_boundary += boundary_val
         total_seg_consist += seg_consist_val
+        total_seg_conf_coverage += bnd_stats.get("seg_conf_coverage", 0.0)
         total_boundary_consist += boundary_consist_val
         total_gda_gate_reg += float(gda_gate_reg.detach())
         total_bnd_max += bnd_stats.get("bnd_max", 0.0)
@@ -895,7 +927,9 @@ def train_one_epoch(
             logger.info(
                 f"  Step {step_idx + 1}/{num_steps}: "
                 f"total={total_loss.item():.4f} "
-                f"sup={sup_loss.item():.4f} (seg={seg_val:.4f} bnd={boundary_val:.4f}) "
+                f"sup={sup_loss.item():.4f} "
+                f"(seg={seg_val:.4f} inst={semantic_instance_val:.4f} "
+                f"bnd={boundary_val:.4f}) "
                 f"unsup={unsup_loss.item():.4f} (s_c={seg_consist_val:.4f} b_c={boundary_consist_val:.4f}) "
                 f"gda_l1={float(gda_gate_reg.detach()):.5f}"
             )
@@ -913,8 +947,10 @@ def train_one_epoch(
         "sup_loss": total_sup_loss / n,
         "unsup_loss": total_unsup_loss / n,
         "seg": total_seg / n,
+        "semantic_instance": total_semantic_instance / n,
         "boundary": total_boundary / n,
         "seg_consist": total_seg_consist / n,
+        "seg_conf_coverage": total_seg_conf_coverage / n,
         "boundary_consist": total_boundary_consist / n,
         "gda_gate_l1": total_gda_gate_reg / n,
         "bnd_max": total_bnd_max / n,
@@ -955,8 +991,13 @@ def validate(model, loader, criterion, device):
         images = batch["image"].to(device)
         targets = batch["target"].to(device)
         weights = batch["weight"].to(device)
+        instance_map = batch.get("instance_map")
+        if instance_map is not None:
+            instance_map = instance_map.to(device)
         output = model(images, output_size=targets.shape[-2:])
-        total_loss_t, _, _ = criterion(output, targets, weights)
+        total_loss_t, _, _ = criterion(
+            output, targets, weights, instance_map=instance_map
+        )
         total_loss += total_loss_t.item()
         n_batches += 1
 
@@ -1366,6 +1407,19 @@ def main():
         alpha_boundary=train_cfg.get("boundary_alpha", 1.0),
         alpha_focal=train_cfg.get("focal_alpha", 0.75),
         seg_dice_weight=train_cfg.get("seg_dice_weight", 0.0),
+        semantic_instance_weight=train_cfg.get(
+            "semantic_instance_weight", 0.0
+        ),
+        semantic_core_radius=train_cfg.get("semantic_core_radius", 3),
+        semantic_core_min_pixels=train_cfg.get(
+            "semantic_core_min_pixels", 12
+        ),
+        semantic_core_boundary_threshold=train_cfg.get(
+            "semantic_core_boundary_threshold", 0.20
+        ),
+        semantic_instance_class_balance=train_cfg.get(
+            "semantic_instance_class_balance", True
+        ),
         freeze_seg=freeze_seg,
         freeze_boundary=freeze_boundary,
         peak_weight=train_cfg.get("boundary_peak_weight", 0.0),
@@ -1389,8 +1443,18 @@ def main():
     ).to(device)
     logger.info(
         "Supervised loss: BoundaryLoss "
-        "(semantic BCE + boundary Focal x EDT + peak/hard-negative/ridge)"
+        "(semantic BCE/Dice/instance-core + boundary Focal x EDT + "
+        "peak/hard-negative/ridge)"
     )
+    if criterion.semantic_instance_weight > 0:
+        logger.info(
+            "  Semantic instance core: weight=%.3f radius=%dpx "
+            "min_pixels=%d class_balance=%s",
+            criterion.semantic_instance_weight,
+            criterion.semantic_core_radius,
+            criterion.semantic_core_min_pixels,
+            criterion.semantic_instance_class_balance,
+        )
     if criterion.ridge_weight > 0:
         logger.info(
             "  Boundary ridge: mode=%s, weight=%.4f, peak_logit=%.2f, "
@@ -1589,6 +1653,9 @@ def main():
     unsup_seg_weight = semi_cfg.get("unsup_seg_weight", 0.1)
     # 语义一致性目标温度锐化（方案 A）：T<1 推向 0/1，对抗语义输出塌向 0.5
     unsup_seg_sharpen_temperature = semi_cfg.get("unsup_seg_sharpen_temperature", 1.0)
+    unsup_seg_confidence_threshold = semi_cfg.get(
+        "unsup_seg_confidence_threshold", 0.5
+    )
     unsup_rampup_epochs = semi_cfg.get("unsup_rampup_epochs", 10)
 
     if adaptive_ema and need_teacher:
@@ -1922,6 +1989,14 @@ def main():
             sem_w * initial_val_metrics["mean_iou"]
             + bnd_w * initial_val_metrics["boundary_iou"]
         )
+        refine_head = getattr(
+            student_model.decoder, "boundary_refine_head", None
+        )
+        refine_out_weight_norm = (
+            float(refine_head.out.weight.detach().float().norm())
+            if refine_head is not None
+            else 0.0
+        )
         initial_diagnostics = {
             "optimizer_steps": 0,
             "gda_gate_stats": (
@@ -1929,10 +2004,7 @@ def main():
                 if getattr(student_model, "boundary_adapter", None) is not None
                 else []
             ),
-            "refine_out_weight_norm": float(
-                student_model.decoder.boundary_refine_head.out.weight
-                .detach().float().norm()
-            ),
+            "refine_out_weight_norm": refine_out_weight_norm,
             "val_loss": initial_val_metrics["loss"],
             "mIoU": initial_val_metrics["mean_iou"],
             "boundary_iou": initial_val_metrics["boundary_iou"],
@@ -1969,6 +2041,7 @@ def main():
         + (f" (ramp-up {unsup_rampup_epochs}ep)" if unsup_rampup_epochs > 0 else "")
         + (f" | seg sharpen T={unsup_seg_sharpen_temperature}"
            if unsup_seg_sharpen_temperature < 1.0 else " | seg sharpen OFF")
+        + f" | seg conf>={unsup_seg_confidence_threshold:.2f}"
     )
     logger.info(f"  LR: {semi_cfg.get('learning_rate', train_cfg['learning_rate'])}")
     logger.info("=" * 60)
@@ -2096,6 +2169,7 @@ def main():
             seg_mask_region_weight=seg_mask_region_weight,
             boundary_mask_region_weight=boundary_mask_region_weight,
             seg_sharpen_temperature=unsup_seg_sharpen_temperature,
+            seg_confidence_threshold=unsup_seg_confidence_threshold,
             sobel_weight=sobel_weight,
             tv_weight=tv_weight,
             tv_dilate_radius=tv_dilate_radius,
@@ -2146,9 +2220,18 @@ def main():
             gda_gate_delta_l2, _ = parameter_delta_stats(
                 gda_gate_named_parameters, initial_gda_gate_state
             )
-            refine_out = student_model.decoder.boundary_refine_head.out.weight
-            refine_out_weight_norm = float(refine_out.detach().float().norm())
-            refine_out_weight_max = float(refine_out.detach().abs().max())
+            refine_head = getattr(
+                student_model.decoder, "boundary_refine_head", None
+            )
+            if refine_head is not None:
+                refine_out = refine_head.out.weight
+                refine_out_weight_norm = float(
+                    refine_out.detach().float().norm()
+                )
+                refine_out_weight_max = float(refine_out.detach().abs().max())
+            else:
+                refine_out_weight_norm = 0.0
+                refine_out_weight_max = 0.0
             logger.info(
                 "  Refine diagnostics: "
                 f"steps={train_metrics['optimizer_steps']} "
@@ -2197,10 +2280,13 @@ def main():
             f"sup={train_metrics['sup_loss']:.4f} unsup={train_metrics['unsup_loss']:.4f}"
         )
         logger.info(
-            f"    sup_detail: seg={train_metrics['seg']:.4f} bnd={train_metrics['boundary']:.4f}"
+            f"    sup_detail: seg={train_metrics['seg']:.4f} "
+            f"instance_core={train_metrics['semantic_instance']:.4f} "
+            f"bnd={train_metrics['boundary']:.4f}"
         )
         logger.info(
             f"    unsup_detail: s_c={train_metrics['seg_consist']:.4f} "
+            f"coverage={train_metrics['seg_conf_coverage']:.3f} "
             f"b_c={train_metrics['boundary_consist']:.4f}"
         )
         logger.info(
@@ -2266,8 +2352,10 @@ def main():
             "sup_loss": train_metrics["sup_loss"],
             "unsup_loss": train_metrics["unsup_loss"],
             "seg": train_metrics["seg"],
+            "semantic_instance": train_metrics["semantic_instance"],
             "boundary": train_metrics["boundary"],
             "seg_consist": train_metrics["seg_consist"],
+            "seg_conf_coverage": train_metrics["seg_conf_coverage"],
             "boundary_consist": train_metrics["boundary_consist"],
             "gda_gate_l1": train_metrics["gda_gate_l1"],
             "seg_high_conf": seg_high_conf if seg_high_conf is not None else -1.0,

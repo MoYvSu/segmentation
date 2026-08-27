@@ -330,6 +330,7 @@ def compute_unsupervised_loss(
     seg_mask_region_weight: float = 2.0,
     boundary_mask_region_weight: float = 0.3,
     seg_sharpen_temperature: float = 1.0,
+    seg_confidence_threshold: float = 0.5,
     sobel_weight: float = 1.0,
     tv_weight: float = 0.1,
     tv_dilate_radius: int = 3,
@@ -392,6 +393,8 @@ def compute_unsupervised_loss(
         seg_sharpen_temperature: 语义一致性目标温度锐化系数（1.0=关闭）。
             T<1 时对教师语义概率做 p^(1/T) 锐化推向 0/1，对抗 MSE 软目标
             把学生输出拉向 0.5 的"语义变糊/涌动"。
+        seg_confidence_threshold: 教师语义伪标签的最低二分类置信度，取值
+            [0.5, 1.0]；例如 0.85 仅监督 p<=0.15 或 p>=0.85 的像素。
         sobel_weight: Sobel 梯度一致性损失权重。
         tv_weight: 各向异性 TV 正则化权重。
         tv_dilate_radius: TV 中边界区域膨胀半径（px）。
@@ -440,6 +443,7 @@ def compute_unsupervised_loss(
 
     # ---- 语义伪标签路径（仅当语义分支未冻结时需要 EMA 教师）----
     teacher_seg_prob = None
+    seg_conf_coverage = 0.0
     if not freeze_seg:
         if teacher_model is None:
             raise ValueError(
@@ -475,7 +479,13 @@ def compute_unsupervised_loss(
         loss_seg = torch.tensor(0.0, device=device, requires_grad=False)
     else:
         seg_mse = (student_seg_prob - teacher_seg_prob) ** 2
-        loss_seg = (seg_mse * seg_weight_map).mean()
+        confidence = torch.maximum(teacher_seg_prob, 1.0 - teacher_seg_prob)
+        confidence_mask = (
+            confidence >= float(seg_confidence_threshold)
+        ).to(seg_mse.dtype)
+        seg_conf_coverage = float(confidence_mask.detach().mean())
+        weighted_mask = seg_weight_map * confidence_mask
+        loss_seg = (seg_mse * weighted_mask).sum() / weighted_mask.sum().clamp_min(1.0)
         if sem_boundary_align_weight > 0:
             # 边界-语义对齐：语义梯度应集中在预测边界处，
             # 边界外区域保持平滑（惩罚 |∇semantic| × (1 - boundary_prob)）
@@ -487,7 +497,12 @@ def compute_unsupervised_loss(
     # ---- 边界一致性损失 ----
     if freeze_boundary:
         loss_boundary = torch.tensor(0.0, device=device, requires_grad=False)
-        bnd_stats = {"bnd_max": 0.0, "bnd_pos_frac": 0.0, "bnd_gap": 0.0}
+        bnd_stats = {
+            "bnd_max": 0.0,
+            "bnd_pos_frac": 0.0,
+            "bnd_gap": 0.0,
+            "seg_conf_coverage": seg_conf_coverage,
+        }
     else:
         # ---- 根据 boundary_teacher_mode 选择边界伪标签源 ----
         if boundary_teacher_mode == "ema":
@@ -687,7 +702,7 @@ def compute_unsupervised_loss(
         )
 
         # 边界输出统计（训练日志用，观察输出区间是否被拉开）
-        bnd_stats = {}
+        bnd_stats = {"seg_conf_coverage": seg_conf_coverage}
         with torch.no_grad():
             bnd_stats["bnd_max"] = float(student_boundary_prob.max())
             bnd_stats["bnd_pred_rate"] = float(student_boundary_prob.mean())

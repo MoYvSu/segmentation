@@ -1,7 +1,8 @@
 # 低碳钢金相图像相区分割
 
-> 当前候选路线：冻结 V6 语义锚点 + 8 通道 affinity geometry + SAM2 无类别伪实例监督
-> → affinity boundary → 受阻分水岭 → 语义投票分类。V6/B2 边界路线保留为基线与回退。
+> 当前部署基线：V6 语义锚点 + G4b 8 通道 affinity geometry → gated affinity boundary
+> → `high=0.65` 封边/受阻分水岭 → hard-majority 实例分类。当前训练实验 E7b-A 只修复
+> semantic decoder，不改变 G4b 几何；V6/B2 边界路线保留为回退。
 > 当前状态、入口与产物约定以 [docs/PIPELINE.md](docs/PIPELINE.md) 为准。
 
 颜色先验分析已记录在 [docs/COLOR_SEPARABILITY.md](docs/COLOR_SEPARABILITY.md)。后续对话进程在
@@ -11,13 +12,22 @@
 
 - **语义锚点与参考基线**：`outputs/stage2_v6/best_model_stage2.pth`。其语义分支仍是当前
   可复现锚点，原边界分支作为回退基线。
-- **当前几何候选**：G3 native-crop affinity。完整部署复核显示小幅正信号，但测试图仍有
-  明显欠分割，尚未证明黑盒竞赛分数提升。详见
-  [docs/AFFINITY_DEPLOYMENT_EVALUATION.md](docs/AFFINITY_DEPLOYMENT_EVALUATION.md)。
+- **当前几何基线**：G4b affinity + `high=0.65` + 封边/受阻分水岭。相较 G3，G4b 是当前
+  更稳定的部署基线；测试集仍以欠分割和局部合并为主要风险，尚未证明黑盒竞赛分数提升。
+  详见 [docs/AFFINITY_DEPLOYMENT_EVALUATION.md](docs/AFFINITY_DEPLOYMENT_EVALUATION.md)。
+- **当前语义候选**：E7a adaptive-core 实例投票。它不改变实例几何，只改变 ferrite/pearlite
+  分类；保留作 challenger，默认仍使用 hard majority。E7a 的 Lab 弱先验因 ferrite 单向偏置
+  暂不启用，详见 [docs/SEMANTIC_VOTE_E7A_20260827.md](docs/SEMANTIC_VOTE_E7A_20260827.md)。
+- **当前训练实验**：E7b-A 从 V6 初始化，只训练 `seg_fpn + seg_branch` 20 epoch；新增实例
+  等权核心损失、边界暗环定向增强和高置信无标签一致性。boundary/affinity/LoRA 全冻结，
+  详见 [docs/SEMANTIC_TRAINING_E7B_20260827.md](docs/SEMANTIC_TRAINING_E7B_20260827.md)。
 - **中心热图实验已降级为负面对照**：共享 `boundary_fpn` 的中心辅助任务破坏了边界表征；
   `outputs/stage2_center_heatmap/best_model_stage2.pth` 不作为后续初始化主线。
-- **当前目标**：先以完整部署路径闭环 checkpoint 选择，再改进 affinity 的断边召回与
-  合并错误；Oracle GT 前景图重建指标仅作诊断，不得用于模型晋级。
+- **当前目标**：在固定 G4b 实例图上降低小实例 ferrite/pearlite 错配，并同时守住类别 mIoU
+  与 ferrite 平均面积代理；Oracle GT 前景图重建指标仅作诊断，不得用于模型晋级。
+- **审计结论（2026-08-27）**：G3 的验证提升尚不能等同于竞赛增益；G3 相比 G2 同时改变了
+  native crop、采样、训练时长、学习率和外观增强，需在统一部署评估链上做单变量复验。详见
+  [docs/AFFINITY_DEPLOYMENT_EVALUATION.md](docs/AFFINITY_DEPLOYMENT_EVALUATION.md)。
 
 ## 环境配置
 
@@ -80,8 +90,9 @@ segmentationv2/
 │   ├── sam2_encoder.py          # 冻结 SAM 2 Hiera trunk（4 尺度特征）
 │   └── fpn_decoder.py           # 独立双 FPN 解码头（seg_fpn + boundary_fpn）
 ├── utils/
-│   ├── loss.py                  # BoundaryLoss（语义 BCE + 边界 Focal×EDT 权重）
+│   ├── loss.py                  # BoundaryLoss（语义/实例核心 + 边界 Focal×EDT）
 │   ├── loss_semi.py             # 半监督一致性损失 + EMA 更新 + 骨架过滤
+│   ├── semantic_training.py     # E7b 实例等权核心损失 + target-aware 暗边增强
 │   ├── metrics.py               # SegMetrics 评估（mIoU / mDice / Boundary IoU）
 │   ├── post_process.py          # 骨架化 / 受阻分水岭 / 实例 ID
 │   └── progressive_aug.py       # 渐进式外观增强（学生输入专用）
@@ -94,50 +105,43 @@ segmentationv2/
 ├── train.py                     # Stage 1 训练入口
 ├── train_stage2.py              # Stage 2 半监督训练入口
 ├── inference.py                 # 推理入口（语义投票实例分类）
-├── debug_iou.py                 # 零 epoch IoU 硬审计
 ├── debug_pipeline.py            # 数据管线诊断（letterbox / 边界权重 / 受阻分水岭）
 ├── test_skeleton_watershed.py   # 骨架 + 分水岭纯图像验证
 └── visualize_instances.py       # 实例图着色可视化
 ```
 
-## 训练
+## 当前训练
 
-LoRA 自监督预训练仍可复用；新的 Stage 1 与 Stage 2 配置已分开，避免推理配置中的冻结规则
-误用于从头训练：
+E7b-A 不从零开始；它从已验证的 V6 checkpoint 初始化，只更新语义 decoder。总轮数 20，
+按既定约定可直接在训练服务器运行：
 
 ```bash
-python tools/pretrain_lora_ssl.py --config config/train/stage1_lora.yaml --epochs 30 --batch_size 8
-python train.py --config config/train/stage1_lora.yaml
-python train_stage2.py --config config/train/stage2_refine_v6.yaml \
-    --phase boundary --tag refine_v6_b2
+conda activate sam2_env
+python train_stage2.py --config config/train/stage2_semantic_e7b_decoder20.yaml
 ```
 
-Stage 2 B2 以 V6 checkpoint 为 `base_checkpoint`，冻结语义分支和 LoRA；前 5 epoch
-只训练零初始化高分辨率 refine head，随后以低学习率解冻 V6 coarse boundary 基座。
-每次运行在 `outputs/runs/` 保存配置、环境和逐 epoch 指标；best 权重使用硬链接，避免重复占盘。
-恢复训练必须使用相同架构，代码会在加载 optimizer 前执行严格检查。
+输出目录：`outputs/stage2_semantic_e7b_decoder20/`。训练固定 boundary 与 LoRA，checkpoint
+按验证 semantic mIoU 选择；无标签 holdout monitor 只检查泛化稳定性。历史 Stage 1、B2、
+affinity 训练命令见 [docs/PIPELINE.md](docs/PIPELINE.md) 和 `config/README.md`。
 
 ## 推理
 
 ```bash
 conda activate sam2_env
-python inference.py --config config/inference/v6_reference.yaml
+python tools/run_affinity_submission.py \
+  --config config/inference/final_affinity_g4b_high065.yaml
 ```
 
-指定测试目录与输出目录：
+E7b 训练完成后的固定几何对照：
 
 ```bash
-python inference.py --config config/inference/v6_reference.yaml \
-  --test_dir data/test --output_dir outputs/inference/v6_reference
+python tools/run_affinity_submission.py \
+  --config config/experiments/affinity_g4b_high065_semantic_e7b.yaml
 ```
 
-推理增强选项（配置于 `inference` 段）：
-
-- **单阈值二值化**：`boundary_threshold: 0.5`（已移除 Canny 式滞后——边界概率在邻域连续，滞后会把强脊坡脚也纳入，导致边界带宽度沿脊线变化、轮廓崎岖）；
-- **边界 logits 缩放**：`boundary_logit_scale > 1` 增强弱边界响应；
-- **推理 TTA**：`python inference.py --tta`（hflip/vflip/rot180 logits 平均），提升弱边界召回与稳定性。
-
-不指定 `--checkpoint` 时，按配置 `inference.checkpoint_stage`（stage1/stage2）选择默认权重（当前默认指向 `outputs/stage2/stage2_epoch30.pth`）。
+该配置只替换 semantic decoder。代码会验证 E7b 与 V6 的 LoRA 张量逐字节一致；若 LoRA
+发生变化，将拒绝复用 G4b affinity checkpoint。V6 双头历史推理仍可使用
+`python inference.py --config config/inference/v6_reference.yaml`。
 
 ## 实例级分类器（已废弃）
 

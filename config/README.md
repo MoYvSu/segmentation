@@ -1,16 +1,21 @@
 # 配置目录
 
-当前几何候选为 `train/affinity_geometry_g3_native_crop.yaml`：冻结 V6 语义锚点，使用
-8 通道 affinity 与 G2/G3 SAM2 无类别伪实例监督。训练 checkpoint 只能按固定的完整部署
-验证 `gated + mean + boundary_threshold=0.55` 晋级；Oracle GT 前景图重建仅用于诊断。
-完整协议见 `docs/AFFINITY_DEPLOYMENT_EVALUATION.md`。V6/B2 配置仍保留为基线和回退。
+当前部署基线为 `inference/final_affinity_g4b_high065.yaml`：V6 语义锚点 + G4b 8 通道
+affinity，使用 `high=0.65`、seal2、局部重建与受阻分水岭。训练 checkpoint 只能按固定的
+完整部署路径验证晋级，Oracle GT 前景重建仅作诊断。完整协议见
+`docs/AFFINITY_DEPLOYMENT_EVALUATION.md`；V6/B2 配置仍保留为回退。
 
-`train/affinity_geometry_g4_manual_gap.yaml` 是当前断边合并单变量实验：完全复用 G3 的
+当前训练实验为 `train/stage2_semantic_e7b_decoder20.yaml`：从 V6 初始化，只训练 semantic
+decoder 20 epoch，冻结 boundary/LoRA/affinity，加入实例等权核心损失、暗边定向增强与高置信
+无标签一致性。训练后使用 `experiments/affinity_g4b_high065_semantic_e7b.yaml` 在同一 G4b
+实例几何上做严格对照。详见 `docs/SEMANTIC_TRAINING_E7B_20260827.md`。
+
+`train/affinity_geometry_g4_manual_gap.yaml` 是历史断边合并单变量实验：完全复用 G3 的
 G2 初始化、数据比例、增强、学习率和 20 epoch，只对人工 LabelMe 样本启用
 “实例与未覆盖带之间为负 affinity”；SAM2 未覆盖区和人工 `0-0` 像素对继续 ignore。
 设计与判定标准见 `docs/AFFINITY_G4_MANUAL_GAP.md`。G4 完整权重已证实过强；
 `train/affinity_geometry_g4b_gap_weight020.yaml` 只把新增人工缺口负边降权至 `0.20`，
-其余设置不变，是当前后续实验。
+其余设置不变，产物 G4b 现作为部署几何基线。
 
 - `default_config.yaml`：可训练、可推理的当前 V6 参考基线；路径跨本机/服务器可移植。
 - `inference/`：只改变推理输出与后处理参数，不改变模型架构。

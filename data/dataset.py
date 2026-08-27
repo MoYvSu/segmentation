@@ -240,7 +240,8 @@ def random_crop(
     weight: np.ndarray,
     center: np.ndarray,
     crop_size: int,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    instance_map: Optional[np.ndarray] = None,
+):
     """
     局部随机裁剪：对图像、语义、边界、权重使用相同的裁剪坐标。
 
@@ -268,6 +269,10 @@ def random_crop(
         boundary = np.pad(boundary, ((0, pad_h), (0, pad_w)), mode='symmetric')
         weight = np.pad(weight, ((0, pad_h), (0, pad_w)), mode='symmetric')
         center = np.pad(center, ((0, pad_h), (0, pad_w)), mode='constant')
+        if instance_map is not None:
+            instance_map = np.pad(
+                instance_map, ((0, pad_h), (0, pad_w)), mode='symmetric'
+            )
         h, w = image.shape[:2]
 
     # 随机选取裁剪起点
@@ -282,7 +287,11 @@ def random_crop(
     weight_c = weight[top:bottom, left:right]
     center_c = center[top:bottom, left:right]
 
-    return image_c, semantic_c, boundary_c, weight_c, center_c
+    base = (image_c, semantic_c, boundary_c, weight_c, center_c)
+    if instance_map is None:
+        return base
+    instance_c = instance_map[top:bottom, left:right]
+    return (*base, instance_c)
 
 
 def split_train_val_indices(

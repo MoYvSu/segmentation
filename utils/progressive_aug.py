@@ -29,6 +29,8 @@ from typing import Dict, Optional
 import torch
 import torch.nn.functional as F
 
+from utils.semantic_training import dark_boundary_contamination
+
 
 class ProgressiveAppearanceAug:
     """渐进式外观增强器。
@@ -78,6 +80,13 @@ class ProgressiveAppearanceAug:
         self.scratch_opacity_range = config.get(
             "scratch_opacity_range", [0.02, 0.10]
         )
+        self.dark_rim_width_range = config.get("dark_rim_width_range", [2, 6])
+        self.dark_rim_opacity_range = config.get(
+            "dark_rim_opacity_range", [0.12, 0.35]
+        )
+        self.dark_rim_boundary_threshold = float(
+            config.get("dark_rim_boundary_threshold", 0.20)
+        )
 
         self.device = device
         self.current_epoch = 0
@@ -104,7 +113,11 @@ class ProgressiveAppearanceAug:
         progress = (self.current_epoch - self.start_epoch) / max(1, self.ramp_epochs)
         return self.max_prob * progress
 
-    def __call__(self, images: torch.Tensor) -> torch.Tensor:
+    def __call__(
+        self,
+        images: torch.Tensor,
+        boundary_targets: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """对学生输入图像施加渐进式外观增强。
 
         Args:
@@ -131,17 +144,24 @@ class ProgressiveAppearanceAug:
         for i in range(B):
             if not aug_mask[i]:
                 continue
-            result[i] = self._augment_single(images[i])
+            boundary = None
+            if boundary_targets is not None:
+                boundary = boundary_targets[i]
+                if boundary.ndim == 3 and boundary.shape[0] == 1:
+                    boundary = boundary[0]
+            result[i] = self._augment_single(images[i], boundary)
 
         return result
 
-    def _augment_single(self, img: torch.Tensor) -> torch.Tensor:
+    def _augment_single(
+        self, img: torch.Tensor, boundary_target: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         """对单张图像 [3, H, W] 施加外观增强。
 
         每种增强独立采样是否应用，参数独立采样。
         """
         if self.policy == "physical_v1":
-            return self._augment_physical(img)
+            return self._augment_physical(img, boundary_target)
 
         return self._augment_legacy(img)
 
@@ -171,7 +191,9 @@ class ProgressiveAppearanceAug:
         # Clamp 到 [0, 1]
         return img.clamp(0.0, 1.0)
 
-    def _augment_physical(self, img: torch.Tensor) -> torch.Tensor:
+    def _augment_physical(
+        self, img: torch.Tensor, boundary_target: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         """抽取少量物理退化；不制造硬遮挡或规则黑斑。"""
         operations = {
             "gamma": self._op_gamma,
@@ -182,6 +204,10 @@ class ProgressiveAppearanceAug:
             "scratch": self._op_scratch,
             "noise": self._op_noise,
         }
+        if boundary_target is not None:
+            operations["dark_rim"] = lambda value: self._op_dark_rim(
+                value, boundary_target
+            )
         names = [
             name for name in operations
             if float(self.op_weights.get(name, 0.0)) > 0.0
@@ -288,6 +314,25 @@ class ProgressiveAppearanceAug:
         if self.gaussian_noise_std <= 0:
             return img
         return img + torch.randn_like(img) * self.gaussian_noise_std
+
+    def _op_dark_rim(
+        self, img: torch.Tensor, boundary_target: torch.Tensor
+    ) -> torch.Tensor:
+        low_width, high_width = [int(v) for v in self.dark_rim_width_range]
+        width = int(torch.randint(
+            min(low_width, high_width),
+            max(low_width, high_width) + 1,
+            (1,),
+            device=self.device,
+        ).item())
+        opacity = self._sample_uniform(self.dark_rim_opacity_range)
+        return dark_boundary_contamination(
+            img,
+            boundary_target.to(device=img.device, dtype=img.dtype),
+            width=width,
+            opacity=opacity,
+            threshold=self.dark_rim_boundary_threshold,
+        )
 
     @staticmethod
     def _gaussian_blur(

@@ -1,0 +1,11 @@
+# Fixed G4b geometry + E7b semantic decoder.  The override contract requires
+# byte-identical encoder LoRA tensors relative to V6.
+_base: ../inference/final_affinity_g4b_high065.yaml
+
+affinity_geometry_g1:
+  reference_checkpoint: outputs/stage2_semantic_e7b_decoder20/best_model_stage2.pth
+  semantic_decoder_override_base: outputs/stage2_v6/best_model_stage2.pth
+
+inference:
+  output_dir: outputs/submission_affinity_g4b_high065_semantic_e7b
+  semantic_vote_mode: hard_majority
