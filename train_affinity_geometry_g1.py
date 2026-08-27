@@ -27,6 +27,7 @@ from data.offset_geometry_dataset import OffsetGeometryDataset
 from data.sam2_geometry_dataset import SAM2GeometryDataset
 from inference import build_model as build_reference_model
 from models.affinity_geometry import AffinityGeometryDecoder
+from models.gda_mim import GenerativeDomainAdapterPyramid
 from models.offset_geometry import FrozenSemanticGeometrySystem, semantic_state_digest
 from train_affinity_geometry_g0 import edge_metrics
 from train_offset_geometry import (
@@ -74,12 +75,85 @@ def build_system(config, cfg, device):
     init_path = project_path(config, cfg["geometry_init_checkpoint"])
     checkpoint = torch.load(init_path, map_location="cpu", weights_only=False)
     decoder.load_state_dict(checkpoint["geometry_state_dict"], strict=True)
-    system = FrozenSemanticGeometrySystem(reference, decoder).to(device)
+    adapter_cfg = cfg.get("feature_adapter", {})
+    geometry_feature_adapter = None
+    if bool(adapter_cfg.get("enabled", False)):
+        geometry_feature_adapter = GenerativeDomainAdapterPyramid(
+            channels=reference.encoder.get_stage_channels(),
+            bottleneck_ratio=int(adapter_cfg.get("bottleneck_ratio", 8)),
+            gate_mode=str(adapter_cfg.get("gate_mode", "scalar")),
+            active_scales=adapter_cfg.get("active_scales"),
+        )
+        adapter_state = checkpoint.get("geometry_feature_adapter_state_dict")
+        if adapter_state is not None:
+            geometry_feature_adapter.load_state_dict(adapter_state, strict=True)
+            logger.info("Loaded geometry feature adapter from %s", init_path)
+        else:
+            logger.info(
+                "Initialized zero-gated geometry feature adapter; epoch 0 "
+                "preserves the source geometry path"
+            )
+    system = FrozenSemanticGeometrySystem(
+        reference, decoder, geometry_feature_adapter
+    ).to(device)
     digest = semantic_state_digest(reference)
     expected = checkpoint.get("semantic_state_digest")
     if expected and expected != digest:
         raise RuntimeError("Affinity checkpoint references a different V6 semantic state")
     return system, reference_path, init_path, digest
+
+
+def build_optimizer(system, cfg):
+    groups = [{
+        "params": list(system.geometry_decoder.parameters()),
+        "lr": float(cfg.get("learning_rate", 5e-5)),
+        "name": "geometry_decoder",
+    }]
+    adapter_cfg = cfg.get("feature_adapter", {})
+    adapter = system.geometry_feature_adapter
+    if adapter is not None:
+        groups.extend([
+            {
+                "params": list(adapter.adapter_parameters()),
+                "lr": float(
+                    adapter_cfg.get(
+                        "learning_rate", cfg.get("learning_rate", 5e-5)
+                    )
+                ),
+                "name": "geometry_feature_adapter",
+            },
+            {
+                "params": [adapter.gates],
+                "lr": float(adapter_cfg.get("gate_learning_rate", 1e-4)),
+                "weight_decay": 0.0,
+                "name": "geometry_feature_gates",
+            },
+        ])
+    return torch.optim.AdamW(
+        groups, weight_decay=float(cfg.get("weight_decay", 1e-4))
+    )
+
+
+def adapter_metrics(system):
+    values = {
+        "adapter_gate_mean_abs": 0.0,
+        "adapter_gate_max_abs": 0.0,
+    }
+    adapter = system.geometry_feature_adapter
+    if adapter is None:
+        return values
+    stats = adapter.gate_statistics()
+    active = [row for row in stats if row["active"]]
+    if active:
+        values["adapter_gate_mean_abs"] = float(
+            np.mean([row["mean_abs"] for row in active])
+        )
+        values["adapter_gate_max_abs"] = float(
+            max(row["max_abs"] for row in active)
+        )
+    for row in stats:
+        values[f"adapter_gate_scale{row['scale']}_abs"] = float(row["mean_abs"])
+    return values
 
 
 @torch.no_grad()
@@ -253,8 +327,8 @@ def save_checkpoint(
     path, system, config, epoch, best_score, reference_path, reference_sha,
     init_path, digest, split, selection_metric, best_oracle_score,
 ):
-    torch.save({
-        "format": "affinity_geometry_g1_v2",
+    payload = {
+        "format": "affinity_geometry_g1_v3",
         "epoch": int(epoch),
         "best_selection_metric": selection_metric,
         "best_selection_score": float(best_score),
@@ -268,7 +342,12 @@ def save_checkpoint(
         "semantic_state_digest": digest,
         "split": split,
         "config": config,
-    }, path)
+    }
+    if system.geometry_feature_adapter is not None:
+        payload["geometry_feature_adapter_state_dict"] = (
+            system.geometry_feature_adapter.state_dict()
+        )
+    torch.save(payload, path)
 
 
 def main():
@@ -500,10 +579,7 @@ def main():
             system, path, output_dir, 0,
             int(cfg.get("input_size", 1024)), int(cfg.get("output_grid", 512)),
         )
-    optimizer = torch.optim.AdamW(
-        system.geometry_decoder.parameters(), lr=float(cfg.get("learning_rate", 5e-5)),
-        weight_decay=float(cfg.get("weight_decay", 1e-4)),
-    )
+    optimizer = build_optimizer(system, cfg)
     epochs = int(cfg.get("epochs", 20))
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=max(1, epochs), eta_min=float(cfg.get("min_learning_rate", 1e-5))
@@ -522,6 +598,9 @@ def main():
         "val_deployment_ferrite_area_relative_error",
         "val_deployment_pred_count", "val_deployment_valid_matches",
         "val_deployment_macro_image_score_total", "learning_rate",
+        "adapter_gate_mean_abs", "adapter_gate_max_abs",
+        "adapter_gate_scale0_abs", "adapter_gate_scale1_abs",
+        "adapter_gate_scale2_abs", "adapter_gate_scale3_abs",
     ]
     writer = csv.DictWriter(metrics_file, fieldnames=fields)
     writer.writeheader()
@@ -575,7 +654,8 @@ def main():
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(
-                system.geometry_decoder.parameters(), float(cfg.get("grad_clip", 1.0))
+                list(system.geometry_trainable_parameters()),
+                float(cfg.get("grad_clip", 1.0)),
             )
             scaler.step(optimizer)
             scaler.update()
@@ -633,6 +713,7 @@ def main():
             **{f"val_{key}": value for key, value in val.items()},
             **deployment_values,
             "learning_rate": optimizer.param_groups[0]["lr"],
+            **adapter_metrics(system),
         }
         writer.writerow(row)
         metrics_file.flush()
@@ -657,6 +738,11 @@ def main():
                 deployment["pred_count"],
                 deployment["valid_matches"],
                 deployment["macro_image_score_total"],
+            )
+        if system.geometry_feature_adapter is not None:
+            logger.info(
+                "epoch=%d adapter_gate_mean_abs=%.6f max_abs=%.6f",
+                epoch, row["adapter_gate_mean_abs"], row["adapter_gate_max_abs"],
             )
         best_oracle_score = max(
             best_oracle_score, row["val_gt_penalized_miou"]

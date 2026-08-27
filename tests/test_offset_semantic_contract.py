@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 
+from models.gda_mim import GenerativeDomainAdapterPyramid
 from models.offset_geometry import (
     FrozenSemanticGeometrySystem,
     semantic_state_digest,
@@ -69,3 +70,22 @@ def test_geometry_training_cannot_mutate_reference_semantics():
     assert all(parameter.grad is None for parameter in reference.parameters())
     assert semantic_state_digest(reference) == before_digest
     assert torch.equal(system.semantic_logits(image), before_logits)
+
+
+def test_zero_gated_geometry_adapter_preserves_baseline_then_receives_gradient():
+    reference = _DummyReference()
+    geometry = _TinyGeometry()
+    adapter = GenerativeDomainAdapterPyramid(
+        channels=(3,), bottleneck_ratio=2, active_scales=(0,)
+    )
+    system = FrozenSemanticGeometrySystem(reference, geometry, adapter)
+    image = torch.randn(1, 3, 8, 8)
+
+    expected = image[:, :1] * geometry.scale
+    output = system.geometry_forward(image)["center_logits"]
+    assert torch.equal(output, expected)
+
+    output.sum().backward()
+    assert adapter.gates.grad is not None
+    assert adapter.gates.grad.abs().sum() > 0
+    assert all(parameter.grad is None for parameter in reference.parameters())

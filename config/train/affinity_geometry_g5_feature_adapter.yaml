@@ -1,0 +1,35 @@
+_base: affinity_geometry_g4b_gap_weight020.yaml
+
+affinity_geometry_g1:
+  # G5 starts from the visually approved G4b epoch-20 decoder. Zero adapter
+  # gates make epoch 0 reproduce G4b exactly while V6 semantics stay frozen.
+  geometry_init_checkpoint: outputs/affinity_geometry_g4b_gap_weight020/latest_affinity.pth
+  output_dir: outputs/affinity_geometry_g5_feature_adapter
+  epochs: 20
+  learning_rate: 1.0e-5
+  min_learning_rate: 2.0e-6
+
+  feature_adapter:
+    enabled: true
+    bottleneck_ratio: 8
+    gate_mode: scalar
+    active_scales: [0, 1, 2, 3]
+    learning_rate: 5.0e-5
+    gate_learning_rate: 2.0e-4
+
+  # Keep the deployment proxy visible, but do not treat six manually labeled
+  # images as the sole promotion gate. Unlabeled monitors and latest checkpoint
+  # remain first-class evidence for this experiment.
+  deployment_validation:
+    enabled: true
+    fusion_mode: gated
+    short_reduction: mean
+    boundary_threshold: 0.72
+
+inference:
+  boundary_threshold: 0.72
+  marker_border_seal_width: 2
+  marker_boundary_low_threshold: 0.45
+  marker_boundary_reconstruction_steps: 8
+  semantic_vote_mode: hard_majority
+  semantic_vote_erode_width: 0

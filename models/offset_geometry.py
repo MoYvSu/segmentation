@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, List, Optional
 
 import torch
 import torch.nn as nn
@@ -91,10 +91,16 @@ class CenterOffsetGeometryDecoder(nn.Module):
 class FrozenSemanticGeometrySystem(nn.Module):
     """Frozen, reproducible V6 reference plus an independent geometry decoder."""
 
-    def __init__(self, reference_model: nn.Module, geometry_decoder: nn.Module):
+    def __init__(
+        self,
+        reference_model: nn.Module,
+        geometry_decoder: nn.Module,
+        geometry_feature_adapter: Optional[nn.Module] = None,
+    ):
         super().__init__()
         self.reference_model = reference_model
         self.geometry_decoder = geometry_decoder
+        self.geometry_feature_adapter = geometry_feature_adapter
         self.freeze_reference()
 
     def freeze_reference(self):
@@ -106,13 +112,23 @@ class FrozenSemanticGeometrySystem(nn.Module):
         super().train(mode)
         self.reference_model.eval()
         self.geometry_decoder.train(mode)
+        if self.geometry_feature_adapter is not None:
+            self.geometry_feature_adapter.train(mode)
         return self
 
     def geometry_forward(self, image: torch.Tensor) -> Dict[str, torch.Tensor]:
         self.reference_model.eval()
         with torch.no_grad():
             features = self.reference_model.encoder(image)
-        return self.geometry_decoder([feature.detach() for feature in features])
+        features = [feature.detach() for feature in features]
+        if self.geometry_feature_adapter is not None:
+            features = self.geometry_feature_adapter(features, gated=True)
+        return self.geometry_decoder(features)
+
+    def geometry_trainable_parameters(self):
+        yield from self.geometry_decoder.parameters()
+        if self.geometry_feature_adapter is not None:
+            yield from self.geometry_feature_adapter.parameters()
 
     @torch.no_grad()
     def semantic_logits(self, image: torch.Tensor) -> torch.Tensor:
