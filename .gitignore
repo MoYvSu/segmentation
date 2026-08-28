@@ -13,6 +13,9 @@ config/*
 weights
 segment-anything-2
 outputs
+# Local experiment logs; checkpoints and monitor images remain under outputs/.
+*.log
+logs/
 data/raw/
 data/test/
 data/unlabeled/
