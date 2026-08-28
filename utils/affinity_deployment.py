@@ -37,6 +37,14 @@ def crop_letterbox_output(
     return F.interpolate(output, size=original_size, mode="bilinear", align_corners=True)
 
 
+def crop_letterbox_grid(output: torch.Tensor, image_size: int, pad_h: int, pad_w: int):
+    """Remove letterbox padding while preserving the model output grid."""
+    out_h, out_w = output.shape[-2:]
+    content_h = max(1, int(round((image_size - pad_h) * out_h / image_size)))
+    content_w = max(1, int(round((image_size - pad_w) * out_w / image_size)))
+    return output[:, :, :content_h, :content_w]
+
+
 def prepare_image(image_path: str | Path, image_size: int, device):
     bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
     if bgr is None:
@@ -130,6 +138,52 @@ def predict_maps_with_challenger(
         affinity_watershed_output,
         affinity_boundary_native,
         challenger_native[:, :1],
+    )
+
+
+@torch.no_grad()
+def predict_directional_maps_with_challenger(
+    system,
+    semantic_challenger,
+    image_path,
+    image_size,
+    device,
+    fusion_mode="gated",
+    fusion_kwargs=None,
+):
+    """Return native E10a semantics plus uncollapsed G4b affinities.
+
+    Directional affinities stay on the decoder grid for graph partitioning;
+    no mean/gated scalar boundary is substituted for those channels.
+    """
+    image, tensor, pad_h, pad_w = prepare_image(image_path, image_size, device)
+    original_size = image.shape[:2]
+    features = [feature.detach() for feature in system.reference_model.encoder(tensor)]
+    geometry_features = features
+    if system.geometry_feature_adapter is not None:
+        geometry_features = system.geometry_feature_adapter(features, gated=True)
+    affinity_logits = system.geometry_decoder(geometry_features)["affinity_logits"]
+    challenger_output = semantic_challenger(features, tensor)
+
+    challenger_native = crop_letterbox_output(
+        challenger_output, image_size, pad_h, pad_w, original_size
+    ).cpu()
+    affinity_grid = torch.sigmoid(
+        crop_letterbox_grid(affinity_logits, image_size, pad_h, pad_w)
+    ).cpu()
+    affinity_boundary = affinity_boundary_probability(
+        affinity_logits,
+        mode=fusion_mode,
+        **(fusion_kwargs or {}),
+    )
+    boundary_native = crop_letterbox_output(
+        affinity_boundary, image_size, pad_h, pad_w, original_size
+    ).cpu()
+    return (
+        image,
+        challenger_native[:, :1],
+        affinity_grid,
+        boundary_native,
     )
 
 

@@ -426,6 +426,100 @@ def boundary_watershed_separation(
     return inst_map, class_map
 
 
+def classify_instance_partition(
+    candidate_map: np.ndarray,
+    semantic_probability: np.ndarray,
+    min_area: int = 50,
+    max_instance_id: int = 255,
+    semantic_vote_mode: str = "probability_mean",
+    semantic_vote_threshold: float = 0.5,
+    semantic_vote_erode_width: int = 0,
+    semantic_vote_options: Optional[Dict] = None,
+    semantic_lab_prior: Optional[Dict] = None,
+):
+    """Relabel, cap, and classify a precomputed instance partition.
+
+    This is the common finishing stage for non-watershed geometry decoders.
+    The input may use arbitrary positive integer IDs.  Small regions are
+    agglomerated into spatial neighbours before the 8-bit competition cap is
+    applied, so pixels are not silently discarded and unrelated overflow
+    regions are never assigned one shared ID.
+    """
+    regions = np.asarray(candidate_map)
+    probability = np.asarray(semantic_probability, dtype=np.float32)
+    if regions.ndim != 2:
+        raise ValueError(f"candidate_map must be 2-D, got {regions.shape}")
+    if probability.shape != regions.shape:
+        raise ValueError(
+            f"semantic probability shape {probability.shape} != {regions.shape}"
+        )
+    max_instance_id = int(max_instance_id)
+    if not 1 <= max_instance_id <= 255:
+        raise ValueError(
+            f"max_instance_id must be within [1, 255], got {max_instance_id}"
+        )
+
+    regions = regions.astype(np.int32, copy=False)
+    labels, counts = np.unique(regions[regions > 0], return_counts=True)
+    if labels.size == 0:
+        return np.zeros(regions.shape, dtype=np.uint8), {}, {
+            "raw_instance_count": 0,
+            "retained_instance_count": 0,
+            "merge_count": 0,
+            "unassigned_pixels": int(regions.size),
+        }
+
+    # Keep every sufficiently large component where possible.  Components
+    # below min_area are merged through local contact until this target count
+    # is reached; the hard 255 cap always takes precedence.
+    large_count = int(np.count_nonzero(counts >= max(1, int(min_area))))
+    target_count = max(1, min(max_instance_id, large_count or 1))
+    merged, merge_edges = _merge_region_map_to_cap(regions, target_count)
+
+    final_labels, final_counts = np.unique(merged[merged > 0], return_counts=True)
+    ordered = [
+        int(label)
+        for label, _ in sorted(
+            zip(final_labels, final_counts),
+            key=lambda item: (-int(item[1]), int(item[0])),
+        )
+    ]
+    semantic_mask = (probability > float(semantic_vote_threshold)).astype(np.uint8)
+    inst_map = np.zeros(regions.shape, dtype=np.uint8)
+    class_map = {}
+    vote_audit = {}
+    for instance_id, label in enumerate(ordered, start=1):
+        instance_mask = merged == label
+        cls, score, details = _instance_semantic_vote(
+            instance_mask,
+            semantic_mask,
+            semantic_probability=probability,
+            mode=semantic_vote_mode,
+            erode_width=semantic_vote_erode_width,
+            threshold=semantic_vote_threshold,
+            lab_prior=semantic_lab_prior,
+            return_details=True,
+            **(semantic_vote_options or {}),
+        )
+        inst_map[instance_mask] = instance_id
+        class_map[instance_id] = int(cls)
+        vote_audit[instance_id] = {
+            "ferrite_score": float(score),
+            **details,
+        }
+
+    audit = {
+        "raw_instance_count": int(labels.size),
+        "large_instance_count": large_count,
+        "target_instance_count": target_count,
+        "retained_instance_count": len(class_map),
+        "merge_count": len(merge_edges),
+        "unassigned_pixels": int(np.count_nonzero(inst_map == 0)),
+        "votes": vote_audit,
+    }
+    return inst_map, class_map, audit
+
+
 def _norm_p95(resp):
     """P95 分位数归一化到 [0,1]（稳健，抗离群）。"""
     p95 = float(np.percentile(resp, 95))
