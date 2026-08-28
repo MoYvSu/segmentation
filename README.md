@@ -121,9 +121,14 @@ E7c 不丢弃 E7b 的局部纠错能力，而是让 V6 固定实例几何与默�
 [docs/SEMANTIC_EXPERIMENT_E7C_20260828.md](docs/SEMANTIC_EXPERIMENT_E7C_20260828.md)。
 
 E8 已证明低分辨率残差能够产生局部纠错，但 `+/-2` logit 很快饱和且验证 mIoU 未提升，故不
-晋级。当前 E9 保留 V6 零漂移锚点，把可学习决策提高到输入分辨率，并增加与实例投票一致的
-整实例概率损失；不使用硬置信锁或单向翻转。详见
+晋级。E9 保留 V6 零漂移锚点，把可学习决策提高到输入分辨率，并增加与实例投票一致的
+整实例概率损失；epoch 20 probability-mean 当前作为提交候选。详见
 [docs/SEMANTIC_EXPERIMENT_E9_20260828.md](docs/SEMANTIC_EXPERIMENT_E9_20260828.md)。
+
+当前 E10a 冻结 V6 LoRA、边界和 G4b affinity，随机重置完整 semantic FPN/head 与高分辨率
+解码路径；固定 V6 只在无标签高置信区域提供衰减蒸馏。E10a 首先仅作为实例分类 challenger，
+不得改变 G4b 前景或 watershed 几何。详见
+[docs/SEMANTIC_EXPERIMENT_E10A_20260828.md](docs/SEMANTIC_EXPERIMENT_E10A_20260828.md)。
 
 如需复现实验，按既定约定可直接在训练服务器运行：
 
@@ -136,6 +141,12 @@ E9 当前训练命令：
 
 ```bash
 python train_stage2.py --config config/train/stage2_semantic_e9_highres20.yaml
+```
+
+E10a 冷启动完整语义解码器：
+
+```bash
+python train_stage2.py --config config/train/stage2_semantic_e10a_cold20.yaml
 ```
 
 E9 输出目录为 `outputs/stage2_semantic_e9_highres20/`。训练固定 G4b geometry、V6 decoder
@@ -170,6 +181,13 @@ E9 训练完成后的整实例概率聚合：
 ```bash
 python tools/run_affinity_submission.py \
   --config config/experiments/affinity_g4b_high065_semantic_e9_highres.yaml
+```
+
+E10a 训练完成后的固定 V6/G4b 几何 challenger：
+
+```bash
+python tools/run_affinity_submission.py \
+  --config config/experiments/affinity_g4b_high065_semantic_e10a_cold.yaml
 ```
 
 E7b 整体替换配置只替换 semantic decoder；E7c-R 则只允许 E7b 改实例类别。两者都会验证

@@ -104,7 +104,7 @@ def predict_maps_with_challenger(
     if system.geometry_feature_adapter is not None:
         geometry_features = system.geometry_feature_adapter(features, gated=True)
     affinity_output = system.geometry_decoder(geometry_features)["affinity_logits"]
-    challenger_output = semantic_challenger(features)
+    challenger_output = semantic_challenger(features, tensor)
 
     reference_native = crop_letterbox_output(
         reference_output, image_size, pad_h, pad_w, original_size

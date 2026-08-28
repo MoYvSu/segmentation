@@ -638,6 +638,7 @@ def train_one_epoch(
     sem_boundary_align_weight=0.0,
     gda_gate_l1_weight=0.0,
     diagnostics_enabled=False,
+    update_teacher=True,
 ):
     """训练一个 epoch（双流混合 Batch + 可选 EMA 更新）。
 
@@ -963,8 +964,8 @@ def train_one_epoch(
                 torch.nn.utils.clip_grad_norm_(clip_params, grad_clip)
             optimizer.step()
 
-        # EMA 更新（仅当教师模型存在时）
-        if teacher_model is not None:
+        # EMA 更新（冷启动语义头可使用固定 V6 教师，禁止被随机学生污染）
+        if teacher_model is not None and update_teacher:
             update_ema(teacher_model, student_model, ema_decay)
 
         total_loss_sum += total_loss.item()
@@ -1350,6 +1351,52 @@ def main():
     stage1_ckpt_path = project_path(config, base_checkpoint)
     load_base_checkpoint(student_model, stage1_ckpt_path, device)
 
+    semantic_cold_start_cfg = semi_cfg.get(
+        "semantic_cold_start_training", {}
+    )
+    semantic_cold_start_enabled = bool(
+        semantic_cold_start_cfg.get("enabled", False)
+    )
+    fixed_semantic_teacher = None
+    teacher_is_fixed = False
+    if semantic_cold_start_enabled:
+        if not student_model.decoder.semantic_residual_enabled:
+            raise ValueError(
+                "semantic cold-start training requires decoder.semantic_residual=True"
+            )
+        if student_model.decoder.semantic_residual_version != "highres_v1":
+            raise ValueError(
+                "semantic cold-start training requires highres_v1 semantic output"
+            )
+        if lora_cfg.get("enabled", False) and not lora_cfg.get("freeze", False):
+            raise ValueError(
+                "semantic cold-start training requires frozen LoRA to preserve "
+                "the G4b geometry feature contract"
+            )
+        freeze_preview = semi_cfg.get("freeze", {})
+        if bool(freeze_preview.get("seg_branch", False)):
+            raise ValueError(
+                "semantic cold-start training requires freeze.seg_branch=False"
+            )
+        if not bool(freeze_preview.get("boundary_branch", False)):
+            raise ValueError(
+                "semantic cold-start training requires freeze.boundary_branch=True"
+            )
+        if args.init_from_checkpoint or semi_cfg.get("init_from_checkpoint", ""):
+            raise ValueError(
+                "semantic cold-start training uses semi_supervised.base_checkpoint; "
+                "init_from_checkpoint would overwrite the reset semantic branch"
+            )
+        # Copy the proven V6 teacher before resetting the complete student
+        # semantic path.  This teacher remains fixed throughout training.
+        fixed_semantic_teacher = build_teacher_model(student_model)
+        teacher_is_fixed = True
+        student_model.decoder.reset_semantic_branch()
+        logger.info(
+            "E10 semantic cold start: fixed V6 teacher captured; student "
+            "seg_fpn, seg_branch and high-resolution semantic path reset"
+        )
+
     if semi_cfg.get("reset_boundary_branch", False):
         student_model.decoder.reset_boundary_branch()
         logger.info("Reset boundary branch after loading Stage-1 checkpoint")
@@ -1416,6 +1463,11 @@ def main():
     semantic_residual_training_enabled = bool(
         semantic_residual_training_cfg.get("enabled", False)
     )
+    if semantic_cold_start_enabled and semantic_residual_training_enabled:
+        raise ValueError(
+            "semantic_cold_start_training and semantic_residual_training "
+            "are mutually exclusive"
+        )
     if semantic_residual_training_enabled:
         if not student_model.decoder.semantic_residual_enabled:
             raise ValueError(
@@ -1441,6 +1493,12 @@ def main():
         logger.info(
             "E8 semantic residual-only training: V6 seg FPN/head, boundary, "
             "and LoRA are frozen; only semantic_residual is trainable"
+        )
+    if semantic_cold_start_enabled:
+        student_model.decoder.set_semantic_cold_start_only()
+        logger.info(
+            "E10 semantic cold-start training: complete semantic decoder is "
+            "trainable; boundary/refine/center heads and LoRA are frozen"
         )
 
     # B2 staged refine：先只训练零初始化的高分辨率 residual head，随后再以
@@ -1798,7 +1856,32 @@ def main():
     )
     unsup_rampup_epochs = semi_cfg.get("unsup_rampup_epochs", 10)
 
-    if adaptive_ema and need_teacher:
+    cold_distill_start = float(
+        semantic_cold_start_cfg.get(
+            "distill_weight_start", unsup_seg_weight
+        )
+    )
+    cold_distill_end = float(
+        semantic_cold_start_cfg.get(
+            "distill_weight_end", unsup_seg_weight
+        )
+    )
+    cold_distill_decay_epochs = max(
+        1, int(semantic_cold_start_cfg.get("distill_decay_epochs", 1))
+    )
+    if semantic_cold_start_enabled:
+        logger.info(
+            "Fixed-teacher semantic distillation: weight %.4f -> %.4f "
+            "over %d epochs, confidence >= %.3f",
+            cold_distill_start,
+            cold_distill_end,
+            cold_distill_decay_epochs,
+            unsup_seg_confidence_threshold,
+        )
+
+    if teacher_is_fixed:
+        logger.info("Adaptive EMA: DISABLED (teacher is fixed V6 anchor)")
+    elif adaptive_ema and need_teacher:
         logger.info(
             f"Adaptive EMA: ENABLED (base_decay={ema_decay_base}, "
             f"decay scales with LR ratio)"
@@ -2061,8 +2144,15 @@ def main():
     # 仅当需要 EMA 教师时创建（语义未冻结 或 boundary_teacher_mode="ema"）
     teacher_model = None
     if need_teacher:
-        teacher_model = build_teacher_model(student_model)
-        logger.info("Teacher model created (EMA of student)")
+        if semantic_cold_start_enabled:
+            teacher_model = fixed_semantic_teacher
+            teacher_is_fixed = True
+            logger.info(
+                "Teacher model: FIXED V6 semantic anchor captured before cold reset"
+            )
+        else:
+            teacher_model = build_teacher_model(student_model)
+            logger.info("Teacher model created (EMA of student)")
     else:
         logger.info(
             "Teacher model: SKIPPED "
@@ -2270,16 +2360,29 @@ def main():
 
         # 计算无监督损失权重（sigmoid ramp-up，语义/边界独立）
         unsup_weight_eff = unsup_weight * sigmoid_rampup(epoch, unsup_rampup_epochs)
-        unsup_seg_weight_eff = unsup_seg_weight * sigmoid_rampup(epoch, unsup_rampup_epochs)
+        if semantic_cold_start_enabled:
+            distill_progress = min(
+                1.0, max(0.0, epoch / cold_distill_decay_epochs)
+            )
+            unsup_seg_weight_eff = (
+                cold_distill_start
+                + (cold_distill_end - cold_distill_start) * distill_progress
+            )
+        else:
+            unsup_seg_weight_eff = (
+                unsup_seg_weight
+                * sigmoid_rampup(epoch, unsup_rampup_epochs)
+            )
         if (epoch + 1) % 5 == 0 or epoch == start_epoch:
             logger.info(
                 f"  Unsup weight: seg={unsup_seg_weight_eff:.4f} "
                 f"bnd={unsup_weight_eff:.4f} "
-                f"(base seg={unsup_seg_weight}, bnd={unsup_weight})"
+                f"(base seg={'fixed-teacher decay' if semantic_cold_start_enabled else unsup_seg_weight}, "
+                f"bnd={unsup_weight})"
             )
 
         # 计算自适应 EMA 衰减系数
-        if adaptive_ema and need_teacher:
+        if adaptive_ema and need_teacher and not teacher_is_fixed:
             lr_ratio = get_current_lr_ratio(scheduler, group_peaks)
             ema_decay_eff = compute_adaptive_ema_decay(ema_decay_base, lr_ratio)
             if (epoch + 1) % 5 == 0 or epoch == start_epoch:
@@ -2327,6 +2430,7 @@ def main():
             sem_boundary_align_weight=sem_boundary_align_weight,
             gda_gate_l1_weight=float(gda_cfg.get("gate_l1_weight", 0.0)),
             diagnostics_enabled=diagnostics_enabled,
+            update_teacher=not teacher_is_fixed,
         )
         val_metrics = validate(student_model, val_loader, criterion, device)
         scheduler.step()

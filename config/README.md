@@ -11,6 +11,12 @@ residual。训练增加整实例平均概率目标和温和细实例权重，不
 `experiments/affinity_g4b_high065_semantic_e9_highres.yaml`，hard-majority 对照在同名 `_hard`
 配置；详见 `docs/SEMANTIC_EXPERIMENT_E9_20260828.md`。E7b/E8 保留为历史对照。
 
+`train/stage2_semantic_e10a_cold20.yaml` 是完整语义解码器冷启动实验：保留并冻结 V6 LoRA
+特征及 G4b 几何，随机重置 `seg_fpn`、`seg_branch` 和高分辨率语义路径；重置前复制的固定
+V6 教师只在高置信无标签像素提供衰减蒸馏。部署配置
+`experiments/affinity_g4b_high065_semantic_e10a_cold.yaml` 只替换实例分类，不改变前景、
+affinity 或 watershed。详见 `docs/SEMANTIC_EXPERIMENT_E10A_20260828.md`。
+
 当前类别纠错候选为 `experiments/affinity_g4b_high065_semantic_dual_e7c_relaxed.yaml`：固定
 V6 前景与 G4b 实例几何，仅用 E7b core 分数覆盖部分 V6 hard vote。阈值由缓存置信度扫参
 产生，不按实例面积拦截；严格版配置继续保留为反面对照。详见

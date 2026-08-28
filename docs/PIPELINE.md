@@ -5,7 +5,8 @@
 当前语义锚点仍是 `outputs/stage2_v6/best_model_stage2.pth`；可复现部署基线为
 “V6 语义 + G4b 8 通道 affinity → gated boundary → `high=0.65` + seal2 + 局部重建
 → 受阻分水岭 → hard-majority 分类”。当前 E9 是高分辨率语义 challenger，尚未通过黑盒晋级；
-V6/B2 边界路线继续作为回退。
+E10a 则冻结 V6 特征并冷启动完整语义解码器。两者都只能替换实例分类，V6/G4b 前景与几何
+保持固定；V6/B2 边界路线继续作为回退。
 
 G3/G4b 尚不能证明黑盒竞赛成绩提升，测试目检仍以欠分割为主要风险；GT 前景上的 Oracle
 图重建仅作诊断。当前 E9 在冻结 V6/G4b 的前提下学习输入分辨率语义残差，并以整实例概率
@@ -53,6 +54,10 @@ python train_stage2.py \
 # 当前 E9：冻结 V6/G4b，只训高分辨率语义残差（20 epoch）
 python train_stage2.py \
   --config config/train/stage2_semantic_e9_highres20.yaml
+
+# E10a：冻结 V6 LoRA/G4b，冷启动完整高分辨率语义解码器（20 epoch）
+python train_stage2.py \
+  --config config/train/stage2_semantic_e10a_cold20.yaml
 
 # E7b 完成后：同一 G4b 几何，只替换 semantic decoder
 python tools/run_affinity_submission.py \

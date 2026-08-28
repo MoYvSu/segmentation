@@ -642,6 +642,28 @@ class FPNDecoder(nn.Module):
                 nn.init.ones_(m.weight)
                 nn.init.zeros_(m.bias)
 
+    @staticmethod
+    def _reset_modules(modules) -> None:
+        """Kaiming-reset selected decoder modules without touching siblings."""
+        visited = set()
+        for module in modules:
+            if module is None:
+                continue
+            for layer in module.modules():
+                identifier = id(layer)
+                if identifier in visited:
+                    continue
+                visited.add(identifier)
+                if isinstance(layer, nn.Conv2d):
+                    nn.init.kaiming_normal_(
+                        layer.weight, mode="fan_out", nonlinearity="relu"
+                    )
+                    if layer.bias is not None:
+                        nn.init.zeros_(layer.bias)
+                elif isinstance(layer, (nn.BatchNorm2d, nn.GroupNorm)):
+                    nn.init.ones_(layer.weight)
+                    nn.init.zeros_(layer.bias)
+
     def forward(
         self, features, output_size=None, image=None, boundary_features=None,
         edge_prior_raw=None,
@@ -845,6 +867,47 @@ class FPNDecoder(nn.Module):
             parameter.requires_grad_(True)
         count = sum(p.numel() for p in self.semantic_residual.parameters())
         print(f"Semantic residual ONLY ({count} trainable params)")
+
+    def reset_semantic_branch(self) -> None:
+        """Cold-start the complete semantic decoder while preserving geometry.
+
+        The semantic FPN, coarse classifier and optional high-resolution module
+        are reset together.  The high-resolution output starts at zero so the
+        randomly initialized coarse path first establishes phase semantics,
+        then learns image-guided full-resolution corrections.
+        """
+        modules = [self.seg_fpn, self.seg_branch]
+        if self.semantic_residual is not None:
+            modules.append(self.semantic_residual)
+        self._reset_modules(modules)
+        if self.semantic_residual is not None:
+            self.semantic_residual.reset_output()
+        count = sum(
+            parameter.numel()
+            for module in modules
+            for parameter in module.parameters()
+        )
+        print(f"Semantic branch RESET (seg_fpn + seg_branch + highres, {count} params)")
+
+    def set_semantic_cold_start_only(self) -> None:
+        """Train the complete semantic decoder and freeze all geometry heads."""
+        for parameter in self.parameters():
+            parameter.requires_grad_(False)
+        modules = [self.seg_fpn, self.seg_branch]
+        if self.semantic_residual is not None:
+            modules.append(self.semantic_residual)
+        for module in modules:
+            for parameter in module.parameters():
+                parameter.requires_grad_(True)
+        count = sum(
+            parameter.numel()
+            for module in modules
+            for parameter in module.parameters()
+        )
+        print(
+            "Semantic cold-start ONLY "
+            f"(seg_fpn + seg_branch + highres, {count} trainable params)"
+        )
 
     def set_boundary_base_trainable(self, trainable: bool):
         """切换 V6 coarse boundary 基座，保持 refine head 状态不变。

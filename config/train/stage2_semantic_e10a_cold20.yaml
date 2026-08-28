@@ -1,0 +1,63 @@
+# E10a: cold-start the complete high-resolution semantic decoder while keeping
+# the proven V6 LoRA feature extractor and every geometry path frozen.
+_base: stage2_semantic_e9_highres20.yaml
+
+decoder:
+  semantic_residual: true
+  semantic_residual_version: highres_v1
+  semantic_residual_hidden: 64
+  semantic_residual_color_channels: 16
+  semantic_residual_half_channels: 48
+  semantic_residual_full_channels: 24
+  semantic_residual_use_photometric: true
+  # This is now a refinement over a trainable, randomly initialized coarse
+  # semantic decoder, not a bounded correction over V6 semantics.
+  semantic_residual_max_logit_delta: 2.0
+
+train:
+  seg_dice_weight: 0.30
+  semantic_instance_weight: 0.75
+  semantic_instance_ferrite_weight: 1.0
+  semantic_instance_hard_gamma: 0.5
+  semantic_instance_hard_floor: 0.50
+  semantic_instance_pool_weight: 0.50
+  semantic_thin_instance_weight: 1.50
+  semantic_tversky_weight: 0.0
+
+semi_supervised:
+  base_checkpoint: outputs/stage2_v6/best_model_stage2.pth
+  output_dir: outputs/stage2_semantic_e10a_cold20
+  epochs: 20
+  learning_rate: 1.0e-4
+  seg_lr_ratio: 1.0
+  boundary_lr_ratio: 0.0
+  warmup_epochs: 2
+  flat_epochs: 12
+  checkpoint_interval: 2
+  unsup_seg_weight: 0.0
+  unsup_seg_confidence_threshold: 0.90
+  semantic_residual_training:
+    enabled: false
+  semantic_cold_start_training:
+    enabled: true
+    # Fixed V6 confidence anchors stabilize the randomly initialized decoder;
+    # decay leaves uncertain teacher regions free for supervised correction.
+    distill_weight_start: 0.12
+    distill_weight_end: 0.03
+    distill_decay_epochs: 12
+  freeze:
+    seg_branch: false
+    boundary_branch: true
+  monitor:
+    image_dir: data/unlabeled
+    manifest: config/monitor/unlabeled_holdout_v1.txt
+    num_images: 10
+    output_dir: outputs/stage2_semantic_e10a_cold20/monitor
+
+progressive_aug:
+  enabled: true
+  policy: physical_v1
+  start_epoch: 1
+  ramp_epochs: 4
+  max_prob: 0.60
+
