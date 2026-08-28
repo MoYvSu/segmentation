@@ -1,0 +1,75 @@
+# E9: full-resolution semantic residual for thin/non-convex instances.
+# V6 encoder/LoRA/FPN semantics and G4b affinity geometry stay frozen.  The
+# new head learns at 512/1024 resolution instead of deciding on stride four.
+_base: stage2_semantic_e8_residual20.yaml
+
+decoder:
+  semantic_residual: true
+  semantic_residual_version: highres_v1
+  semantic_residual_hidden: 64
+  semantic_residual_color_channels: 16
+  semantic_residual_half_channels: 48
+  semantic_residual_full_channels: 24
+  semantic_residual_use_photometric: true
+  # E8 saturated its +/-2 logit allowance.  E9 starts as exact V6 and can
+  # only make a local, bounded correction.
+  semantic_residual_max_logit_delta: 0.75
+
+train:
+  seg_dice_weight: 0.30
+  semantic_instance_weight: 0.75
+  semantic_instance_ferrite_weight: 1.0
+  semantic_instance_hard_gamma: 0.5
+  semantic_instance_hard_floor: 0.50
+  # Match probability_mean deployment voting and require no trusted center.
+  semantic_instance_pool_weight: 0.50
+  # A missing eroded core is a practical thin-grain proxy, not a hard label.
+  semantic_thin_instance_weight: 1.50
+  # Keep this resolution experiment bidirectional and remove E8's explicit
+  # ferrite-recall bias so gains can be attributed to spatial evidence.
+  semantic_tversky_weight: 0.0
+
+semi_supervised:
+  output_dir: outputs/stage2_semantic_e9_highres20
+  epochs: 20
+  learning_rate: 4.0e-5
+  unsup_seg_weight: 0.02
+  unsup_rampup_epochs: 4
+  unsup_seg_confidence_threshold: 0.85
+  monitor:
+    image_dir: data/unlabeled
+    manifest: config/monitor/unlabeled_holdout_v1.txt
+    num_images: 10
+    output_dir: outputs/stage2_semantic_e9_highres20/monitor
+
+progressive_aug:
+  enabled: true
+  policy: physical_v1
+  start_epoch: 0
+  ramp_epochs: 3
+  max_prob: 0.65
+  min_ops: 1
+  max_ops: 2
+  op_weights:
+    dark_rim: 1.4
+    gamma: 1.2
+    white_balance: 1.0
+    gaussian_blur: 0.6
+    downsample: 0.3
+    illumination: 1.2
+    scratch: 0.2
+    noise: 0.0
+  gamma_range: [0.72, 1.35]
+  white_balance_range: [0.90, 1.10]
+  blur_sigma_range: [0.3, 1.3]
+  blur_kernel_size: 9
+  downsample_scale_range: [0.75, 0.95]
+  illumination_strength: 0.16
+  illumination_grid: 3
+  scratch_count_range: [1, 2]
+  scratch_width_range: [0.6, 1.6]
+  scratch_opacity_range: [0.02, 0.06]
+  dark_rim_width_range: [2, 5]
+  dark_rim_opacity_range: [0.08, 0.22]
+  dark_rim_boundary_threshold: 0.20
+  gaussian_noise_std: 0.0

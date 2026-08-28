@@ -1,0 +1,6 @@
+# Controlled vote ablation: same E9 checkpoint, historical hard-majority vote.
+_base: affinity_g4b_high065_semantic_e9_highres.yaml
+
+inference:
+  output_dir: outputs/submission_affinity_g4b_high065_semantic_e9_highres_hard
+  semantic_vote_mode: hard_majority

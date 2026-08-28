@@ -310,6 +310,155 @@ class SemanticResidualAdapter(nn.Module):
         return self.max_logit_delta * torch.tanh(raw_delta)
 
 
+class SemanticHighResolutionResidualAdapter(nn.Module):
+    """Learn semantic evidence at image resolution without changing V6 features.
+
+    SAM2's finest encoder feature is stride four.  The old semantic residual
+    therefore made its decision on that grid and only interpolated the logits.
+    This adapter progressively restores the two missing spatial scales and
+    injects shallow RGB/photometric evidence at each scale.  The coarse V6
+    probability and its local variation are *features*, not a confidence lock:
+    the head may correct a confident but locally inconsistent coarse decision.
+    """
+
+    def __init__(
+        self,
+        feature_channels: int = 256,
+        hidden_channels: int = 64,
+        color_channels: int = 16,
+        use_photometric_cues: bool = True,
+        max_logit_delta: float = 0.75,
+        half_channels: int = 48,
+        full_channels: int = 24,
+    ):
+        super().__init__()
+        hidden_channels = int(hidden_channels)
+        color_channels = int(color_channels)
+        half_channels = int(half_channels)
+        full_channels = int(full_channels)
+        if min(hidden_channels, color_channels, half_channels, full_channels) <= 0:
+            raise ValueError("semantic high-resolution channels must be positive")
+        if float(max_logit_delta) <= 0:
+            raise ValueError("semantic residual max_logit_delta must be positive")
+        self.use_photometric_cues = bool(use_photometric_cues)
+        self.max_logit_delta = float(max_logit_delta)
+
+        self.feature_path = nn.Sequential(
+            nn.Conv2d(feature_channels, hidden_channels, 3, padding=1, bias=False),
+            _make_group_norm(hidden_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden_channels, hidden_channels, 3, padding=1, bias=False),
+            _make_group_norm(hidden_channels),
+            nn.ReLU(inplace=True),
+        )
+        # RGB + coarse probability + coarse local variation; normalized
+        # luminance/local contrast are appended when photometric cues are on.
+        cue_channels = 7 if self.use_photometric_cues else 5
+        self.half_image_path = nn.Sequential(
+            nn.Conv2d(cue_channels, color_channels, 3, padding=1, bias=False),
+            _make_group_norm(color_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(color_channels, color_channels, 3, padding=1, bias=False),
+            _make_group_norm(color_channels),
+            nn.ReLU(inplace=True),
+        )
+        self.up_half = nn.Sequential(
+            nn.Conv2d(
+                hidden_channels + color_channels,
+                half_channels,
+                3,
+                padding=1,
+                bias=False,
+            ),
+            _make_group_norm(half_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(half_channels, half_channels, 3, padding=1, bias=False),
+            _make_group_norm(half_channels),
+            nn.ReLU(inplace=True),
+        )
+        self.full_image_path = nn.Sequential(
+            nn.Conv2d(cue_channels, color_channels, 3, padding=1, bias=False),
+            _make_group_norm(color_channels),
+            nn.ReLU(inplace=True),
+        )
+        self.up_full = nn.Sequential(
+            nn.Conv2d(
+                half_channels + color_channels,
+                full_channels,
+                3,
+                padding=1,
+                bias=False,
+            ),
+            _make_group_norm(full_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(full_channels, full_channels, 3, padding=1, bias=False),
+            _make_group_norm(full_channels),
+            nn.ReLU(inplace=True),
+        )
+        self.out = nn.Conv2d(full_channels, 1, 1, bias=True)
+
+    def _image_cues(
+        self,
+        image: torch.Tensor,
+        coarse_logits: torch.Tensor,
+        output_size,
+    ) -> torch.Tensor:
+        rgb = F.interpolate(
+            image, size=output_size, mode="bilinear", align_corners=False
+        )
+        coarse_probability = torch.sigmoid(
+            F.interpolate(
+                coarse_logits,
+                size=output_size,
+                mode="bilinear",
+                align_corners=False,
+            )
+        )
+        local_mean = F.avg_pool2d(
+            coarse_probability, kernel_size=5, stride=1, padding=2
+        )
+        coarse_variation = (coarse_probability - local_mean).abs()
+        values = [rgb, coarse_probability, coarse_variation]
+        if self.use_photometric_cues:
+            values.append(
+                SemanticResidualAdapter.adaptive_photometric_cues(
+                    image, output_size
+                )
+            )
+        return torch.cat(values, dim=1)
+
+    def reset_output(self) -> None:
+        nn.init.zeros_(self.out.weight)
+        nn.init.zeros_(self.out.bias)
+
+    def forward(
+        self,
+        feature: torch.Tensor,
+        image: torch.Tensor,
+        coarse_logits: torch.Tensor,
+    ) -> torch.Tensor:
+        half_size = tuple(int(value * 2) for value in feature.shape[-2:])
+        full_size = tuple(int(value) for value in image.shape[-2:])
+        x = F.interpolate(
+            self.feature_path(feature),
+            size=half_size,
+            mode="bilinear",
+            align_corners=False,
+        )
+        half_cues = self.half_image_path(
+            self._image_cues(image, coarse_logits, half_size)
+        )
+        x = self.up_half(torch.cat([x, half_cues], dim=1))
+        x = F.interpolate(
+            x, size=full_size, mode="bilinear", align_corners=False
+        )
+        full_cues = self.full_image_path(
+            self._image_cues(image, coarse_logits, full_size)
+        )
+        raw_delta = self.out(self.up_full(torch.cat([x, full_cues], dim=1)))
+        return self.max_logit_delta * torch.tanh(raw_delta)
+
+
 class FPNDecoder(nn.Module):
     """
     独立双 FPN 解码头（语义 + 边界各自独立）- 边界预测版本。
@@ -338,10 +487,13 @@ class FPNDecoder(nn.Module):
         edge_prior_fusion_hidden: int = 32,
         edge_prior_max_logit_delta: float = 1.0,
         semantic_residual: bool = False,
+        semantic_residual_version: str = "lowres_v1",
         semantic_residual_hidden: int = 64,
         semantic_residual_color_channels: int = 16,
         semantic_residual_use_photometric: bool = True,
         semantic_residual_max_logit_delta: float = 2.0,
+        semantic_residual_half_channels: int = 48,
+        semantic_residual_full_channels: int = 24,
     ):
         """
         Args:
@@ -419,6 +571,7 @@ class FPNDecoder(nn.Module):
         self.center_head_enabled = bool(center_head)
         self.edge_prior_fusion_enabled = bool(edge_prior_fusion)
         self.semantic_residual_enabled = bool(semantic_residual)
+        self.semantic_residual_version = str(semantic_residual_version)
         self.center_branch = None
         if self.center_head_enabled:
             self.center_branch = nn.Sequential(
@@ -443,13 +596,29 @@ class FPNDecoder(nn.Module):
             )
         self.semantic_residual = None
         if self.semantic_residual_enabled:
-            self.semantic_residual = SemanticResidualAdapter(
-                feature_channels=fpn_channels,
-                hidden_channels=semantic_residual_hidden,
-                color_channels=semantic_residual_color_channels,
-                use_photometric_cues=semantic_residual_use_photometric,
-                max_logit_delta=semantic_residual_max_logit_delta,
-            )
+            if self.semantic_residual_version == "lowres_v1":
+                self.semantic_residual = SemanticResidualAdapter(
+                    feature_channels=fpn_channels,
+                    hidden_channels=semantic_residual_hidden,
+                    color_channels=semantic_residual_color_channels,
+                    use_photometric_cues=semantic_residual_use_photometric,
+                    max_logit_delta=semantic_residual_max_logit_delta,
+                )
+            elif self.semantic_residual_version == "highres_v1":
+                self.semantic_residual = SemanticHighResolutionResidualAdapter(
+                    feature_channels=fpn_channels,
+                    hidden_channels=semantic_residual_hidden,
+                    color_channels=semantic_residual_color_channels,
+                    use_photometric_cues=semantic_residual_use_photometric,
+                    max_logit_delta=semantic_residual_max_logit_delta,
+                    half_channels=semantic_residual_half_channels,
+                    full_channels=semantic_residual_full_channels,
+                )
+            else:
+                raise ValueError(
+                    "semantic_residual_version must be lowres_v1 or highres_v1; "
+                    f"got {self.semantic_residual_version!r}"
+                )
 
         self._init_weights()
         if self.boundary_refine:
@@ -513,7 +682,18 @@ class FPNDecoder(nn.Module):
         if self.semantic_residual is not None:
             if image is None:
                 raise ValueError("semantic_residual=True requires image")
-            seg_logits = seg_logits + self.semantic_residual(seg_feat, image)
+            if self.semantic_residual_version == "highres_v1":
+                semantic_delta = self.semantic_residual(
+                    seg_feat, image, coarse_logits=seg_logits
+                )
+                seg_logits = F.interpolate(
+                    seg_logits,
+                    size=semantic_delta.shape[-2:],
+                    mode="bilinear",
+                    align_corners=True,
+                ) + semantic_delta
+            else:
+                seg_logits = seg_logits + self.semantic_residual(seg_feat, image)
         coarse_boundary_logits = self.boundary_branch(boundary_feat)
         if self.boundary_refine:
             # 高分辨率边界细化头：原生输出 1024
@@ -524,7 +704,12 @@ class FPNDecoder(nn.Module):
                 # 重新放大，使 512/1024 两级 image stem 看不到高频细节。
                 # semantic logits 仅作为只读门控上下文。
                 refine_image = image
-                refine_semantic = seg_logits.detach()
+                refine_semantic = F.interpolate(
+                    seg_logits.detach(),
+                    size=boundary_feat.shape[-2:],
+                    mode="bilinear",
+                    align_corners=False,
+                )
             else:
                 # 保留旧 center/refine checkpoint 的历史行为，避免同一权重
                 # 在代码升级后静默改变推理语义。
@@ -532,7 +717,12 @@ class FPNDecoder(nn.Module):
                     image, size=seg_feat.shape[-2:],
                     mode="bilinear", align_corners=True,
                 )
-                refine_semantic = seg_logits
+                refine_semantic = F.interpolate(
+                    seg_logits,
+                    size=boundary_feat.shape[-2:],
+                    mode="bilinear",
+                    align_corners=False,
+                )
             refine_logits = self.boundary_refine_head(
                 boundary_feat, refine_image, semantic_logits=refine_semantic
             )
@@ -564,12 +754,31 @@ class FPNDecoder(nn.Module):
                     center_logits, size=output_size, mode="bilinear", align_corners=True
                 )
         elif seg_logits.shape[-2:] != boundary_logits.shape[-2:]:
-            # 无指定输出尺寸时（监控/推理），把语义对齐到边界原生分辨率，
-            # 保证双通道 cat 尺寸一致
-            seg_logits = F.interpolate(
-                seg_logits, size=boundary_logits.shape[-2:],
-                mode="bilinear", align_corners=True,
+            # 无指定输出尺寸时保留两条路径中的较高原生分辨率。旧 B2 是
+            # boundary=fullres；E9 highres_v1 则是 semantic=fullres。
+            seg_area = int(seg_logits.shape[-2] * seg_logits.shape[-1])
+            boundary_area = int(
+                boundary_logits.shape[-2] * boundary_logits.shape[-1]
             )
+            target_size = (
+                seg_logits.shape[-2:]
+                if seg_area >= boundary_area
+                else boundary_logits.shape[-2:]
+            )
+            if seg_logits.shape[-2:] != target_size:
+                seg_logits = F.interpolate(
+                    seg_logits,
+                    size=target_size,
+                    mode="bilinear",
+                    align_corners=True,
+                )
+            if boundary_logits.shape[-2:] != target_size:
+                boundary_logits = F.interpolate(
+                    boundary_logits,
+                    size=target_size,
+                    mode="bilinear",
+                    align_corners=True,
+                )
         if center_logits is not None and center_logits.shape[-2:] != boundary_logits.shape[-2:]:
             center_logits = F.interpolate(
                 center_logits, size=boundary_logits.shape[-2:],

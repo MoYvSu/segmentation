@@ -167,6 +167,72 @@ def test_semantic_residual_starts_as_exact_v6_identity_and_is_isolated():
     )
 
 
+def test_highres_semantic_residual_preserves_v6_logits_at_full_resolution():
+    kwargs = {
+        "in_channels": [8, 16, 32, 64],
+        "fpn_channels": 16,
+        "dropout": 0.0,
+        "use_bn": False,
+    }
+    base = FPNDecoder(**kwargs, semantic_residual=False)
+    highres = FPNDecoder(
+        **kwargs,
+        semantic_residual=True,
+        semantic_residual_version="highres_v1",
+        semantic_residual_hidden=8,
+        semantic_residual_color_channels=4,
+        semantic_residual_half_channels=8,
+        semantic_residual_full_channels=4,
+        semantic_residual_max_logit_delta=0.75,
+    )
+    missing, unexpected = highres.load_state_dict(base.state_dict(), strict=False)
+    assert missing and all(name.startswith("semantic_residual.") for name in missing)
+    assert unexpected == []
+    features = [
+        torch.randn(1, 8, 16, 16),
+        torch.randn(1, 16, 8, 8),
+        torch.randn(1, 32, 4, 4),
+        torch.randn(1, 64, 2, 2),
+    ]
+    image = torch.rand(1, 3, 64, 64)
+    base.eval()
+    highres.eval()
+    with torch.no_grad():
+        coarse = base(features, image=image)
+        actual = highres(features, image=image)
+        expected = torch.nn.functional.interpolate(
+            coarse, size=(64, 64), mode="bilinear", align_corners=True
+        )
+    assert actual.shape[-2:] == (64, 64)
+    assert torch.equal(actual, expected)
+
+
+def test_instance_probability_pool_and_thin_weight_do_not_require_a_center():
+    target = torch.zeros(1, 5, 12)
+    labels = torch.zeros(1, 5, 12, dtype=torch.long)
+    # A one-pixel-wide, non-convex ferrite path has no eroded core.
+    labels[:, 2, 1:10] = 1
+    labels[:, 1:4, 9] = 1
+    target[labels == 1] = 1.0
+    boundary = (labels > 0).float()
+    logits = torch.full((1, 5, 12), -0.2, requires_grad=True)
+
+    loss, stats = instance_balanced_core_bce(
+        logits,
+        target,
+        labels,
+        boundary,
+        core_radius=2,
+        min_core_pixels=4,
+        pooled_probability_weight=0.5,
+        thin_instance_weight=1.5,
+    )
+    loss.backward()
+    assert stats["fallback_instances"] == 1.0
+    assert stats["pooled_probability_loss"] > 0.0
+    assert float(logits.grad[labels == 1].abs().mean()) > 0.0
+
+
 def test_adaptive_photometric_cues_ignore_global_exposure_affine_change():
     image = torch.rand(2, 3, 32, 32) * 0.5 + 0.2
     shifted = image * 0.6 + 0.1

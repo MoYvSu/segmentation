@@ -52,6 +52,8 @@ class BoundaryLoss(nn.Module):
         semantic_instance_ferrite_weight: float = 1.0,
         semantic_instance_hard_gamma: float = 0.0,
         semantic_instance_hard_floor: float = 0.25,
+        semantic_instance_pool_weight: float = 0.0,
+        semantic_thin_instance_weight: float = 1.0,
         semantic_tversky_weight: float = 0.0,
         semantic_tversky_alpha: float = 0.40,
         semantic_tversky_beta: float = 0.60,
@@ -123,6 +125,12 @@ class BoundaryLoss(nn.Module):
         )
         self.semantic_instance_hard_gamma = float(semantic_instance_hard_gamma)
         self.semantic_instance_hard_floor = float(semantic_instance_hard_floor)
+        self.semantic_instance_pool_weight = float(
+            semantic_instance_pool_weight
+        )
+        self.semantic_thin_instance_weight = float(
+            semantic_thin_instance_weight
+        )
         self.semantic_tversky_weight = float(semantic_tversky_weight)
         self.semantic_tversky_alpha = float(semantic_tversky_alpha)
         self.semantic_tversky_beta = float(semantic_tversky_beta)
@@ -300,6 +308,8 @@ class BoundaryLoss(nn.Module):
                     ferrite_class_weight=self.semantic_instance_ferrite_weight,
                     hard_instance_gamma=self.semantic_instance_hard_gamma,
                     hard_instance_floor=self.semantic_instance_hard_floor,
+                    pooled_probability_weight=self.semantic_instance_pool_weight,
+                    thin_instance_weight=self.semantic_thin_instance_weight,
                 )
                 loss_seg = loss_seg + self.semantic_instance_weight * instance_loss
                 self.last_semantic_instance_loss = float(instance_loss.detach())

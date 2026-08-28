@@ -92,6 +92,9 @@ def build_model(
             "edge_prior_max_logit_delta", 1.0
         ),
         semantic_residual=decoder_cfg.get("semantic_residual", False),
+        semantic_residual_version=decoder_cfg.get(
+            "semantic_residual_version", "lowres_v1"
+        ),
         semantic_residual_hidden=decoder_cfg.get("semantic_residual_hidden", 64),
         semantic_residual_color_channels=decoder_cfg.get(
             "semantic_residual_color_channels", 16
@@ -101,6 +104,12 @@ def build_model(
         ),
         semantic_residual_max_logit_delta=decoder_cfg.get(
             "semantic_residual_max_logit_delta", 2.0
+        ),
+        semantic_residual_half_channels=decoder_cfg.get(
+            "semantic_residual_half_channels", 48
+        ),
+        semantic_residual_full_channels=decoder_cfg.get(
+            "semantic_residual_full_channels", 24
         ),
     )
 

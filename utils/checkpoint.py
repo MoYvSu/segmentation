@@ -8,7 +8,7 @@ import subprocess
 from typing import Any, Dict, Iterable, Optional
 
 
-FORMAT_VERSION = 5
+FORMAT_VERSION = 6
 
 
 def architecture_from_config(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -31,6 +31,10 @@ def architecture_from_config(config: Dict[str, Any]) -> Dict[str, Any]:
         ),
         "center_head": bool(decoder.get("center_head", False)),
         "semantic_residual": bool(decoder.get("semantic_residual", False)),
+        "semantic_residual_version": (
+            str(decoder.get("semantic_residual_version", "lowres_v1"))
+            if decoder.get("semantic_residual", False) else "none"
+        ),
         "semantic_residual_hidden": (
             int(decoder.get("semantic_residual_hidden", 64))
             if decoder.get("semantic_residual", False) else 0
@@ -42,6 +46,18 @@ def architecture_from_config(config: Dict[str, Any]) -> Dict[str, Any]:
         "semantic_residual_use_photometric": (
             bool(decoder.get("semantic_residual_use_photometric", True))
             if decoder.get("semantic_residual", False) else False
+        ),
+        "semantic_residual_half_channels": (
+            int(decoder.get("semantic_residual_half_channels", 48))
+            if decoder.get("semantic_residual", False)
+            and decoder.get("semantic_residual_version", "lowres_v1") == "highres_v1"
+            else 0
+        ),
+        "semantic_residual_full_channels": (
+            int(decoder.get("semantic_residual_full_channels", 24))
+            if decoder.get("semantic_residual", False)
+            and decoder.get("semantic_residual_version", "lowres_v1") == "highres_v1"
+            else 0
         ),
         "lora_enabled": bool(lora.get("enabled", False)),
         "lora_rank": int(lora.get("rank", 0)) if lora.get("enabled", False) else 0,
@@ -84,6 +100,9 @@ def architecture_from_state_dict(
         if "lora_A" in name and hasattr(tensor, "shape") and len(tensor.shape) >= 1:
             lora_rank = int(tensor.shape[0])
             break
+    semantic_highres = any(
+        k.startswith("semantic_residual.up_half.") for k in keys
+    )
     return {
         "model": "SegmentationModel",
         "decoder": "FPNDecoder",
@@ -92,16 +111,34 @@ def architecture_from_state_dict(
         "boundary_refine": any(k.startswith("boundary_refine_head.") for k in keys),
         "center_head": any(k.startswith("center_branch.") for k in keys),
         "semantic_residual": any(k.startswith("semantic_residual.") for k in keys),
+        "semantic_residual_version": (
+            "highres_v1" if semantic_highres else "lowres_v1"
+        ) if any(k.startswith("semantic_residual.") for k in keys) else "none",
         "semantic_residual_hidden": (
             int(state_dict["semantic_residual.feature_path.0.weight"].shape[0])
             if "semantic_residual.feature_path.0.weight" in state_dict else 0
         ),
         "semantic_residual_color_channels": (
             int(state_dict["semantic_residual.photometric_path.0.weight"].shape[0])
-            if "semantic_residual.photometric_path.0.weight" in state_dict else 0
+            if "semantic_residual.photometric_path.0.weight" in state_dict
+            else int(state_dict["semantic_residual.half_image_path.0.weight"].shape[0])
+            if "semantic_residual.half_image_path.0.weight" in state_dict
+            else 0
         ),
         "semantic_residual_use_photometric": any(
             k.startswith("semantic_residual.photometric_path.") for k in keys
+        ) or (
+            semantic_highres
+            and state_dict.get("semantic_residual.half_image_path.0.weight") is not None
+            and int(state_dict["semantic_residual.half_image_path.0.weight"].shape[1]) == 7
+        ),
+        "semantic_residual_half_channels": (
+            int(state_dict["semantic_residual.up_half.0.weight"].shape[0])
+            if "semantic_residual.up_half.0.weight" in state_dict else 0
+        ),
+        "semantic_residual_full_channels": (
+            int(state_dict["semantic_residual.up_full.0.weight"].shape[0])
+            if "semantic_residual.up_full.0.weight" in state_dict else 0
         ),
         "lora_enabled": bool(lora_state_dict),
         "lora_rank": lora_rank,
@@ -141,7 +178,9 @@ def architecture_mismatches(
         "encoder", "decoder", "fpn_channels", "num_classes", "boundary_refine",
         "boundary_refine_version", "center_head", "lora_enabled", "lora_rank",
         "semantic_residual", "semantic_residual_hidden",
+        "semantic_residual_version",
         "semantic_residual_color_channels", "semantic_residual_use_photometric",
+        "semantic_residual_half_channels", "semantic_residual_full_channels",
         "gda_enabled", "gda_bottleneck_ratio",
         "gda_gate_mode", "gda_active_scales",
         "edge_prior_enabled", "edge_prior_hidden_channels",

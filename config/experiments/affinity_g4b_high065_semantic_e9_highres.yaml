@@ -1,0 +1,21 @@
+# E9 high-resolution semantic evidence + fixed G4b affinity geometry.
+_base: ../inference/final_affinity_g4b_high065.yaml
+
+decoder:
+  semantic_residual: true
+  semantic_residual_version: highres_v1
+  semantic_residual_hidden: 64
+  semantic_residual_color_channels: 16
+  semantic_residual_half_channels: 48
+  semantic_residual_full_channels: 24
+  semantic_residual_use_photometric: true
+  semantic_residual_max_logit_delta: 0.75
+
+affinity_geometry_g1:
+  reference_checkpoint: outputs/stage2_semantic_e9_highres20/best_model_stage2.pth
+  semantic_decoder_override_base: outputs/stage2_v6/best_model_stage2.pth
+
+inference:
+  output_dir: outputs/submission_affinity_g4b_high065_semantic_e9_highres
+  # Align deployment with E9's whole-instance pooled-probability objective.
+  semantic_vote_mode: probability_mean

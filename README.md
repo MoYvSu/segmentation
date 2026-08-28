@@ -1,8 +1,8 @@
 # 低碳钢金相图像相区分割
 
 > 当前部署基线：V6 语义锚点 + G4b 8 通道 affinity geometry → gated affinity boundary
-> → `high=0.65` 封边/受阻分水岭 → hard-majority 实例分类。当前训练实验 E7b-A 只修复
-> semantic decoder，不改变 G4b 几何；V6/B2 边界路线保留为回退。
+> → `high=0.65` 封边/受阻分水岭 → 实例分类。黑盒确认基线仍为 V6/G4b；当前 E9
+> 只训练零初始化的高分辨率语义残差，并用整实例概率聚合修复纤细铁素体错配。
 > 当前状态、入口与产物约定以 [docs/PIPELINE.md](docs/PIPELINE.md) 为准。
 
 颜色先验分析已记录在 [docs/COLOR_SEPARABILITY.md](docs/COLOR_SEPARABILITY.md)。后续对话进程在
@@ -15,12 +15,9 @@
 - **当前几何基线**：G4b affinity + `high=0.65` + 封边/受阻分水岭。相较 G3，G4b 是当前
   更稳定的部署基线；测试集仍以欠分割和局部合并为主要风险，尚未证明黑盒竞赛分数提升。
   详见 [docs/AFFINITY_DEPLOYMENT_EVALUATION.md](docs/AFFINITY_DEPLOYMENT_EVALUATION.md)。
-- **当前语义候选**：E7a adaptive-core 实例投票。它不改变实例几何，只改变 ferrite/pearlite
-  分类；保留作 challenger，默认仍使用 hard majority。E7a 的 Lab 弱先验因 ferrite 单向偏置
-  暂不启用，详见 [docs/SEMANTIC_VOTE_E7A_20260827.md](docs/SEMANTIC_VOTE_E7A_20260827.md)。
-- **当前训练实验**：E7b-A 从 V6 初始化，只训练 `seg_fpn + seg_branch` 20 epoch；新增实例
-  等权核心损失、边界暗环定向增强和高置信无标签一致性。boundary/affinity/LoRA 全冻结，
-  详见 [docs/SEMANTIC_TRAINING_E7B_20260827.md](docs/SEMANTIC_TRAINING_E7B_20260827.md)。
+- **当前语义实验**：E9 冻结 V6/G4b，只训练 256→512→1024 的轻量语义残差；原图 RGB、
+  逐图亮度和局部对比度在高分辨率参与决策。训练/推理都使用整实例平均概率，不依赖质心或
+  单个高置信像素，详见 [docs/SEMANTIC_EXPERIMENT_E9_20260828.md](docs/SEMANTIC_EXPERIMENT_E9_20260828.md)。
 - **中心热图实验已降级为负面对照**：共享 `boundary_fpn` 的中心辅助任务破坏了边界表征；
   `outputs/stage2_center_heatmap/best_model_stage2.pth` 不作为后续初始化主线。
 - **当前目标**：在固定 G4b 实例图上降低小实例 ferrite/pearlite 错配，并同时守住类别 mIoU
@@ -123,10 +120,10 @@ E7c 不丢弃 E7b 的局部纠错能力，而是让 V6 固定实例几何与默�
 新增一个正确铁素体匹配，68 张测试图翻转 67/6178 个实例；不设置实例面积门槛。详见
 [docs/SEMANTIC_EXPERIMENT_E7C_20260828.md](docs/SEMANTIC_EXPERIMENT_E7C_20260828.md)。
 
-当前训练实验转为 E8：冻结 V6 `seg_fpn/seg_branch/LoRA` 与完整 G4b geometry，只训练
-零初始化、带逐图光照归一化特征的轻量 semantic residual adapter。训练目标对 ferrite 漏检
-仅施加温和趋势，不在推理侧禁止双向修正。详见
-[docs/SEMANTIC_EXPERIMENT_E8_20260828.md](docs/SEMANTIC_EXPERIMENT_E8_20260828.md)。
+E8 已证明低分辨率残差能够产生局部纠错，但 `+/-2` logit 很快饱和且验证 mIoU 未提升，故不
+晋级。当前 E9 保留 V6 零漂移锚点，把可学习决策提高到输入分辨率，并增加与实例投票一致的
+整实例概率损失；不使用硬置信锁或单向翻转。详见
+[docs/SEMANTIC_EXPERIMENT_E9_20260828.md](docs/SEMANTIC_EXPERIMENT_E9_20260828.md)。
 
 如需复现实验，按既定约定可直接在训练服务器运行：
 
@@ -135,15 +132,14 @@ conda activate sam2_env
 python train_stage2.py --config config/train/stage2_semantic_e7b_decoder20.yaml
 ```
 
-E8 当前训练命令：
+E9 当前训练命令：
 
 ```bash
-python train_stage2.py --config config/train/stage2_semantic_e8_residual20.yaml
+python train_stage2.py --config config/train/stage2_semantic_e9_highres20.yaml
 ```
 
-E7b 输出目录为 `outputs/stage2_semantic_e7b_decoder20/`；E8 输出目录为
-`outputs/stage2_semantic_e8_residual20/`。训练固定 G4b geometry 与 LoRA，E8 仅更新零初始化
-semantic residual adapter；checkpoint 按验证 semantic mIoU 选择，无标签 holdout monitor 只检查
+E9 输出目录为 `outputs/stage2_semantic_e9_highres20/`。训练固定 G4b geometry、V6 decoder
+与 LoRA，仅更新零初始化 high-resolution semantic residual；checkpoint 按验证 semantic mIoU 选择，无标签 holdout monitor 只检查
 泛化稳定性。历史 Stage 1、B2、affinity 训练命令见 [docs/PIPELINE.md](docs/PIPELINE.md) 和
 `config/README.md`。
 
@@ -167,6 +163,13 @@ python tools/run_affinity_submission.py \
 ```bash
 python tools/run_affinity_submission.py \
   --config config/experiments/affinity_g4b_high065_semantic_dual_e7c_relaxed.yaml
+```
+
+E9 训练完成后的整实例概率聚合：
+
+```bash
+python tools/run_affinity_submission.py \
+  --config config/experiments/affinity_g4b_high065_semantic_e9_highres.yaml
 ```
 
 E7b 整体替换配置只替换 semantic decoder；E7c-R 则只允许 E7b 改实例类别。两者都会验证

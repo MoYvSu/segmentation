@@ -5,17 +5,11 @@ affinity，使用 `high=0.65`、seal2、局部重建与受阻分水岭。训练 
 完整部署路径验证晋级，Oracle GT 前景重建仅作诊断。完整协议见
 `docs/AFFINITY_DEPLOYMENT_EVALUATION.md`；V6/B2 配置仍保留为回退。
 
-当前训练实验为 `train/stage2_semantic_e7b_decoder20.yaml`：从 V6 初始化，只训练 semantic
-decoder 20 epoch，冻结 boundary/LoRA/affinity，加入实例等权核心损失、暗边定向增强与高置信
-无标签一致性。训练后使用 `experiments/affinity_g4b_high065_semantic_e7b.yaml` 在同一 G4b
-实例几何上做严格对照。详见 `docs/SEMANTIC_TRAINING_E7B_20260827.md`。
-
-当前执行的 E8 语义实验为 `train/stage2_semantic_e8_residual20.yaml`：以 V6 语义输出为零点，
-冻结 V6 的 semantic FPN/head、boundary、LoRA 与 G4b geometry，只训练轻量 residual adapter。
-adapter 使用逐图光照归一化亮度/局部对比度特征，配合 ferrite 难实例加权、轻量 Tversky 和物理成像
-增强；不会在推理侧禁止任一类别方向的纠错。部署对照为
-`experiments/affinity_g4b_high065_semantic_e8.yaml`，详见
-`docs/SEMANTIC_EXPERIMENT_E8_20260828.md`。
+当前执行的 E9 语义实验为 `train/stage2_semantic_e9_highres20.yaml`：以 V6 语义为零漂移锚点，
+冻结 semantic FPN/head、boundary、LoRA 与 G4b affinity，只训练 256→512→1024 的高分辨率
+residual。训练增加整实例平均概率目标和温和细实例权重，不依赖中心或最高置信像素。部署配置为
+`experiments/affinity_g4b_high065_semantic_e9_highres.yaml`，hard-majority 对照在同名 `_hard`
+配置；详见 `docs/SEMANTIC_EXPERIMENT_E9_20260828.md`。E7b/E8 保留为历史对照。
 
 当前类别纠错候选为 `experiments/affinity_g4b_high065_semantic_dual_e7c_relaxed.yaml`：固定
 V6 前景与 G4b 实例几何，仅用 E7b core 分数覆盖部分 V6 hard vote。阈值由缓存置信度扫参

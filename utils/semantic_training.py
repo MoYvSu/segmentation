@@ -36,6 +36,8 @@ def instance_balanced_core_bce(
     ferrite_class_weight: float = 1.0,
     hard_instance_gamma: float = 0.0,
     hard_instance_floor: float = 0.25,
+    pooled_probability_weight: float = 0.0,
+    thin_instance_weight: float = 1.0,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """Average semantic BCE per annotated instance instead of per pixel.
 
@@ -43,7 +45,11 @@ def instance_balanced_core_bce(
     large instance cores.  If erosion would erase a thin or tiny instance, the
     whole instance is retained as a fallback, so small grains still contribute.
     The final optional class balancing gives ferrite and pearlite equal weight
-    even when their annotated instance counts differ.
+    even when their annotated instance counts differ.  A pooled-probability
+    term directly trains the deployment decision (mean evidence over one
+    instance), so thin/non-convex grains do not need a single trusted center or
+    a high-confidence pixel.  ``thin_instance_weight`` mildly upweights grains
+    whose interior core disappears instead of silently dropping them.
     """
 
     if logits.ndim != 3 or target.ndim != 3 or instance_map.ndim != 3:
@@ -63,6 +69,7 @@ def instance_balanced_core_bce(
             "core_instances": 0.0,
             "fallback_instances": 0.0,
             "selected_pixels": 0.0,
+            "mean_pooled_true_confidence": 0.0,
         }
 
     radius = max(0, int(core_radius))
@@ -137,15 +144,30 @@ def instance_balanced_core_bce(
     confidence_sums = confidence_sums.scatter_add(
         0, selected_ids, true_confidence
     )
+    probability_sums = torch.zeros_like(loss_sums)
+    probability_sums = probability_sums.scatter_add(
+        0, selected_ids, probabilities
+    )
 
     valid = selected_counts > 0
     per_instance_loss = loss_sums[valid] / selected_counts[valid].clamp_min(1.0)
     per_instance_confidence = (
         confidence_sums[valid] / selected_counts[valid].clamp_min(1.0)
     )
+    per_instance_probability = (
+        probability_sums[valid] / selected_counts[valid].clamp_min(1.0)
+    ).clamp(1.0e-5, 1.0 - 1.0e-5)
     per_instance_class = (
         target_sums[valid] / selected_counts[valid].clamp_min(1.0) >= 0.5
     )
+    pooled_probability_loss = F.binary_cross_entropy(
+        per_instance_probability,
+        per_instance_class.to(per_instance_probability.dtype),
+        reduction="none",
+    )
+    pool_weight = max(0.0, float(pooled_probability_weight))
+    if pool_weight > 0:
+        per_instance_loss = per_instance_loss + pool_weight * pooled_probability_loss
 
     gamma = max(0.0, float(hard_instance_gamma))
     if gamma > 0:
@@ -154,6 +176,14 @@ def instance_balanced_core_bce(
         ).clamp(0.0, 1.0).pow(gamma)
     else:
         focus = torch.ones_like(per_instance_loss)
+    thin_weight = max(0.0, float(thin_instance_weight))
+    if thin_weight != 1.0:
+        fallback_by_instance = ~use_core_by_id[valid]
+        focus = focus * torch.where(
+            fallback_by_instance,
+            torch.full_like(focus, thin_weight),
+            torch.ones_like(focus),
+        )
 
     def focused_mean(values, weights):
         return (values * weights).sum() / weights.sum().clamp_min(1.0e-6)
@@ -187,7 +217,17 @@ def instance_balanced_core_bce(
         "selected_pixels": float(selected.sum().item()),
         "ferrite_instances": float(per_instance_class.sum().item()),
         "mean_true_confidence": float(per_instance_confidence.detach().mean()),
+        "mean_pooled_true_confidence": float(
+            torch.where(
+                per_instance_class,
+                per_instance_probability,
+                1.0 - per_instance_probability,
+            ).detach().mean()
+        ),
         "mean_hard_focus": float(focus.detach().mean()),
+        "pooled_probability_loss": float(
+            pooled_probability_loss.detach().mean()
+        ),
     }
     return loss, stats
 

@@ -329,6 +329,9 @@ def build_model(config, device):
             "edge_prior_max_logit_delta", 1.0
         ),
         semantic_residual=decoder_cfg.get("semantic_residual", False),
+        semantic_residual_version=decoder_cfg.get(
+            "semantic_residual_version", "lowres_v1"
+        ),
         semantic_residual_hidden=decoder_cfg.get("semantic_residual_hidden", 64),
         semantic_residual_color_channels=decoder_cfg.get(
             "semantic_residual_color_channels", 16
@@ -338,6 +341,12 @@ def build_model(config, device):
         ),
         semantic_residual_max_logit_delta=decoder_cfg.get(
             "semantic_residual_max_logit_delta", 2.0
+        ),
+        semantic_residual_half_channels=decoder_cfg.get(
+            "semantic_residual_half_channels", 48
+        ),
+        semantic_residual_full_channels=decoder_cfg.get(
+            "semantic_residual_full_channels", 24
         ),
     )
 
@@ -1524,6 +1533,12 @@ def main():
         semantic_instance_hard_floor=train_cfg.get(
             "semantic_instance_hard_floor", 0.25
         ),
+        semantic_instance_pool_weight=train_cfg.get(
+            "semantic_instance_pool_weight", 0.0
+        ),
+        semantic_thin_instance_weight=train_cfg.get(
+            "semantic_thin_instance_weight", 1.0
+        ),
         semantic_tversky_weight=train_cfg.get(
             "semantic_tversky_weight", 0.0
         ),
@@ -1563,13 +1578,15 @@ def main():
         logger.info(
             "  Semantic instance core: weight=%.3f radius=%dpx "
             "min_pixels=%d class_balance=%s ferrite_weight=%.2f "
-            "hard_gamma=%.2f",
+            "hard_gamma=%.2f pool_weight=%.2f thin_weight=%.2f",
             criterion.semantic_instance_weight,
             criterion.semantic_core_radius,
             criterion.semantic_core_min_pixels,
             criterion.semantic_instance_class_balance,
             criterion.semantic_instance_ferrite_weight,
             criterion.semantic_instance_hard_gamma,
+            criterion.semantic_instance_pool_weight,
+            criterion.semantic_thin_instance_weight,
         )
     if criterion.semantic_tversky_weight > 0:
         logger.info(
