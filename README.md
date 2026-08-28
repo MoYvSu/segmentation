@@ -18,6 +18,9 @@
 - **当前语义选择**：E9 黑盒结果为 mIoU `0.8421`、铁素体平均面积项 `0.7917`；E10a
   冷启动完整高分辨率语义解码器在测试目检上更受偏好，当前按单模型候选保留，E9 作为稳定
   回退，不做连续融合。详见 [docs/SEMANTIC_EXPERIMENT_E10A_20260828.md](docs/SEMANTIC_EXPERIMENT_E10A_20260828.md)。
+- **统一部署模型**：`outputs/deployment/e10a_g4b_fused.pth` 把共享 SAM2+LoRA encoder、
+  E10a semantic decoder 与 G4b affinity decoder 打包为一个 81.67M 参数模型；加载时不再依赖
+  三份源 checkpoint，`test_009` 与原管线最终实例图/类别 JSON 字节级一致。
 - **方向图切分筛查**：直接阈值化 8 通道 affinity 再做核心回填，虽然使 10 张困难图的实例数
   增加约 `9.8%–18.7%`，但弱密集区同时出现碎裂和大块合并，不能替代当前分水岭。详见
   [docs/AFFINITY_GRAPH_AB_20260828.md](docs/AFFINITY_GRAPH_AB_20260828.md)。
@@ -193,6 +196,20 @@ E10a 训练完成后的固定 V6/G4b 几何 challenger：
 python tools/run_affinity_submission.py \
   --config config/experiments/affinity_g4b_high065_semantic_e10a_cold.yaml
 ```
+
+推荐的单主干部署方式：
+
+```bash
+# 只需在源 checkpoint 更新后重新生成一次组合包
+python tools/build_fused_deployment_checkpoint.py
+
+# 日常推理仅加载一个组合 checkpoint
+python tools/run_fused_affinity_submission.py \
+  --checkpoint outputs/deployment/e10a_g4b_fused.pth
+```
+
+组合包保存完整 encoder 权重及两个任务分支，约 327 MB；源 checkpoint 路径与 SHA256 仍写入
+包内供审计，但不是推理依赖。禁止用参数平均代替分支拼接。
 
 E7b 整体替换配置只替换 semantic decoder；E7c-R 则只允许 E7b 改实例类别。两者都会验证
 E7b 与 V6 的 LoRA 张量逐字节一致；若 LoRA 发生变化，将拒绝复用 G4b affinity checkpoint。V6 双头历史推理仍可使用

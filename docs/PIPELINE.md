@@ -7,6 +7,11 @@
 特征并冷启动完整高分辨率语义解码器，当前目检优先但尚未黑盒确认。部署决策坚持一个语义
 模型：E10a 为候选、E9 为回退，不做连续融合；V6/B2 边界路线继续作为几何回退。
 
+当前推荐部署产物为 `outputs/deployment/e10a_g4b_fused.pth`：单个共享 SAM2+LoRA encoder
+同时连接 E10a semantic decoder 和 G4b affinity decoder。组合包参数量 `81.667394M`、大小
+`326836899` bytes；保存后重新构建的 semantic/affinity logits 最大绝对误差均为 `0.0`，
+`test_009` 的实例 PNG 与类别 JSON 也和原三 checkpoint 管线字节级一致。
+
 G3/G4b 尚不能证明黑盒竞赛成绩提升，测试目检仍以欠分割为主要风险；GT 前景上的 Oracle
 图重建仅作诊断。当前 E9 在冻结 V6/G4b 的前提下学习输入分辨率语义残差，并以整实例概率
 聚合处理纤细/非凸实例错配。直接方向 affinity 图切分的 10 图筛查未晋级，详见
@@ -46,6 +51,16 @@ conda activate sam2_env
 # 当前固定 G4b 部署基线
 python tools/run_affinity_submission.py \
   --config config/inference/final_affinity_g4b_high065.yaml
+
+# E10a + G4b：将共享主干和两个分支一次性打包
+python tools/build_fused_deployment_checkpoint.py \
+  --config config/experiments/affinity_g4b_high065_semantic_e10a_cold.yaml \
+  --output outputs/deployment/e10a_g4b_fused.pth
+
+# 推荐提交推理入口：只加载一个组合 checkpoint
+python tools/run_fused_affinity_submission.py \
+  --config config/experiments/affinity_g4b_high065_semantic_e10a_cold.yaml \
+  --checkpoint outputs/deployment/e10a_g4b_fused.pth
 
 # 当前 E7b-A 语义专项训练（V6 初始化、decoder-only、20 epoch）
 python train_stage2.py \
