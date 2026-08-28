@@ -129,14 +129,20 @@ def main():
     system.eval()
 
     test_dir = Path(project_path(config, config["inference"]["test_dir"]))
-    requested = {item.strip() for item in args.images.split(",") if item.strip()}
+    all_images = str(args.images).strip().lower() == "all"
+    requested = (
+        None
+        if all_images
+        else {item.strip() for item in args.images.split(",") if item.strip()}
+    )
     image_paths = [
         Path(path) for path in list_images(str(test_dir))
-        if Path(path).stem in requested
+        if requested is None or Path(path).stem in requested
     ]
-    missing = sorted(requested - {path.stem for path in image_paths})
-    if missing:
-        raise FileNotFoundError(f"requested images missing: {missing}")
+    if requested is not None:
+        missing = sorted(requested - {path.stem for path in image_paths})
+        if missing:
+            raise FileNotFoundError(f"requested images missing: {missing}")
 
     output_root = Path(project_path(config, args.output_dir))
     output_root.mkdir(parents=True, exist_ok=True)
