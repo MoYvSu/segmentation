@@ -10,6 +10,10 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from models.fpn_decoder import (
+    SemanticHighResolutionResidualAdapter,
+    SemanticResidualAdapter,
+)
 from models.offset_geometry import lora_state_dict_digest
 from utils.config import project_path
 
@@ -17,18 +21,17 @@ from utils.config import project_path
 class SemanticChallenger(nn.Module):
     """Semantic-only decoder copied from a compatible Stage-2 checkpoint."""
 
-    def __init__(self, reference_decoder: nn.Module, include_highres: bool = False):
+    def __init__(
+        self,
+        reference_decoder: nn.Module,
+        semantic_residual: nn.Module | None = None,
+        semantic_residual_version: str = "none",
+    ):
         super().__init__()
         self.seg_fpn = copy.deepcopy(reference_decoder.seg_fpn)
         self.seg_branch = copy.deepcopy(reference_decoder.seg_branch)
-        self.semantic_residual = (
-            copy.deepcopy(reference_decoder.semantic_residual)
-            if include_highres else None
-        )
-        self.semantic_residual_version = (
-            str(reference_decoder.semantic_residual_version)
-            if include_highres else "none"
-        )
+        self.semantic_residual = copy.deepcopy(semantic_residual)
+        self.semantic_residual_version = str(semantic_residual_version)
 
     def forward(self, features, image=None):
         semantic_feature = self.seg_fpn(features)
@@ -48,6 +51,57 @@ class SemanticChallenger(nn.Module):
             mode="bilinear",
             align_corners=True,
         ) + delta
+
+
+def _build_checkpoint_semantic_residual(checkpoint, reference_decoder):
+    """Construct only the challenger's optional residual from its own config.
+
+    The fixed V6 reference must keep its native architecture so strict
+    checkpoint validation remains meaningful.  A challenger may nevertheless
+    contain a newer high-resolution semantic path; construct that path here
+    instead of adding it to the reference decoder.
+    """
+    decoder_cfg = checkpoint.get("config", {}).get("decoder", {})
+    if not bool(decoder_cfg.get("semantic_residual", False)):
+        raise ValueError(
+            "semantic challenger has semantic_residual tensors but its "
+            "checkpoint lacks matching decoder configuration"
+        )
+    if "semantic_residual_max_logit_delta" not in decoder_cfg:
+        raise ValueError(
+            "semantic challenger checkpoint must record "
+            "decoder.semantic_residual_max_logit_delta"
+        )
+    version = str(decoder_cfg.get("semantic_residual_version", "lowres_v1"))
+    common = {
+        "feature_channels": int(reference_decoder.fpn_channels),
+        "hidden_channels": int(decoder_cfg.get("semantic_residual_hidden", 64)),
+        "color_channels": int(
+            decoder_cfg.get("semantic_residual_color_channels", 16)
+        ),
+        "use_photometric_cues": bool(
+            decoder_cfg.get("semantic_residual_use_photometric", True)
+        ),
+        "max_logit_delta": float(
+            decoder_cfg["semantic_residual_max_logit_delta"]
+        ),
+    }
+    if version == "lowres_v1":
+        return SemanticResidualAdapter(**common), version
+    if version == "highres_v1":
+        return (
+            SemanticHighResolutionResidualAdapter(
+                **common,
+                half_channels=int(
+                    decoder_cfg.get("semantic_residual_half_channels", 48)
+                ),
+                full_channels=int(
+                    decoder_cfg.get("semantic_residual_full_channels", 24)
+                ),
+            ),
+            version,
+        )
+    raise ValueError(f"unsupported semantic residual version: {version!r}")
 
 
 def build_semantic_challenger(config, system, reference_path, device):
@@ -85,10 +139,13 @@ def build_semantic_challenger(config, system, reference_path, device):
     include_highres = any(
         key.startswith("semantic_residual.") for key in decoder_state
     )
-    if include_highres and system.reference_model.decoder.semantic_residual is None:
-        raise ValueError(
-            "semantic challenger checkpoint contains a high-resolution head, "
-            "but active decoder config does not construct it"
+    semantic_residual = None
+    semantic_residual_version = "none"
+    if include_highres:
+        semantic_residual, semantic_residual_version = (
+            _build_checkpoint_semantic_residual(
+                challenger_checkpoint, system.reference_model.decoder
+            )
         )
     semantic_prefixes = ["seg_fpn.", "seg_branch."]
     if include_highres:
@@ -99,7 +156,9 @@ def build_semantic_challenger(config, system, reference_path, device):
         if any(key.startswith(prefix) for prefix in semantic_prefixes)
     }
     challenger = SemanticChallenger(
-        system.reference_model.decoder, include_highres=include_highres
+        system.reference_model.decoder,
+        semantic_residual=semantic_residual,
+        semantic_residual_version=semantic_residual_version,
     )
     challenger.load_state_dict(semantic_state, strict=True)
     challenger.to(device).eval()

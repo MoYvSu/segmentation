@@ -1,15 +1,5 @@
-# Fixed V6/G4b foreground and affinity geometry; E10a is classifier-only.
+# Fixed native V6/G4b foreground and affinity geometry; E10a is classifier-only.
 _base: ../inference/final_affinity_g4b_high065.yaml
-
-decoder:
-  semantic_residual: true
-  semantic_residual_version: highres_v1
-  semantic_residual_hidden: 64
-  semantic_residual_color_channels: 16
-  semantic_residual_half_channels: 48
-  semantic_residual_full_channels: 24
-  semantic_residual_use_photometric: true
-  semantic_residual_max_logit_delta: 2.0
 
 semantic_challenger:
   enabled: true

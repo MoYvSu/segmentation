@@ -58,8 +58,18 @@ def test_cold_start_only_exposes_semantic_parameters():
 
 
 def test_highres_semantic_challenger_uses_image_path():
-    decoder = build_decoder()
-    challenger = SemanticChallenger(decoder, include_highres=True).eval()
+    source_decoder = build_decoder()
+    reference_decoder = FPNDecoder(
+        in_channels=[8, 16, 32, 64],
+        fpn_channels=16,
+        dropout=0.0,
+        semantic_residual=False,
+    )
+    challenger = SemanticChallenger(
+        reference_decoder,
+        semantic_residual=source_decoder.semantic_residual,
+        semantic_residual_version=source_decoder.semantic_residual_version,
+    ).eval()
     features = [
         torch.randn(1, 8, 16, 16),
         torch.randn(1, 16, 8, 8),
@@ -73,3 +83,4 @@ def test_highres_semantic_challenger_uses_image_path():
 
     assert output.shape == (1, 1, 64, 64)
     assert torch.isfinite(output).all()
+    assert reference_decoder.semantic_residual is None
