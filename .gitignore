@@ -13,6 +13,7 @@ config/*
 weights
 segment-anything-2
 outputs
+downloads/
 # Local experiment logs; checkpoints and monitor images remain under outputs/.
 *.log
 logs/
