@@ -106,6 +106,14 @@ def main():
     parser.add_argument("--short-thresholds", default="0.30,0.35,0.40")
     parser.add_argument("--distance2-threshold", type=float, default=0.55)
     parser.add_argument("--distance4-threshold", type=float, default=0.65)
+    parser.add_argument(
+        "--min-instance-areas",
+        default="",
+        help=(
+            "Optional comma-separated native-pixel area floors. When omitted, "
+            "the inference config value is used and legacy arm names are kept."
+        ),
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -156,12 +164,29 @@ def main():
             deployment.get("short_softmax_temperature", 0.15)
         ),
     }
-    graph_arms = {
-        f"graph_short{value:.2f}": _thresholds(
-            value, args.distance2_threshold, args.distance4_threshold
+    short_values = [float(item) for item in args.short_thresholds.split(",")]
+    configured_min_area = int(infer_cfg.get("min_instance_area", 50))
+    requested_min_areas = [
+        int(item) for item in args.min_instance_areas.split(",") if item.strip()
+    ]
+    if any(value < 1 for value in requested_min_areas):
+        raise ValueError("--min-instance-areas values must be positive")
+    graph_arms = {}
+    for short_value in short_values:
+        thresholds = _thresholds(
+            short_value, args.distance2_threshold, args.distance4_threshold
         )
-        for value in [float(item) for item in args.short_thresholds.split(",")]
-    }
+        if requested_min_areas:
+            for min_area in requested_min_areas:
+                graph_arms[f"graph_short{short_value:.2f}_area{min_area}"] = {
+                    "thresholds": thresholds,
+                    "min_instance_area": min_area,
+                }
+        else:
+            graph_arms[f"graph_short{short_value:.2f}"] = {
+                "thresholds": thresholds,
+                "min_instance_area": configured_min_area,
+            }
     summary = {"e10a_watershed": [], **{name: [] for name in graph_arms}}
 
     for image_path in image_paths:
@@ -212,7 +237,9 @@ def main():
         affinity = affinity_grid[0].numpy()
         graph_shape = affinity.shape[1:]
         foreground = np.ones(graph_shape, dtype=bool)
-        for arm_name, thresholds in graph_arms.items():
+        for arm_name, arm in graph_arms.items():
+            thresholds = arm["thresholds"]
+            min_instance_area = int(arm["min_instance_area"])
             raw_grid, graph_audit = reconstruct_affinity_components(
                 foreground,
                 affinity,
@@ -225,7 +252,7 @@ def main():
             grid_min_area = max(
                 1,
                 int(np.ceil(
-                    float(infer_cfg.get("min_instance_area", 50))
+                    float(min_instance_area)
                     * float(np.prod(graph_shape))
                     / float(image.shape[0] * image.shape[1])
                 )),
@@ -242,7 +269,7 @@ def main():
             instance_map, class_map, finish_audit = classify_instance_partition(
                 native_regions,
                 semantic_probability,
-                min_area=int(infer_cfg.get("min_instance_area", 50)),
+                min_area=min_instance_area,
                 max_instance_id=int(infer_cfg.get("max_instance_id", 255)),
                 semantic_vote_mode=str(
                     infer_cfg.get("semantic_vote_mode", "probability_mean")
@@ -258,6 +285,7 @@ def main():
             arm_dir = output_root / arm_name
             audit = {
                 "relation_thresholds": thresholds,
+                "min_instance_area": min_instance_area,
                 "graph_grid": list(graph_shape),
                 "graph_min_component_area": grid_min_area,
                 **graph_audit,
