@@ -21,8 +21,10 @@
 - **统一部署模型**：`outputs/deployment/e10a_g4b_fused.pth` 把共享 SAM2+LoRA encoder、
   E10a semantic decoder 与 G4b affinity decoder 打包为一个 81.67M 参数模型；加载时不再依赖
   三份源 checkpoint，`test_009` 与原管线最终实例图/类别 JSON 字节级一致。
-- **方向图切分筛查**：直接阈值化 8 通道 affinity 再做核心回填，虽然使 10 张困难图的实例数
-  增加约 `9.8%–18.7%`，但弱密集区同时出现碎裂和大块合并，不能替代当前分水岭。详见
+- **方向图切分候选**：直接阈值化 8 通道 affinity 再做核心回填。`short=0.40` 的 68 图
+  全量结果相对 E10a watershed 将实例数由 `6178` 提至 `7559`（`+22.35%`），目检显示新增
+  切分多数沿真实晶界、弱密集区更贴形，现已晋级为黑盒候选；`short=0.30` 会把部分粗暗晶界
+  保留成珠光体细带伪核心，继续淘汰。0.40 尚未获得官方分数，G4b watershed 仍是稳定回退。详见
   [docs/AFFINITY_GRAPH_AB_20260828.md](docs/AFFINITY_GRAPH_AB_20260828.md)。
 - **中心热图实验已降级为负面对照**：共享 `boundary_fpn` 的中心辅助任务破坏了边界表征；
   `outputs/stage2_center_heatmap/best_model_stage2.pth` 不作为后续初始化主线。
