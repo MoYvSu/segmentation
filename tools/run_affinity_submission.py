@@ -72,6 +72,11 @@ def main():
     semantic_challenger, challenger_metadata = build_semantic_challenger(
         config, system, reference_path, device
     )
+    replace_reference_semantic = bool(
+        config.get("semantic_challenger", {}).get(
+            "replace_reference_semantic", False
+        )
+    )
     system.eval()
     fusion_mode = str(deployment.get("fusion_mode", "gated"))
     fusion_kwargs = {
@@ -114,6 +119,7 @@ def main():
                     device,
                     fusion_mode,
                     fusion_kwargs,
+                    replace_reference_semantic=replace_reference_semantic,
                 )
             )
         _, instance_map, class_map = postprocess(
@@ -147,6 +153,9 @@ def main():
         "semantic_state_digest": digest,
         "semantic_geometry_contract": semantic_contract,
         "semantic_challenger": challenger_metadata,
+        "semantic_source": (
+            "challenger_only" if replace_reference_semantic else "reference_with_challenger_vote"
+        ),
         "fusion": {"mode": fusion_mode, **fusion_kwargs},
         "inference": {
             "boundary_threshold": threshold,

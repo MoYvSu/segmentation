@@ -4,6 +4,10 @@ _base: ../inference/final_affinity_g4b_high065.yaml
 semantic_challenger:
   enabled: true
   checkpoint: outputs/stage2_semantic_e10a_cold20/best_model_stage2.pth
+  # E10a is the only semantic output used by watershed terrain and voting.
+  # The frozen V6 LoRA encoder remains the feature backbone; its old semantic
+  # decoder is not evaluated or blended at deployment.
+  replace_reference_semantic: true
 
 inference:
   output_dir: outputs/submission_affinity_g4b_high065_semantic_e10a_cold

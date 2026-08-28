@@ -5,7 +5,7 @@ affinity，使用 `high=0.65`、seal2、局部重建与受阻分水岭。训练 
 完整部署路径验证晋级，Oracle GT 前景重建仅作诊断。完整协议见
 `docs/AFFINITY_DEPLOYMENT_EVALUATION.md`；V6/B2 配置仍保留为回退。
 
-当前执行的 E9 语义实验为 `train/stage2_semantic_e9_highres20.yaml`：以 V6 语义为零漂移锚点，
+黑盒确认的 E9 语义实验为 `train/stage2_semantic_e9_highres20.yaml`：以 V6 语义为零漂移锚点，
 冻结 semantic FPN/head、boundary、LoRA 与 G4b affinity，只训练 256→512→1024 的高分辨率
 residual。训练增加整实例平均概率目标和温和细实例权重，不依赖中心或最高置信像素。部署配置为
 `experiments/affinity_g4b_high065_semantic_e9_highres.yaml`，hard-majority 对照在同名 `_hard`
@@ -14,8 +14,12 @@ residual。训练增加整实例平均概率目标和温和细实例权重，不
 `train/stage2_semantic_e10a_cold20.yaml` 是完整语义解码器冷启动实验：保留并冻结 V6 LoRA
 特征及 G4b 几何，随机重置 `seg_fpn`、`seg_branch` 和高分辨率语义路径；重置前复制的固定
 V6 教师只在高置信无标签像素提供衰减蒸馏。部署配置
-`experiments/affinity_g4b_high065_semantic_e10a_cold.yaml` 只替换实例分类，不改变前景、
-affinity 或 watershed。详见 `docs/SEMANTIC_EXPERIMENT_E10A_20260828.md`。
+`experiments/affinity_g4b_high065_semantic_e10a_cold.yaml` 是当前目检优先的单语义模型候选；
+E9 保留为黑盒稳定回退，不执行二者连续融合。详见 `docs/SEMANTIC_EXPERIMENT_E10A_20260828.md`。
+
+`tools/run_affinity_graph_ab.py` 是 GT-free 几何筛查工具：E10a 单独提供语义，G4b 提供未融合的
+8 通道 affinity。直接图连通 + 核心回填在 10 张困难图上未晋级，不是提交入口；详见
+`docs/AFFINITY_GRAPH_AB_20260828.md`。
 
 当前类别纠错候选为 `experiments/affinity_g4b_high065_semantic_dual_e7c_relaxed.yaml`：固定
 V6 前景与 G4b 实例几何，仅用 E7b core 分数覆盖部分 V6 hard vote。阈值由缓存置信度扫参

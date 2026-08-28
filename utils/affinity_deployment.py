@@ -98,6 +98,7 @@ def predict_maps_with_challenger(
     device,
     fusion_mode="mean",
     fusion_kwargs=None,
+    replace_reference_semantic=False,
 ):
     """Predict fixed V6 geometry plus a decoder-only semantic challenger.
 
@@ -106,20 +107,32 @@ def predict_maps_with_challenger(
     """
     image, tensor, pad_h, pad_w = prepare_image(image_path, image_size, device)
     original_size = image.shape[:2]
-    reference_output = system.reference_model(tensor)
-    features = [feature.detach() for feature in system.reference_model.encoder(tensor)]
+    if replace_reference_semantic:
+        reference_output = None
+        features = [
+            feature.detach() for feature in system.reference_model.encoder(tensor)
+        ]
+    else:
+        reference_output = system.reference_model(tensor)
+        features = [
+            feature.detach() for feature in system.reference_model.encoder(tensor)
+        ]
     geometry_features = features
     if system.geometry_feature_adapter is not None:
         geometry_features = system.geometry_feature_adapter(features, gated=True)
     affinity_output = system.geometry_decoder(geometry_features)["affinity_logits"]
     challenger_output = semantic_challenger(features, tensor)
 
-    reference_native = crop_letterbox_output(
-        reference_output, image_size, pad_h, pad_w, original_size
-    ).cpu()
     challenger_native = crop_letterbox_output(
         challenger_output, image_size, pad_h, pad_w, original_size
     ).cpu()
+    reference_native = (
+        challenger_native
+        if reference_output is None
+        else crop_letterbox_output(
+            reference_output, image_size, pad_h, pad_w, original_size
+        ).cpu()
+    )
     affinity_boundary = affinity_boundary_probability(
         affinity_output,
         mode=fusion_mode,
@@ -137,7 +150,7 @@ def predict_maps_with_challenger(
         reference_native,
         affinity_watershed_output,
         affinity_boundary_native,
-        challenger_native[:, :1],
+        None if replace_reference_semantic else challenger_native[:, :1],
     )
 
 

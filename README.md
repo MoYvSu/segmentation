@@ -1,8 +1,8 @@
 # 低碳钢金相图像相区分割
 
-> 当前部署基线：V6 语义锚点 + G4b 8 通道 affinity geometry → gated affinity boundary
-> → `high=0.65` 封边/受阻分水岭 → 实例分类。黑盒确认基线仍为 V6/G4b；当前 E9
-> 只训练零初始化的高分辨率语义残差，并用整实例概率聚合修复纤细铁素体错配。
+> 当前几何基线：G4b 8 通道 affinity → gated boundary → `high=0.65` 封边/受阻分水岭。
+> 黑盒最佳语义结果为 E9；当前目检优先候选为单一 E10a 语义解码器，不采用 E9/E10a
+> 连续融合。E10a 是否晋级仍须单独提交确认。
 > 当前状态、入口与产物约定以 [docs/PIPELINE.md](docs/PIPELINE.md) 为准。
 
 颜色先验分析已记录在 [docs/COLOR_SEPARABILITY.md](docs/COLOR_SEPARABILITY.md)。后续对话进程在
@@ -15,9 +15,12 @@
 - **当前几何基线**：G4b affinity + `high=0.65` + 封边/受阻分水岭。相较 G3，G4b 是当前
   更稳定的部署基线；测试集仍以欠分割和局部合并为主要风险，尚未证明黑盒竞赛分数提升。
   详见 [docs/AFFINITY_DEPLOYMENT_EVALUATION.md](docs/AFFINITY_DEPLOYMENT_EVALUATION.md)。
-- **当前语义实验**：E9 冻结 V6/G4b，只训练 256→512→1024 的轻量语义残差；原图 RGB、
-  逐图亮度和局部对比度在高分辨率参与决策。训练/推理都使用整实例平均概率，不依赖质心或
-  单个高置信像素，详见 [docs/SEMANTIC_EXPERIMENT_E9_20260828.md](docs/SEMANTIC_EXPERIMENT_E9_20260828.md)。
+- **当前语义选择**：E9 黑盒结果为 mIoU `0.8421`、铁素体平均面积项 `0.7917`；E10a
+  冷启动完整高分辨率语义解码器在测试目检上更受偏好，当前按单模型候选保留，E9 作为稳定
+  回退，不做连续融合。详见 [docs/SEMANTIC_EXPERIMENT_E10A_20260828.md](docs/SEMANTIC_EXPERIMENT_E10A_20260828.md)。
+- **方向图切分筛查**：直接阈值化 8 通道 affinity 再做核心回填，虽然使 10 张困难图的实例数
+  增加约 `9.8%–18.7%`，但弱密集区同时出现碎裂和大块合并，不能替代当前分水岭。详见
+  [docs/AFFINITY_GRAPH_AB_20260828.md](docs/AFFINITY_GRAPH_AB_20260828.md)。
 - **中心热图实验已降级为负面对照**：共享 `boundary_fpn` 的中心辅助任务破坏了边界表征；
   `outputs/stage2_center_heatmap/best_model_stage2.pth` 不作为后续初始化主线。
 - **当前目标**：在固定 G4b 实例图上降低小实例 ferrite/pearlite 错配，并同时守住类别 mIoU
@@ -109,8 +112,9 @@ segmentationv2/
 
 ## 当前训练与基线
 
-当前黑盒确认的最佳基线是 G4b high0.65 + V6 语义：总分 `80.67`，实例 mIoU `0.8441`，
-铁素体平均面积项 `0.7693`；较最后的 V6 边界方案提升 `0.91`。E7b-A 已完成验证但不晋级：它从 V6
+G4b high0.65 + V6 语义的黑盒结果为总分 `80.67`、实例 mIoU `0.8441`、铁素体平均面积项
+`0.7693`。E9 进一步得到 mIoU `0.8421`、面积项 `0.7917`，总分约 `81.69`：少量小铁素体
+纠错以轻微 mIoU 代价换得显著面积收益，当前是黑盒确认最佳。E7b-A 已完成验证但不晋级：它从 V6
 初始化只更新语义 decoder，训练期 semantic loss 虽下降；严格同部署口径下，代理分数由
 当前 hard 基线的 `79.1800` 小幅降至 `78.8379`（阈值 `0.65`）。详见
 [docs/SEMANTIC_TRAINING_E7B_20260827.md](docs/SEMANTIC_TRAINING_E7B_20260827.md)。
@@ -122,12 +126,12 @@ E7c 不丢弃 E7b 的局部纠错能力，而是让 V6 固定实例几何与默�
 
 E8 已证明低分辨率残差能够产生局部纠错，但 `+/-2` logit 很快饱和且验证 mIoU 未提升，故不
 晋级。E9 保留 V6 零漂移锚点，把可学习决策提高到输入分辨率，并增加与实例投票一致的
-整实例概率损失；epoch 20 probability-mean 当前作为提交候选。详见
+整实例概率损失；epoch 20 probability-mean 已通过黑盒验证并保留为稳定回退。详见
 [docs/SEMANTIC_EXPERIMENT_E9_20260828.md](docs/SEMANTIC_EXPERIMENT_E9_20260828.md)。
 
 当前 E10a 冻结 V6 LoRA、边界和 G4b affinity，随机重置完整 semantic FPN/head 与高分辨率
-解码路径；固定 V6 只在无标签高置信区域提供衰减蒸馏。E10a 首先仅作为实例分类 challenger，
-不得改变 G4b 前景或 watershed 几何。详见
+解码路径；固定 V6 只在无标签高置信区域提供衰减蒸馏。测试目检优先采用 E10a 单语义输出，
+不与 E9 连续融合；几何仍固定为 G4b watershed，最终晋级等待黑盒提交。详见
 [docs/SEMANTIC_EXPERIMENT_E10A_20260828.md](docs/SEMANTIC_EXPERIMENT_E10A_20260828.md)。
 
 如需复现实验，按既定约定可直接在训练服务器运行：

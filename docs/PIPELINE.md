@@ -2,16 +2,16 @@
 
 ## 结论与主线
 
-当前语义锚点仍是 `outputs/stage2_v6/best_model_stage2.pth`；可复现部署基线为
-“V6 语义 + G4b 8 通道 affinity → gated boundary → `high=0.65` + seal2 + 局部重建
-→ 受阻分水岭 → hard-majority 分类”。当前 E9 是高分辨率语义 challenger，尚未通过黑盒晋级；
-E10a 则冻结 V6 特征并冷启动完整语义解码器。两者都只能替换实例分类，V6/G4b 前景与几何
-保持固定；V6/B2 边界路线继续作为回退。
+当前几何基线为“G4b 8 通道 affinity → gated boundary → `high=0.65` + seal2 + 局部重建
+→ 受阻分水岭”。E9 已获黑盒 mIoU `0.8421`、铁素体面积项 `0.7917`；E10a 冻结 V6
+特征并冷启动完整高分辨率语义解码器，当前目检优先但尚未黑盒确认。部署决策坚持一个语义
+模型：E10a 为候选、E9 为回退，不做连续融合；V6/B2 边界路线继续作为几何回退。
 
 G3/G4b 尚不能证明黑盒竞赛成绩提升，测试目检仍以欠分割为主要风险；GT 前景上的 Oracle
 图重建仅作诊断。当前 E9 在冻结 V6/G4b 的前提下学习输入分辨率语义残差，并以整实例概率
-聚合处理纤细/非凸实例错配。详见 [SEMANTIC_EXPERIMENT_E9_20260828.md](SEMANTIC_EXPERIMENT_E9_20260828.md)；
-历史 affinity 审计见 [AFFINITY_DEPLOYMENT_EVALUATION.md](AFFINITY_DEPLOYMENT_EVALUATION.md)。
+聚合处理纤细/非凸实例错配。直接方向 affinity 图切分的 10 图筛查未晋级，详见
+[AFFINITY_GRAPH_AB_20260828.md](AFFINITY_GRAPH_AB_20260828.md)；历史 affinity 审计见
+[AFFINITY_DEPLOYMENT_EVALUATION.md](AFFINITY_DEPLOYMENT_EVALUATION.md)。
 
 `outputs/stage2_center_heatmap/best_model_stage2.pth` 只保留为负面对照。现有中心 GT 由每个
 Labelme polygon 生成一个种子，polygon 与物理晶粒并不等价；同时中心损失和边界损失共享
