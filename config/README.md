@@ -10,6 +10,13 @@ decoder 20 epoch，冻结 boundary/LoRA/affinity，加入实例等权核心损�
 无标签一致性。训练后使用 `experiments/affinity_g4b_high065_semantic_e7b.yaml` 在同一 G4b
 实例几何上做严格对照。详见 `docs/SEMANTIC_TRAINING_E7B_20260827.md`。
 
+当前执行的 E8 语义实验为 `train/stage2_semantic_e8_residual20.yaml`：以 V6 语义输出为零点，
+冻结 V6 的 semantic FPN/head、boundary、LoRA 与 G4b geometry，只训练轻量 residual adapter。
+adapter 使用逐图光照归一化亮度/局部对比度特征，配合 ferrite 难实例加权、轻量 Tversky 和物理成像
+增强；不会在推理侧禁止任一类别方向的纠错。部署对照为
+`experiments/affinity_g4b_high065_semantic_e8.yaml`，详见
+`docs/SEMANTIC_EXPERIMENT_E8_20260828.md`。
+
 当前类别纠错候选为 `experiments/affinity_g4b_high065_semantic_dual_e7c_relaxed.yaml`：固定
 V6 前景与 G4b 实例几何，仅用 E7b core 分数覆盖部分 V6 hard vote。阈值由缓存置信度扫参
 产生，不按实例面积拦截；严格版配置继续保留为反面对照。详见

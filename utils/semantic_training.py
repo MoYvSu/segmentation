@@ -33,6 +33,9 @@ def instance_balanced_core_bce(
     boundary_threshold: float = 0.20,
     min_core_pixels: int = 12,
     class_balance: bool = True,
+    ferrite_class_weight: float = 1.0,
+    hard_instance_gamma: float = 0.0,
+    hard_instance_floor: float = 0.25,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """Average semantic BCE per annotated instance instead of per pixel.
 
@@ -126,20 +129,53 @@ def instance_balanced_core_bce(
     )
     target_sums = torch.zeros_like(loss_sums)
     target_sums = target_sums.scatter_add(0, selected_ids, selected_target)
+    probabilities = torch.sigmoid(logits).reshape(-1)[selected_flat]
+    true_confidence = torch.where(
+        selected_target >= 0.5, probabilities, 1.0 - probabilities
+    )
+    confidence_sums = torch.zeros_like(loss_sums)
+    confidence_sums = confidence_sums.scatter_add(
+        0, selected_ids, true_confidence
+    )
 
     valid = selected_counts > 0
     per_instance_loss = loss_sums[valid] / selected_counts[valid].clamp_min(1.0)
+    per_instance_confidence = (
+        confidence_sums[valid] / selected_counts[valid].clamp_min(1.0)
+    )
     per_instance_class = (
         target_sums[valid] / selected_counts[valid].clamp_min(1.0) >= 0.5
     )
 
-    if class_balance and bool(per_instance_class.any()) and bool((~per_instance_class).any()):
-        loss = 0.5 * (
-            per_instance_loss[per_instance_class].mean()
-            + per_instance_loss[~per_instance_class].mean()
-        )
+    gamma = max(0.0, float(hard_instance_gamma))
+    if gamma > 0:
+        focus = float(max(0.0, hard_instance_floor)) + (
+            1.0 - per_instance_confidence.detach()
+        ).clamp(0.0, 1.0).pow(gamma)
     else:
-        loss = per_instance_loss.mean()
+        focus = torch.ones_like(per_instance_loss)
+
+    def focused_mean(values, weights):
+        return (values * weights).sum() / weights.sum().clamp_min(1.0e-6)
+
+    if class_balance and bool(per_instance_class.any()) and bool((~per_instance_class).any()):
+        ferrite_weight = max(0.0, float(ferrite_class_weight))
+        ferrite_loss = focused_mean(
+            per_instance_loss[per_instance_class], focus[per_instance_class]
+        )
+        pearlite_loss = focused_mean(
+            per_instance_loss[~per_instance_class], focus[~per_instance_class]
+        )
+        loss = (
+            pearlite_loss + ferrite_weight * ferrite_loss
+        ) / max(1.0e-6, 1.0 + ferrite_weight)
+    else:
+        class_weight = torch.where(
+            per_instance_class,
+            torch.full_like(per_instance_loss, max(0.0, float(ferrite_class_weight))),
+            torch.ones_like(per_instance_loss),
+        )
+        loss = focused_mean(per_instance_loss, focus * class_weight)
 
     valid_ids = torch.nonzero(total_counts > 0, as_tuple=False).flatten()
     core_instance_count = int(use_core_by_id[valid_ids].sum().item())
@@ -149,6 +185,9 @@ def instance_balanced_core_bce(
         "core_instances": float(core_instance_count),
         "fallback_instances": float(instance_count - core_instance_count),
         "selected_pixels": float(selected.sum().item()),
+        "ferrite_instances": float(per_instance_class.sum().item()),
+        "mean_true_confidence": float(per_instance_confidence.detach().mean()),
+        "mean_hard_focus": float(focus.detach().mean()),
     }
     return loss, stats
 

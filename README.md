@@ -112,7 +112,8 @@ segmentationv2/
 
 ## 当前训练与基线
 
-当前可复现、默认回退仍是 G4b affinity + V6 语义。E7b-A 已完成验证，但不晋级：它从 V6
+当前黑盒确认的最佳基线是 G4b high0.65 + V6 语义：总分 `80.67`，实例 mIoU `0.8441`，
+铁素体平均面积项 `0.7693`；较最后的 V6 边界方案提升 `0.91`。E7b-A 已完成验证但不晋级：它从 V6
 初始化只更新语义 decoder，训练期 semantic loss 虽下降；严格同部署口径下，代理分数由
 当前 hard 基线的 `79.1800` 小幅降至 `78.8379`（阈值 `0.65`）。详见
 [docs/SEMANTIC_TRAINING_E7B_20260827.md](docs/SEMANTIC_TRAINING_E7B_20260827.md)。
@@ -122,6 +123,11 @@ E7c 不丢弃 E7b 的局部纠错能力，而是让 V6 固定实例几何与默�
 新增一个正确铁素体匹配，68 张测试图翻转 67/6178 个实例；不设置实例面积门槛。详见
 [docs/SEMANTIC_EXPERIMENT_E7C_20260828.md](docs/SEMANTIC_EXPERIMENT_E7C_20260828.md)。
 
+当前训练实验转为 E8：冻结 V6 `seg_fpn/seg_branch/LoRA` 与完整 G4b geometry，只训练
+零初始化、带逐图光照归一化特征的轻量 semantic residual adapter。训练目标对 ferrite 漏检
+仅施加温和趋势，不在推理侧禁止双向修正。详见
+[docs/SEMANTIC_EXPERIMENT_E8_20260828.md](docs/SEMANTIC_EXPERIMENT_E8_20260828.md)。
+
 如需复现实验，按既定约定可直接在训练服务器运行：
 
 ```bash
@@ -129,9 +135,17 @@ conda activate sam2_env
 python train_stage2.py --config config/train/stage2_semantic_e7b_decoder20.yaml
 ```
 
-输出目录：`outputs/stage2_semantic_e7b_decoder20/`。训练固定 boundary 与 LoRA，checkpoint
-按验证 semantic mIoU 选择；无标签 holdout monitor 只检查泛化稳定性。历史 Stage 1、B2、
-affinity 训练命令见 [docs/PIPELINE.md](docs/PIPELINE.md) 和 `config/README.md`。
+E8 当前训练命令：
+
+```bash
+python train_stage2.py --config config/train/stage2_semantic_e8_residual20.yaml
+```
+
+E7b 输出目录为 `outputs/stage2_semantic_e7b_decoder20/`；E8 输出目录为
+`outputs/stage2_semantic_e8_residual20/`。训练固定 G4b geometry 与 LoRA，E8 仅更新零初始化
+semantic residual adapter；checkpoint 按验证 semantic mIoU 选择，无标签 holdout monitor 只检查
+泛化稳定性。历史 Stage 1、B2、affinity 训练命令见 [docs/PIPELINE.md](docs/PIPELINE.md) 和
+`config/README.md`。
 
 ## 推理
 

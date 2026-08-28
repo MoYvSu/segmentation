@@ -144,7 +144,11 @@ def semantic_state_digest(reference_model: nn.Module) -> str:
     digest = hashlib.sha256()
     selected = []
     for name, tensor in reference_model.decoder.state_dict().items():
-        if name.startswith("seg_fpn.") or name.startswith("seg_branch."):
+        if (
+            name.startswith("seg_fpn.")
+            or name.startswith("seg_branch.")
+            or name.startswith("semantic_residual.")
+        ):
             selected.append((f"decoder.{name}", tensor))
     for name, tensor in reference_model.encoder.trunk.state_dict().items():
         if "lora_A" in name or "lora_B" in name:

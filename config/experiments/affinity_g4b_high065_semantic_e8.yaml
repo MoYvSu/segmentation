@@ -1,0 +1,17 @@
+# Fixed G4b high0.65 geometry with the E8 residual semantic checkpoint.
+_base: ../inference/final_affinity_g4b_high065.yaml
+
+decoder:
+  semantic_residual: true
+  semantic_residual_hidden: 64
+  semantic_residual_color_channels: 16
+  semantic_residual_use_photometric: true
+  semantic_residual_max_logit_delta: 2.0
+
+affinity_geometry_g1:
+  reference_checkpoint: outputs/stage2_semantic_e8_residual20/best_model_stage2.pth
+  semantic_decoder_override_base: outputs/stage2_v6/best_model_stage2.pth
+
+inference:
+  output_dir: outputs/submission_affinity_g4b_high065_semantic_e8
+  semantic_vote_mode: hard_majority

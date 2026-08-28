@@ -136,6 +136,8 @@ def set_student_train_modes(student_model):
         decoder.boundary_fpn,
         decoder.boundary_branch,
     ]
+    if getattr(decoder, "semantic_residual", None) is not None:
+        modules.append(decoder.semantic_residual)
     if getattr(decoder, "boundary_refine", False):
         modules.append(decoder.boundary_refine_head)
     if getattr(decoder, "center_branch", None) is not None:
@@ -325,6 +327,17 @@ def build_model(config, device):
         ),
         edge_prior_max_logit_delta=decoder_cfg.get(
             "edge_prior_max_logit_delta", 1.0
+        ),
+        semantic_residual=decoder_cfg.get("semantic_residual", False),
+        semantic_residual_hidden=decoder_cfg.get("semantic_residual_hidden", 64),
+        semantic_residual_color_channels=decoder_cfg.get(
+            "semantic_residual_color_channels", 16
+        ),
+        semantic_residual_use_photometric=decoder_cfg.get(
+            "semantic_residual_use_photometric", True
+        ),
+        semantic_residual_max_logit_delta=decoder_cfg.get(
+            "semantic_residual_max_logit_delta", 2.0
         ),
     )
 
@@ -663,6 +676,7 @@ def train_one_epoch(
     total_bnd_gap = 0.0
     total_bnd_rate = 0.0
     total_refine_grad_norm = 0.0
+    total_semantic_residual_grad_norm = 0.0
     total_gda_gate_reg = 0.0
     refine_residual_sum_abs = 0.0
     refine_residual_sum_std = 0.0
@@ -672,6 +686,10 @@ def train_one_epoch(
     fusion_residual_sum_std = 0.0
     fusion_residual_max_abs = 0.0
     fusion_residual_calls = 0
+    semantic_residual_sum_abs = 0.0
+    semantic_residual_sum_std = 0.0
+    semantic_residual_max_abs = 0.0
+    semantic_residual_calls = 0
     n_steps = 0
 
     clip_params = list(student_model.decoder.parameters())
@@ -685,6 +703,11 @@ def train_one_epoch(
     fusion_params = (
         list(student_model.decoder.edge_prior_fusion.parameters())
         if getattr(student_model.decoder, "edge_prior_fusion", None) is not None
+        else []
+    )
+    semantic_residual_params = (
+        list(student_model.decoder.semantic_residual.parameters())
+        if getattr(student_model.decoder, "semantic_residual", None) is not None
         else []
     )
 
@@ -726,6 +749,28 @@ def train_one_epoch(
 
         fusion_hook = student_model.decoder.edge_prior_fusion.register_forward_hook(
             _capture_fusion_output
+        )
+
+    semantic_residual_hook = None
+    if diagnostics_enabled and semantic_residual_params:
+        def _capture_semantic_residual_output(module, inputs, output):
+            del module, inputs
+            nonlocal semantic_residual_sum_abs
+            nonlocal semantic_residual_sum_std
+            nonlocal semantic_residual_max_abs
+            nonlocal semantic_residual_calls
+            value = output.detach().float()
+            semantic_residual_sum_abs += float(value.abs().mean())
+            semantic_residual_sum_std += float(value.std(unbiased=False))
+            semantic_residual_max_abs = max(
+                semantic_residual_max_abs, float(value.abs().max())
+            )
+            semantic_residual_calls += 1
+
+        semantic_residual_hook = (
+            student_model.decoder.semantic_residual.register_forward_hook(
+                _capture_semantic_residual_output
+            )
         )
 
     # 不使用 itertools.cycle：它会缓存第一轮已增强 batch，之后只重复旧张量。
@@ -889,6 +934,9 @@ def train_one_epoch(
                 total_refine_grad_norm += gradient_l2_norm(
                     refine_params + fusion_params
                 )
+                total_semantic_residual_grad_norm += gradient_l2_norm(
+                    semantic_residual_params
+                )
             if grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(clip_params, grad_clip)
             scaler.step(optimizer)
@@ -898,6 +946,9 @@ def train_one_epoch(
             if diagnostics_enabled:
                 total_refine_grad_norm += gradient_l2_norm(
                     refine_params + fusion_params
+                )
+                total_semantic_residual_grad_norm += gradient_l2_norm(
+                    semantic_residual_params
                 )
             if grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(clip_params, grad_clip)
@@ -938,10 +989,13 @@ def train_one_epoch(
         refine_hook.remove()
     if fusion_hook is not None:
         fusion_hook.remove()
+    if semantic_residual_hook is not None:
+        semantic_residual_hook.remove()
 
     n = max(n_steps, 1)
     refine_n = max(refine_residual_calls, 1)
     fusion_n = max(fusion_residual_calls, 1)
+    semantic_residual_n = max(semantic_residual_calls, 1)
     return {
         "loss": total_loss_sum / n,
         "sup_loss": total_sup_loss / n,
@@ -959,12 +1013,20 @@ def train_one_epoch(
         "bnd_pred_rate": total_bnd_rate / n,
         "optimizer_steps": n_steps,
         "refine_grad_norm": total_refine_grad_norm / n,
+        "semantic_residual_grad_norm": total_semantic_residual_grad_norm / n,
         "refine_residual_mean_abs": refine_residual_sum_abs / refine_n,
         "refine_residual_std": refine_residual_sum_std / refine_n,
         "refine_residual_max_abs": refine_residual_max_abs,
         "fusion_residual_mean_abs": fusion_residual_sum_abs / fusion_n,
         "fusion_residual_std": fusion_residual_sum_std / fusion_n,
         "fusion_residual_max_abs": fusion_residual_max_abs,
+        "semantic_residual_mean_abs": (
+            semantic_residual_sum_abs / semantic_residual_n
+        ),
+        "semantic_residual_std": (
+            semantic_residual_sum_std / semantic_residual_n
+        ),
+        "semantic_residual_max_abs": semantic_residual_max_abs,
     }
 
 
@@ -1339,6 +1401,39 @@ def main():
     if not freeze_seg and not freeze_boundary:
         logger.info("Freeze: DISABLED (joint training, both branches active)")
 
+    semantic_residual_training_cfg = semi_cfg.get(
+        "semantic_residual_training", {}
+    )
+    semantic_residual_training_enabled = bool(
+        semantic_residual_training_cfg.get("enabled", False)
+    )
+    if semantic_residual_training_enabled:
+        if not student_model.decoder.semantic_residual_enabled:
+            raise ValueError(
+                "semantic_residual_training.enabled=True requires "
+                "decoder.semantic_residual=True"
+            )
+        if freeze_seg:
+            raise ValueError(
+                "semantic residual-only training requires freeze.seg_branch=False "
+                "so semantic losses remain active"
+            )
+        if not freeze_boundary:
+            raise ValueError(
+                "semantic residual-only training requires "
+                "freeze.boundary_branch=True"
+            )
+        if lora_cfg.get("enabled", False) and not lora_cfg.get("freeze", False):
+            raise ValueError(
+                "semantic residual-only training requires frozen LoRA to preserve "
+                "the G4b affinity feature contract"
+            )
+        student_model.decoder.set_semantic_residual_only()
+        logger.info(
+            "E8 semantic residual-only training: V6 seg FPN/head, boundary, "
+            "and LoRA are frozen; only semantic_residual is trainable"
+        )
+
     # B2 staged refine：先只训练零初始化的高分辨率 residual head，随后再以
     # 较低学习率解冻 V6 coarse boundary 基座。语义分支与 LoRA 由各自的
     # freeze 配置保护，center head 必须关闭，确保这是单变量架构实验。
@@ -1420,6 +1515,24 @@ def main():
         semantic_instance_class_balance=train_cfg.get(
             "semantic_instance_class_balance", True
         ),
+        semantic_instance_ferrite_weight=train_cfg.get(
+            "semantic_instance_ferrite_weight", 1.0
+        ),
+        semantic_instance_hard_gamma=train_cfg.get(
+            "semantic_instance_hard_gamma", 0.0
+        ),
+        semantic_instance_hard_floor=train_cfg.get(
+            "semantic_instance_hard_floor", 0.25
+        ),
+        semantic_tversky_weight=train_cfg.get(
+            "semantic_tversky_weight", 0.0
+        ),
+        semantic_tversky_alpha=train_cfg.get(
+            "semantic_tversky_alpha", 0.40
+        ),
+        semantic_tversky_beta=train_cfg.get(
+            "semantic_tversky_beta", 0.60
+        ),
         freeze_seg=freeze_seg,
         freeze_boundary=freeze_boundary,
         peak_weight=train_cfg.get("boundary_peak_weight", 0.0),
@@ -1449,11 +1562,21 @@ def main():
     if criterion.semantic_instance_weight > 0:
         logger.info(
             "  Semantic instance core: weight=%.3f radius=%dpx "
-            "min_pixels=%d class_balance=%s",
+            "min_pixels=%d class_balance=%s ferrite_weight=%.2f "
+            "hard_gamma=%.2f",
             criterion.semantic_instance_weight,
             criterion.semantic_core_radius,
             criterion.semantic_core_min_pixels,
             criterion.semantic_instance_class_balance,
+            criterion.semantic_instance_ferrite_weight,
+            criterion.semantic_instance_hard_gamma,
+        )
+    if criterion.semantic_tversky_weight > 0:
+        logger.info(
+            "  Semantic Tversky: weight=%.3f alpha=%.2f beta=%.2f",
+            criterion.semantic_tversky_weight,
+            criterion.semantic_tversky_alpha,
+            criterion.semantic_tversky_beta,
         )
     if criterion.ridge_weight > 0:
         logger.info(
@@ -2253,6 +2376,14 @@ def main():
                     f"residual_std={train_metrics['fusion_residual_std']:.3e} "
                     f"residual_max={train_metrics['fusion_residual_max_abs']:.3e}"
                 )
+            if getattr(student_model.decoder, "semantic_residual", None) is not None:
+                logger.info(
+                    "  Semantic residual: "
+                    f"grad_l2={train_metrics['semantic_residual_grad_norm']:.3e} "
+                    f"mean_abs={train_metrics['semantic_residual_mean_abs']:.3e} "
+                    f"std={train_metrics['semantic_residual_std']:.3e} "
+                    f"max_abs={train_metrics['semantic_residual_max_abs']:.3e}"
+                )
         if getattr(student_model, "boundary_adapter", None) is not None:
             gate_stats = student_model.boundary_adapter.gate_statistics()
             gda_gate_values = [item["mean"] for item in gate_stats]
@@ -2366,12 +2497,22 @@ def main():
             "bnd_pred_rate": train_metrics["bnd_pred_rate"],
             "optimizer_steps": train_metrics["optimizer_steps"],
             "refine_grad_norm": train_metrics["refine_grad_norm"],
+            "semantic_residual_grad_norm": train_metrics[
+                "semantic_residual_grad_norm"
+            ],
             "refine_residual_mean_abs": train_metrics["refine_residual_mean_abs"],
             "refine_residual_std": train_metrics["refine_residual_std"],
             "refine_residual_max_abs": train_metrics["refine_residual_max_abs"],
             "fusion_residual_mean_abs": train_metrics["fusion_residual_mean_abs"],
             "fusion_residual_std": train_metrics["fusion_residual_std"],
             "fusion_residual_max_abs": train_metrics["fusion_residual_max_abs"],
+            "semantic_residual_mean_abs": train_metrics[
+                "semantic_residual_mean_abs"
+            ],
+            "semantic_residual_std": train_metrics["semantic_residual_std"],
+            "semantic_residual_max_abs": train_metrics[
+                "semantic_residual_max_abs"
+            ],
             "refine_out_weight_norm": refine_out_weight_norm,
             "refine_out_weight_max": refine_out_weight_max,
             "refine_delta_l2": refine_delta_l2,

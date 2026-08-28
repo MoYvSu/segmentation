@@ -113,6 +113,17 @@ def build_model(config, device):
             "boundary_refine_version", "legacy_lowres"
         ),
         center_head=decoder_cfg.get("center_head", False),
+        semantic_residual=decoder_cfg.get("semantic_residual", False),
+        semantic_residual_hidden=decoder_cfg.get("semantic_residual_hidden", 64),
+        semantic_residual_color_channels=decoder_cfg.get(
+            "semantic_residual_color_channels", 16
+        ),
+        semantic_residual_use_photometric=decoder_cfg.get(
+            "semantic_residual_use_photometric", True
+        ),
+        semantic_residual_max_logit_delta=decoder_cfg.get(
+            "semantic_residual_max_logit_delta", 2.0
+        ),
     )
 
     model = SegmentationModel(encoder, decoder)

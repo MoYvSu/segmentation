@@ -220,6 +220,96 @@ class BoundaryRefineHead(nn.Module):
         return self.out(x)
 
 
+class SemanticResidualAdapter(nn.Module):
+    """Geometry-isolated semantic correction with adaptive photometric cues.
+
+    The historical V6 semantic FPN/head remains untouched.  This adapter sees
+    its feature map plus per-image normalized luminance and local contrast, and
+    predicts a bounded residual logit.  A zero-initialized output makes epoch 0
+    exactly reproduce V6 while giving the semantic path additional capacity for
+    dim or unevenly illuminated ferrite.
+    """
+
+    def __init__(
+        self,
+        feature_channels: int = 256,
+        hidden_channels: int = 64,
+        color_channels: int = 16,
+        use_photometric_cues: bool = True,
+        max_logit_delta: float = 2.0,
+    ):
+        super().__init__()
+        hidden_channels = int(hidden_channels)
+        color_channels = int(color_channels)
+        if hidden_channels <= 0 or color_channels <= 0:
+            raise ValueError("semantic residual channels must be positive")
+        if float(max_logit_delta) <= 0:
+            raise ValueError("semantic residual max_logit_delta must be positive")
+        self.use_photometric_cues = bool(use_photometric_cues)
+        self.max_logit_delta = float(max_logit_delta)
+        self.feature_path = nn.Sequential(
+            nn.Conv2d(feature_channels, hidden_channels, 3, padding=1, bias=False),
+            _make_group_norm(hidden_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden_channels, hidden_channels, 3, padding=1, bias=False),
+            _make_group_norm(hidden_channels),
+            nn.ReLU(inplace=True),
+        )
+        fusion_channels = hidden_channels
+        self.photometric_path = None
+        if self.use_photometric_cues:
+            self.photometric_path = nn.Sequential(
+                nn.Conv2d(2, color_channels, 3, padding=1, bias=False),
+                _make_group_norm(color_channels),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(color_channels, color_channels, 3, padding=1, bias=False),
+                _make_group_norm(color_channels),
+                nn.ReLU(inplace=True),
+            )
+            fusion_channels += color_channels
+        self.fusion = nn.Sequential(
+            nn.Conv2d(fusion_channels, hidden_channels, 3, padding=1, bias=False),
+            _make_group_norm(hidden_channels),
+            nn.ReLU(inplace=True),
+        )
+        self.out = nn.Conv2d(hidden_channels, 1, 1, bias=True)
+
+    @staticmethod
+    def adaptive_photometric_cues(
+        image: torch.Tensor, output_size,
+    ) -> torch.Tensor:
+        """Return illumination-normalized luminance and local contrast."""
+        resized = F.interpolate(
+            image, size=output_size, mode="bilinear", align_corners=False
+        )
+        # Input tensors are RGB in [0, 1].  This is a differentiable luminance
+        # proxy; per-image normalization avoids a fixed global gray threshold.
+        weights = resized.new_tensor((0.2126, 0.7152, 0.0722)).view(1, 3, 1, 1)
+        luminance = (resized * weights).sum(dim=1, keepdim=True)
+        mean = luminance.mean(dim=(-2, -1), keepdim=True)
+        std = luminance.std(dim=(-2, -1), keepdim=True, unbiased=False).clamp_min(0.03)
+        normalized = ((luminance - mean) / std).clamp(-3.0, 3.0) / 3.0
+        local_mean = F.avg_pool2d(
+            F.pad(luminance, (7, 7, 7, 7), mode="reflect"),
+            kernel_size=15,
+            stride=1,
+        )
+        local_contrast = ((luminance - local_mean) / std).clamp(-2.0, 2.0) / 2.0
+        return torch.cat([normalized, local_contrast], dim=1)
+
+    def reset_output(self) -> None:
+        nn.init.zeros_(self.out.weight)
+        nn.init.zeros_(self.out.bias)
+
+    def forward(self, feature: torch.Tensor, image: torch.Tensor) -> torch.Tensor:
+        values = [self.feature_path(feature)]
+        if self.photometric_path is not None:
+            cues = self.adaptive_photometric_cues(image, feature.shape[-2:])
+            values.append(self.photometric_path(cues))
+        raw_delta = self.out(self.fusion(torch.cat(values, dim=1)))
+        return self.max_logit_delta * torch.tanh(raw_delta)
+
+
 class FPNDecoder(nn.Module):
     """
     独立双 FPN 解码头（语义 + 边界各自独立）- 边界预测版本。
@@ -247,6 +337,11 @@ class FPNDecoder(nn.Module):
         edge_prior_fusion: bool = False,
         edge_prior_fusion_hidden: int = 32,
         edge_prior_max_logit_delta: float = 1.0,
+        semantic_residual: bool = False,
+        semantic_residual_hidden: int = 64,
+        semantic_residual_color_channels: int = 16,
+        semantic_residual_use_photometric: bool = True,
+        semantic_residual_max_logit_delta: float = 2.0,
     ):
         """
         Args:
@@ -323,6 +418,7 @@ class FPNDecoder(nn.Module):
         self.boundary_refine_version = boundary_refine_version
         self.center_head_enabled = bool(center_head)
         self.edge_prior_fusion_enabled = bool(edge_prior_fusion)
+        self.semantic_residual_enabled = bool(semantic_residual)
         self.center_branch = None
         if self.center_head_enabled:
             self.center_branch = nn.Sequential(
@@ -345,6 +441,15 @@ class FPNDecoder(nn.Module):
                 hidden_channels=edge_prior_fusion_hidden,
                 max_logit_delta=edge_prior_max_logit_delta,
             )
+        self.semantic_residual = None
+        if self.semantic_residual_enabled:
+            self.semantic_residual = SemanticResidualAdapter(
+                feature_channels=fpn_channels,
+                hidden_channels=semantic_residual_hidden,
+                color_channels=semantic_residual_color_channels,
+                use_photometric_cues=semantic_residual_use_photometric,
+                max_logit_delta=semantic_residual_max_logit_delta,
+            )
 
         self._init_weights()
         if self.boundary_refine:
@@ -354,6 +459,8 @@ class FPNDecoder(nn.Module):
             nn.init.zeros_(self.boundary_refine_head.out.bias)
         if self.edge_prior_fusion is not None:
             self.edge_prior_fusion.reset_output()
+        if self.semantic_residual is not None:
+            self.semantic_residual.reset_output()
 
     def _init_weights(self):
         """使用 Kaiming 初始化（随机初始化，不加载预训练权重）。"""
@@ -403,6 +510,10 @@ class FPNDecoder(nn.Module):
 
         # 各自输出头
         seg_logits = self.seg_branch(seg_feat)            # [B, 1, 256, 256]
+        if self.semantic_residual is not None:
+            if image is None:
+                raise ValueError("semantic_residual=True requires image")
+            seg_logits = seg_logits + self.semantic_residual(seg_feat, image)
         coarse_boundary_logits = self.boundary_branch(boundary_feat)
         if self.boundary_refine:
             # 高分辨率边界细化头：原生输出 1024
@@ -484,6 +595,9 @@ class FPNDecoder(nn.Module):
             param.requires_grad = False
         for param in self.seg_branch.parameters():
             param.requires_grad = False
+        if self.semantic_residual is not None:
+            for param in self.semantic_residual.parameters():
+                param.requires_grad = False
         logger_freeze_info = (
             f"Semantic branch FROZEN (seg_fpn + seg_branch, "
             f"{sum(p.numel() for p in self.seg_fpn.parameters()) + sum(p.numel() for p in self.seg_branch.parameters())} params)"
@@ -511,6 +625,17 @@ class FPNDecoder(nn.Module):
             f"{sum(p.numel() for p in self.boundary_fpn.parameters()) + sum(p.numel() for p in self.boundary_branch.parameters())} params)"
         )
         print(logger_freeze_info)
+
+    def set_semantic_residual_only(self):
+        """Train only the isolated residual; preserve V6 semantics and geometry."""
+        if self.semantic_residual is None:
+            raise ValueError("semantic residual-only mode requires semantic_residual=True")
+        for parameter in self.parameters():
+            parameter.requires_grad_(False)
+        for parameter in self.semantic_residual.parameters():
+            parameter.requires_grad_(True)
+        count = sum(p.numel() for p in self.semantic_residual.parameters())
+        print(f"Semantic residual ONLY ({count} trainable params)")
 
     def set_boundary_base_trainable(self, trainable: bool):
         """切换 V6 coarse boundary 基座，保持 refine head 状态不变。

@@ -2,6 +2,7 @@ import numpy as np
 import torch
 
 from data.dataset import random_crop
+from models.fpn_decoder import FPNDecoder, SemanticResidualAdapter
 from utils.progressive_aug import ProgressiveAppearanceAug
 from utils.semantic_training import (
     dark_boundary_contamination,
@@ -121,3 +122,82 @@ def test_random_crop_preserves_optional_instance_map_alignment():
     )
     assert len(result) == 6
     assert np.array_equal(result[-1], instance)
+
+
+def test_semantic_residual_starts_as_exact_v6_identity_and_is_isolated():
+    kwargs = {
+        "in_channels": [8, 16, 32, 64],
+        "fpn_channels": 16,
+        "dropout": 0.0,
+        "use_bn": False,
+    }
+    base = FPNDecoder(**kwargs, semantic_residual=False)
+    residual = FPNDecoder(
+        **kwargs,
+        semantic_residual=True,
+        semantic_residual_hidden=8,
+        semantic_residual_color_channels=4,
+    )
+    missing, unexpected = residual.load_state_dict(base.state_dict(), strict=False)
+    assert missing and all(name.startswith("semantic_residual.") for name in missing)
+    assert unexpected == []
+    features = [
+        torch.randn(2, 8, 16, 16),
+        torch.randn(2, 16, 8, 8),
+        torch.randn(2, 32, 4, 4),
+        torch.randn(2, 64, 2, 2),
+    ]
+    image = torch.rand(2, 3, 64, 64)
+    base.eval()
+    residual.eval()
+    with torch.no_grad():
+        expected = base(features, image=image)
+        actual = residual(features, image=image)
+    assert torch.equal(actual, expected)
+
+    residual.set_semantic_residual_only()
+    assert all(
+        parameter.requires_grad
+        for parameter in residual.semantic_residual.parameters()
+    )
+    assert all(
+        not parameter.requires_grad
+        for name, parameter in residual.named_parameters()
+        if not name.startswith("semantic_residual.")
+    )
+
+
+def test_adaptive_photometric_cues_ignore_global_exposure_affine_change():
+    image = torch.rand(2, 3, 32, 32) * 0.5 + 0.2
+    shifted = image * 0.6 + 0.1
+    first = SemanticResidualAdapter.adaptive_photometric_cues(image, (16, 16))
+    second = SemanticResidualAdapter.adaptive_photometric_cues(shifted, (16, 16))
+    assert torch.allclose(first, second, atol=2.0e-5, rtol=2.0e-5)
+
+
+def test_hard_instance_focus_and_mild_ferrite_weight_raise_hard_ferrite_loss():
+    target = torch.zeros(1, 4, 8)
+    labels = torch.zeros(1, 4, 8, dtype=torch.long)
+    labels[:, :2] = 1
+    labels[:, 2:] = 2
+    target[:, 2:] = 1.0
+    logits = torch.full((1, 4, 8), -2.0, requires_grad=True)
+    logits.data[:, :2] = -2.0  # easy pearlite, hard ferrite
+
+    symmetric, _ = instance_balanced_core_bce(
+        logits, target, labels, core_radius=0, min_core_pixels=1
+    )
+    focused, stats = instance_balanced_core_bce(
+        logits,
+        target,
+        labels,
+        core_radius=0,
+        min_core_pixels=1,
+        ferrite_class_weight=1.15,
+        hard_instance_gamma=1.5,
+        hard_instance_floor=0.35,
+    )
+    assert focused > symmetric
+    assert stats["ferrite_instances"] == 1.0
+    focused.backward()
+    assert logits.grad is not None

@@ -49,6 +49,12 @@ class BoundaryLoss(nn.Module):
         semantic_core_min_pixels: int = 12,
         semantic_core_boundary_threshold: float = 0.20,
         semantic_instance_class_balance: bool = True,
+        semantic_instance_ferrite_weight: float = 1.0,
+        semantic_instance_hard_gamma: float = 0.0,
+        semantic_instance_hard_floor: float = 0.25,
+        semantic_tversky_weight: float = 0.0,
+        semantic_tversky_alpha: float = 0.40,
+        semantic_tversky_beta: float = 0.60,
         weight_clamp_min: float = 1.0,
         weight_clamp_max: float = 4.0,
         eps: float = 1e-6,
@@ -112,6 +118,14 @@ class BoundaryLoss(nn.Module):
         self.semantic_instance_class_balance = bool(
             semantic_instance_class_balance
         )
+        self.semantic_instance_ferrite_weight = float(
+            semantic_instance_ferrite_weight
+        )
+        self.semantic_instance_hard_gamma = float(semantic_instance_hard_gamma)
+        self.semantic_instance_hard_floor = float(semantic_instance_hard_floor)
+        self.semantic_tversky_weight = float(semantic_tversky_weight)
+        self.semantic_tversky_alpha = float(semantic_tversky_alpha)
+        self.semantic_tversky_beta = float(semantic_tversky_beta)
         self.last_semantic_instance_loss = 0.0
         self.last_semantic_instance_stats = {}
         self.weight_clamp_min = weight_clamp_min
@@ -256,6 +270,19 @@ class BoundaryLoss(nn.Module):
                 dice = 0.5 * (dice0 + dice1)
                 loss_seg = loss_seg + self.seg_dice_weight * dice
 
+            if self.semantic_tversky_weight > 0:
+                seg_prob = torch.sigmoid(seg_logits)
+                true_positive = (seg_prob * seg_target).sum()
+                false_positive = (seg_prob * (1.0 - seg_target)).sum()
+                false_negative = ((1.0 - seg_prob) * seg_target).sum()
+                tversky = 1.0 - (true_positive + self.eps) / (
+                    true_positive
+                    + self.semantic_tversky_alpha * false_positive
+                    + self.semantic_tversky_beta * false_negative
+                    + self.eps
+                )
+                loss_seg = loss_seg + self.semantic_tversky_weight * tversky
+
             if self.semantic_instance_weight > 0:
                 if instance_map is None:
                     raise ValueError(
@@ -270,6 +297,9 @@ class BoundaryLoss(nn.Module):
                     boundary_threshold=self.semantic_core_boundary_threshold,
                     min_core_pixels=self.semantic_core_min_pixels,
                     class_balance=self.semantic_instance_class_balance,
+                    ferrite_class_weight=self.semantic_instance_ferrite_weight,
+                    hard_instance_gamma=self.semantic_instance_hard_gamma,
+                    hard_instance_floor=self.semantic_instance_hard_floor,
                 )
                 loss_seg = loss_seg + self.semantic_instance_weight * instance_loss
                 self.last_semantic_instance_loss = float(instance_loss.detach())

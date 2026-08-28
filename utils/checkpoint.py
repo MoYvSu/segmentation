@@ -30,6 +30,19 @@ def architecture_from_config(config: Dict[str, Any]) -> Dict[str, Any]:
             if boundary_refine else "none"
         ),
         "center_head": bool(decoder.get("center_head", False)),
+        "semantic_residual": bool(decoder.get("semantic_residual", False)),
+        "semantic_residual_hidden": (
+            int(decoder.get("semantic_residual_hidden", 64))
+            if decoder.get("semantic_residual", False) else 0
+        ),
+        "semantic_residual_color_channels": (
+            int(decoder.get("semantic_residual_color_channels", 16))
+            if decoder.get("semantic_residual", False) else 0
+        ),
+        "semantic_residual_use_photometric": (
+            bool(decoder.get("semantic_residual_use_photometric", True))
+            if decoder.get("semantic_residual", False) else False
+        ),
         "lora_enabled": bool(lora.get("enabled", False)),
         "lora_rank": int(lora.get("rank", 0)) if lora.get("enabled", False) else 0,
         "gda_enabled": bool(gda.get("enabled", False)),
@@ -78,6 +91,18 @@ def architecture_from_state_dict(
         "num_classes": 2,
         "boundary_refine": any(k.startswith("boundary_refine_head.") for k in keys),
         "center_head": any(k.startswith("center_branch.") for k in keys),
+        "semantic_residual": any(k.startswith("semantic_residual.") for k in keys),
+        "semantic_residual_hidden": (
+            int(state_dict["semantic_residual.feature_path.0.weight"].shape[0])
+            if "semantic_residual.feature_path.0.weight" in state_dict else 0
+        ),
+        "semantic_residual_color_channels": (
+            int(state_dict["semantic_residual.photometric_path.0.weight"].shape[0])
+            if "semantic_residual.photometric_path.0.weight" in state_dict else 0
+        ),
+        "semantic_residual_use_photometric": any(
+            k.startswith("semantic_residual.photometric_path.") for k in keys
+        ),
         "lora_enabled": bool(lora_state_dict),
         "lora_rank": lora_rank,
         "gda_enabled": False,
@@ -115,6 +140,8 @@ def architecture_mismatches(
     fields: Iterable[str] = (
         "encoder", "decoder", "fpn_channels", "num_classes", "boundary_refine",
         "boundary_refine_version", "center_head", "lora_enabled", "lora_rank",
+        "semantic_residual", "semantic_residual_hidden",
+        "semantic_residual_color_channels", "semantic_residual_use_photometric",
         "gda_enabled", "gda_bottleneck_ratio",
         "gda_gate_mode", "gda_active_scales",
         "edge_prior_enabled", "edge_prior_hidden_channels",
