@@ -133,6 +133,26 @@ def test_conservative_dual_rejects_uniform_ferrite_bias():
     assert details["dual_reason"] == "gate_rejected"
 
 
+def test_probability_mean_uses_classifier_challenger_when_present():
+    instance = np.ones((12, 12), dtype=bool)
+    base_probability = np.full((12, 12), 0.80, dtype=np.float32)
+    base_semantic = np.ones((12, 12), dtype=np.uint8)
+    challenger_probability = np.full((12, 12), 0.20, dtype=np.float32)
+
+    cls, score, details = instance_semantic_vote(
+        instance,
+        base_semantic,
+        semantic_probability=base_probability,
+        candidate_semantic_probability=challenger_probability,
+        mode="probability_mean",
+        return_details=True,
+    )
+
+    assert cls == 0
+    assert np.isclose(score, 0.20)
+    assert np.isclose(details["semantic_score"], 0.20)
+
+
 def test_affinity_deployment_forwards_semantic_vote_options(monkeypatch, tmp_path):
     captured = {}
 

@@ -186,7 +186,22 @@ def instance_semantic_vote(
     if normalized_mode == "hard_majority" or semantic_probability is None:
         score = hard_ratio
     else:
-        probability = np.asarray(semantic_probability, dtype=np.float32)
+        # A classifier-only challenger is the primary probability source for
+        # ordinary probability/core voting.  ``conservative_dual`` is the one
+        # deliberate exception: it needs both the V6 base probability and the
+        # challenger probability to decide whether an override is allowed.
+        primary_probability = (
+            candidate_semantic_probability
+            if candidate_semantic_probability is not None
+            and normalized_mode != "conservative_dual"
+            else semantic_probability
+        )
+        probability = np.asarray(primary_probability, dtype=np.float32)
+        if probability.shape != instance_mask.shape:
+            raise ValueError(
+                "semantic probability shape mismatch: "
+                f"{probability.shape} vs {instance_mask.shape}"
+            )
         probability_score = float(np.mean(probability[vote_mask]))
         if normalized_mode == "probability_mean":
             score = probability_score

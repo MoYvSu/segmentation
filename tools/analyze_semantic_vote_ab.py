@@ -42,6 +42,8 @@ def main():
     candidate_counts = {"ferrite": 0, "pearlite": 0}
     color_used = 0
     compared = 0
+    score_deltas = []
+    score_changes = []
 
     for baseline_class_path in sorted(baseline_dir.glob("*_class.json")):
         stem = baseline_class_path.name.removesuffix("_class.json")
@@ -77,6 +79,21 @@ def main():
             baseline_counts["ferrite" if before == 1 else "pearlite"] += 1
             candidate_counts["ferrite" if after == 1 else "pearlite"] += 1
             details = candidate_audit[instance_id]
+            baseline_score = float(
+                baseline_audit[instance_id]["ferrite_score"]
+            )
+            candidate_score = float(details["ferrite_score"])
+            score_delta = candidate_score - baseline_score
+            score_deltas.append(score_delta)
+            score_changes.append({
+                "image": stem,
+                "instance_id": int(instance_id),
+                "area": int(details["area"]),
+                "baseline_score": baseline_score,
+                "candidate_score": candidate_score,
+                "delta": score_delta,
+                "class_changed": before != after,
+            })
             color_used += int(bool(details.get("color_used", False)))
             if before != after:
                 flips.append({
@@ -85,10 +102,8 @@ def main():
                     "area": int(details["area"]),
                     "from": before,
                     "to": after,
-                    "baseline_score": float(
-                        baseline_audit[instance_id]["ferrite_score"]
-                    ),
-                    "candidate_score": float(details["ferrite_score"]),
+                    "baseline_score": baseline_score,
+                    "candidate_score": candidate_score,
                     "semantic_score": float(
                         details.get("semantic_score", details["ferrite_score"])
                     ),
@@ -98,6 +113,10 @@ def main():
         compared += 1
 
     areas = [row["area"] for row in flips]
+    absolute_score_deltas = [abs(value) for value in score_deltas]
+    largest_score_changes = sorted(
+        score_changes, key=lambda row: abs(row["delta"]), reverse=True
+    )[:25]
     report = {
         "baseline_dir": str(baseline_dir.resolve()),
         "candidate_dir": str(candidate_dir.resolve()),
@@ -113,6 +132,15 @@ def main():
             row["from"] == 1 and row["to"] == 0 for row in flips
         ),
         "flip_area": quantiles(areas),
+        "score_delta": quantiles(score_deltas),
+        "score_delta_abs": quantiles(absolute_score_deltas),
+        "score_delta_counts": {
+            "increase_gt_0.01": sum(value > 0.01 for value in score_deltas),
+            "decrease_lt_-0.01": sum(value < -0.01 for value in score_deltas),
+            "abs_gt_0.05": sum(abs(value) > 0.05 for value in score_deltas),
+            "abs_gt_0.10": sum(abs(value) > 0.10 for value in score_deltas),
+        },
+        "largest_score_changes": largest_score_changes,
         "color_used_count": color_used,
         "flips": flips,
     }
@@ -121,7 +149,10 @@ def main():
     output.write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    print(json.dumps({key: value for key, value in report.items() if key != "flips"}, ensure_ascii=False, indent=2))
+    print(json.dumps({
+        key: value for key, value in report.items()
+        if key not in {"flips", "largest_score_changes"}
+    }, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
