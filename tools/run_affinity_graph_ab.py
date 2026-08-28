@@ -31,7 +31,10 @@ from utils.affinity_deployment import (
     predict_directional_maps_with_challenger,
     probability_to_logit,
 )
-from utils.affinity_graph import reconstruct_affinity_components
+from utils.affinity_graph import (
+    reconstruct_affinity_components,
+    regularize_affinity_components,
+)
 from utils.config import load_config, project_path
 from utils.post_process import classify_instance_partition
 from utils.semantic_challenger import build_semantic_challenger
@@ -210,8 +213,23 @@ def main():
                 threshold=thresholds,
                 max_instances=None,
             )
+            # Translate the native output area floor to the decoder grid.
+            # Low-affinity boundary-belt pixels become an unassigned seam and
+            # are then uniquely completed from retained affinity cores.
+            grid_min_area = max(
+                1,
+                int(np.ceil(
+                    float(infer_cfg.get("min_instance_area", 50))
+                    * float(np.prod(graph_shape))
+                    / float(image.shape[0] * image.shape[1])
+                )),
+            )
+            core_grid, regularize_audit = regularize_affinity_components(
+                raw_grid,
+                min_component_area=grid_min_area,
+            )
             native_regions = cv2.resize(
-                raw_grid.astype(np.int32),
+                core_grid.astype(np.int32),
                 (image.shape[1], image.shape[0]),
                 interpolation=cv2.INTER_NEAREST,
             )
@@ -235,7 +253,9 @@ def main():
             audit = {
                 "relation_thresholds": thresholds,
                 "graph_grid": list(graph_shape),
+                "graph_min_component_area": grid_min_area,
                 **graph_audit,
+                **{f"regularized_{key}": value for key, value in regularize_audit.items()},
                 **finish_audit,
             }
             _save_partition(arm_dir, stem, instance_map, class_map, audit)

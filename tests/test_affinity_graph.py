@@ -5,6 +5,7 @@ from utils.affinity_graph import (
     audit_instance_recovery,
     build_affinity_targets,
     reconstruct_affinity_components,
+    regularize_affinity_components,
 )
 
 
@@ -82,3 +83,18 @@ def test_channel_specific_threshold_can_disable_long_edges():
     )
     assert len(np.unique(merged[merged > 0])) == 1
     assert len(np.unique(separated[separated > 0])) == 2
+
+
+def test_regularizer_reassigns_boundary_fragments_without_losing_pixels():
+    components = np.zeros((7, 11), dtype=np.int32)
+    components[:, :4] = 1
+    components[:, 7:] = 2
+    components[:, 4:7] = np.arange(21).reshape(7, 3) + 3
+    partition, audit = regularize_affinity_components(
+        components, min_component_area=5
+    )
+    assert set(np.unique(partition)) == {1, 2}
+    assert np.all(partition > 0)
+    assert audit["retained_core_count"] == 2
+    assert audit["removed_fragment_count"] == 21
+    assert audit["reassigned_pixels"] == 21

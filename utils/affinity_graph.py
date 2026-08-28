@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Iterable, Sequence, Tuple
 
 import numpy as np
+from scipy.ndimage import distance_transform_edt
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 
@@ -186,6 +187,58 @@ def reconstruct_affinity_components(
         "kept_instance_count": int(kept_count),
         "merged_components_for_cap": int(merged_for_cap),
         "foreground_pixels": int(foreground_flat.size),
+    }
+
+
+def regularize_affinity_components(
+    component_map: np.ndarray,
+    min_component_area: int,
+):
+    """Keep affinity cores and uniquely assign cut-band pixels to a core.
+
+    Thresholded affinity graphs often turn the low-affinity boundary belt into
+    thousands of one-pixel components.  Those are not plausible instances.
+    Components below ``min_component_area`` are therefore treated as an
+    unassigned cut band and completed by nearest retained component (a
+    deterministic Voronoi assignment).  This preserves graph-derived topology
+    while guaranteeing one instance ID for every input pixel.
+    """
+    source = np.asarray(component_map)
+    if source.ndim != 2:
+        raise ValueError(f"component_map must be 2-D, got {source.shape}")
+    source = source.astype(np.int32, copy=False)
+    labels, counts = np.unique(source[source > 0], return_counts=True)
+    if labels.size == 0:
+        return np.zeros(source.shape, dtype=np.int32), {
+            "raw_component_count": 0,
+            "retained_core_count": 0,
+            "removed_fragment_count": 0,
+            "reassigned_pixels": 0,
+        }
+
+    minimum = max(1, int(min_component_area))
+    retained = labels[counts >= minimum]
+    if retained.size == 0:
+        retained = labels[np.argmax(counts)].reshape(1)
+    lookup = np.zeros(int(labels.max()) + 1, dtype=np.int32)
+    lookup[retained] = np.arange(1, retained.size + 1, dtype=np.int32)
+    partition = lookup[source]
+    cut_band = partition == 0
+    reassigned = int(np.count_nonzero(cut_band))
+    if reassigned:
+        nearest = distance_transform_edt(
+            cut_band,
+            return_distances=False,
+            return_indices=True,
+        )
+        partition[cut_band] = partition[
+            nearest[0][cut_band], nearest[1][cut_band]
+        ]
+    return partition, {
+        "raw_component_count": int(labels.size),
+        "retained_core_count": int(retained.size),
+        "removed_fragment_count": int(labels.size - retained.size),
+        "reassigned_pixels": reassigned,
     }
 
 
