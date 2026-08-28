@@ -160,9 +160,15 @@ def instance_balanced_core_bce(
     per_instance_class = (
         target_sums[valid] / selected_counts[valid].clamp_min(1.0) >= 0.5
     )
-    pooled_probability_loss = F.binary_cross_entropy(
-        per_instance_probability,
-        per_instance_class.to(per_instance_probability.dtype),
+    # BCE(probability) is intentionally disallowed by torch autocast.  Convert
+    # the differentiable pooled probability back to a stable float32 logit and
+    # use the AMP-safe fused loss; this is numerically the same objective.
+    pooled_probability_logits = torch.logit(
+        per_instance_probability.float(), eps=1.0e-5
+    )
+    pooled_probability_loss = F.binary_cross_entropy_with_logits(
+        pooled_probability_logits,
+        per_instance_class.to(pooled_probability_logits.dtype),
         reduction="none",
     )
     pool_weight = max(0.0, float(pooled_probability_weight))
