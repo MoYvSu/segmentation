@@ -86,6 +86,7 @@ def main():
         semantic_decoder,
         system.geometry_decoder,
         geometry_feature_adapter=system.geometry_feature_adapter,
+        geometry_highres_refiner=system.geometry_highres_refiner,
     ).to(device).eval()
     verify_path = Path(project_path(config, args.verify_image))
     image, tensor, _, _ = prepare_image(
@@ -103,6 +104,7 @@ def main():
     decoder_cfg.setdefault("dropout", float(config["decoder"]["dropout"]))
     decoder_cfg.setdefault("use_bn", bool(config["decoder"]["use_bn"]))
     adapter_cfg = cfg.get("feature_adapter", {})
+    highres_cfg = cfg.get("highres_refiner", {})
     architecture = {
         "sam2": {
             "config_file": str(config["sam2"]["config_file"]),
@@ -114,7 +116,9 @@ def main():
             "affinity_channels": int(system.geometry_decoder.affinity_channels),
             "fpn_channels": int(cfg.get("fpn_channels", 256)),
             "up_channels": int(cfg.get("up_channels", 128)),
-            "output_grid": int(cfg.get("output_grid", 512)),
+            "output_grid": int(
+                cfg.get("coarse_output_grid", cfg.get("output_grid", 512))
+            ),
         },
         "geometry_feature_adapter": (
             {
@@ -123,6 +127,18 @@ def main():
                 "active_scales": adapter_cfg.get("active_scales"),
             }
             if system.geometry_feature_adapter is not None else None
+        ),
+        "geometry_highres_refiner": (
+            {
+                "short_channels": int(highres_cfg.get("short_channels", 4)),
+                "feature_hidden": int(highres_cfg.get("feature_hidden", 32)),
+                "image_hidden": int(highres_cfg.get("image_hidden", 16)),
+                "fusion_hidden": int(highres_cfg.get("fusion_hidden", 32)),
+                "max_logit_delta": float(
+                    highres_cfg.get("max_logit_delta", 1.0)
+                ),
+            }
+            if system.geometry_highres_refiner is not None else None
         ),
     }
     bundle = {

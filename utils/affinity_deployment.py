@@ -117,10 +117,9 @@ def predict_maps_with_challenger(
         features = [
             feature.detach() for feature in system.reference_model.encoder(tensor)
         ]
-    geometry_features = features
-    if system.geometry_feature_adapter is not None:
-        geometry_features = system.geometry_feature_adapter(features, gated=True)
-    affinity_output = system.geometry_decoder(geometry_features)["affinity_logits"]
+    affinity_output = system.geometry_forward_from_features(
+        tensor, features
+    )["affinity_logits"]
     challenger_output = semantic_challenger(features, tensor)
 
     challenger_native = crop_letterbox_output(
@@ -172,10 +171,9 @@ def predict_directional_maps_with_challenger(
     image, tensor, pad_h, pad_w = prepare_image(image_path, image_size, device)
     original_size = image.shape[:2]
     features = [feature.detach() for feature in system.reference_model.encoder(tensor)]
-    geometry_features = features
-    if system.geometry_feature_adapter is not None:
-        geometry_features = system.geometry_feature_adapter(features, gated=True)
-    affinity_logits = system.geometry_decoder(geometry_features)["affinity_logits"]
+    affinity_logits = system.geometry_forward_from_features(
+        tensor, features
+    )["affinity_logits"]
     challenger_output = semantic_challenger(features, tensor)
 
     challenger_native = crop_letterbox_output(

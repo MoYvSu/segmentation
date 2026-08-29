@@ -96,11 +96,13 @@ class FrozenSemanticGeometrySystem(nn.Module):
         reference_model: nn.Module,
         geometry_decoder: nn.Module,
         geometry_feature_adapter: Optional[nn.Module] = None,
+        geometry_highres_refiner: Optional[nn.Module] = None,
     ):
         super().__init__()
         self.reference_model = reference_model
         self.geometry_decoder = geometry_decoder
         self.geometry_feature_adapter = geometry_feature_adapter
+        self.geometry_highres_refiner = geometry_highres_refiner
         self.freeze_reference()
 
     def freeze_reference(self):
@@ -111,24 +113,49 @@ class FrozenSemanticGeometrySystem(nn.Module):
     def train(self, mode: bool = True):
         super().train(mode)
         self.reference_model.eval()
-        self.geometry_decoder.train(mode)
+        self.geometry_decoder.train(
+            mode and any(p.requires_grad for p in self.geometry_decoder.parameters())
+        )
         if self.geometry_feature_adapter is not None:
-            self.geometry_feature_adapter.train(mode)
+            self.geometry_feature_adapter.train(
+                mode
+                and any(
+                    p.requires_grad
+                    for p in self.geometry_feature_adapter.parameters()
+                )
+            )
+        if self.geometry_highres_refiner is not None:
+            self.geometry_highres_refiner.train(mode)
         return self
+
+    def geometry_forward_from_features(
+        self, image: torch.Tensor, features
+    ) -> Dict[str, torch.Tensor]:
+        features = [feature.detach() for feature in features]
+        if self.geometry_feature_adapter is not None:
+            features = self.geometry_feature_adapter(features, gated=True)
+        coarse = self.geometry_decoder(features)
+        if self.geometry_highres_refiner is None:
+            return coarse
+        refined = self.geometry_highres_refiner(
+            coarse["affinity_feature"], coarse["affinity_logits"], image
+        )
+        # Preserve optional coarse decoder diagnostics while making the refined
+        # logits the canonical output used by loss and deployment.
+        return {**coarse, **refined}
 
     def geometry_forward(self, image: torch.Tensor) -> Dict[str, torch.Tensor]:
         self.reference_model.eval()
         with torch.no_grad():
             features = self.reference_model.encoder(image)
-        features = [feature.detach() for feature in features]
-        if self.geometry_feature_adapter is not None:
-            features = self.geometry_feature_adapter(features, gated=True)
-        return self.geometry_decoder(features)
+        return self.geometry_forward_from_features(image, features)
 
     def geometry_trainable_parameters(self):
         yield from self.geometry_decoder.parameters()
         if self.geometry_feature_adapter is not None:
             yield from self.geometry_feature_adapter.parameters()
+        if self.geometry_highres_refiner is not None:
+            yield from self.geometry_highres_refiner.parameters()
 
     @torch.no_grad()
     def semantic_logits(self, image: torch.Tensor) -> torch.Tensor:

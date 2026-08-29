@@ -1,0 +1,59 @@
+# G7: refine only the four distance-1 affinity channels at the image grid.
+# E10a semantics, V6 LoRA, G4b affinity body and long-range affinities stay
+# frozen. SAM2 masks supervise only covered pixel pairs; uncovered regions are
+# ignore, and pseudo cross-mask negatives are deliberately down-weighted.
+_base: ../experiments/affinity_g4b_high065_semantic_e10a_cold.yaml
+
+affinity_geometry_g1:
+  geometry_init_checkpoint: outputs/affinity_geometry_g4b_gap_weight020/latest_affinity.pth
+  output_dir: outputs/affinity_geometry_g7_highres_short
+
+  input_size: 1024
+  coarse_output_grid: 512
+  output_grid: 1024
+  batch_size: 1
+  epochs: 20
+  learning_rate: 6.0e-5
+  min_learning_rate: 5.0e-6
+  num_workers: 4
+  prefetch_factor: 2
+  unlabeled_monitor_count: 10
+  monitor_interval: 2
+  train_short_channels_only: true
+
+  highres_refiner:
+    enabled: true
+    train_only: true
+    short_channels: 4
+    feature_hidden: 32
+    image_hidden: 16
+    fusion_hidden: 32
+    max_logit_delta: 1.0
+    learning_rate: 6.0e-5
+
+  sam2_geometry:
+    # Same G3/G4b data mix; only the reliability of pseudo negative edges is
+    # changed. Same-mask positives remain weight 1.0.
+    negative_edge_weight: 0.25
+
+  loss:
+    # Preserve the absolute confidence discount instead of renormalizing a
+    # pseudo-only batch back to unit mean weight.
+    normalize_edge_weights: false
+
+  deployment_validation:
+    enabled: true
+    fusion_mode: gated
+    short_reduction: mean
+    boundary_threshold: 0.65
+    distance2_weight: 0.50
+    distance4_weight: 0.25
+    support_threshold: 0.20
+    support_temperature: 0.05
+    short_softmax_temperature: 0.15
+
+affinity_deployment:
+  checkpoint: outputs/affinity_geometry_g7_highres_short/latest_affinity.pth
+
+inference:
+  output_dir: outputs/submission_affinity_g7_highres_short_e10a

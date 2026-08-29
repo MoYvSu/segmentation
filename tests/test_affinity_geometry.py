@@ -1,7 +1,10 @@
 import pytest
 import torch
 
-from models.affinity_geometry import AffinityGeometryDecoder
+from models.affinity_geometry import (
+    AffinityGeometryDecoder,
+    HighResolutionShortAffinityResidual,
+)
 from utils.affinity_graph import DEFAULT_AFFINITY_OFFSETS
 from utils.affinity_loss import (
     balanced_affinity_loss,
@@ -26,6 +29,48 @@ def test_affinity_decoder_outputs_requested_channels_and_grid():
     ]
     output = decoder(features)
     assert output["affinity_logits"].shape == (2, 8, 64, 64)
+    assert output["affinity_feature"].shape == (2, 16, 64, 64)
+
+
+def test_highres_short_residual_starts_zero_and_preserves_long_channels():
+    refiner = HighResolutionShortAffinityResidual(
+        feature_channels=8,
+        feature_hidden=8,
+        image_hidden=8,
+        fusion_hidden=8,
+        max_logit_delta=1.0,
+    )
+    feature = torch.randn(1, 8, 8, 8)
+    coarse = torch.randn(1, 8, 8, 8)
+    image = torch.rand(1, 3, 16, 16)
+    output = refiner(feature, coarse, image)
+    expected = torch.nn.functional.interpolate(
+        coarse, size=(16, 16), mode="bilinear", align_corners=False
+    )
+    assert output["affinity_logits"].shape == (1, 8, 16, 16)
+    assert torch.count_nonzero(output["short_affinity_delta"]) == 0
+    assert torch.equal(output["affinity_logits"], expected)
+
+
+def test_highres_short_residual_never_changes_long_channels_after_update():
+    refiner = HighResolutionShortAffinityResidual(
+        feature_channels=8,
+        feature_hidden=8,
+        image_hidden=8,
+        fusion_hidden=8,
+        max_logit_delta=0.5,
+    )
+    with torch.no_grad():
+        refiner.out.bias.fill_(0.25)
+    feature = torch.randn(1, 8, 8, 8)
+    coarse = torch.randn(1, 8, 8, 8)
+    image = torch.rand(1, 3, 16, 16)
+    output = refiner(feature, coarse, image)["affinity_logits"]
+    expected = torch.nn.functional.interpolate(
+        coarse, size=(16, 16), mode="bilinear", align_corners=False
+    )
+    assert not torch.equal(output[:, :4], expected[:, :4])
+    assert torch.equal(output[:, 4:], expected[:, 4:])
 
 
 def test_torch_targets_match_same_instance_pairs_and_loss_backpropagates():
@@ -101,6 +146,21 @@ def test_edge_weight_can_soften_new_gap_negatives():
         edge_weight=torch.tensor([[[[1.0, 0.2]]]]),
     )
     assert softened < full
+
+
+def test_absolute_edge_weight_discount_survives_pseudo_only_batch():
+    logits = torch.full((1, 1, 1, 4), 2.0, requires_grad=True)
+    target = torch.zeros_like(logits)
+    valid = torch.ones_like(logits, dtype=torch.bool)
+    full, _ = balanced_affinity_loss(logits, target, valid)
+    discounted, _ = balanced_affinity_loss(
+        logits,
+        target,
+        valid,
+        edge_weight=torch.full_like(logits, 0.25),
+        normalize_edge_weights=False,
+    )
+    assert torch.allclose(discounted, 0.25 * full)
 
 
 def test_negative_tail_loss_focuses_sparse_false_merge_edges():

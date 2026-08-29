@@ -14,7 +14,8 @@ seal2、局部重建 → 受阻分水岭”，得分 `0.8381/0.8408/83.94`。E10
 
 G3/G4b 尚不能单独证明黑盒竞赛成绩提升，测试目检仍以欠分割为主要风险；GT 前景上的 Oracle
 图重建仅作诊断。graph-v1 `area200` 黑盒为 `0.8268/0.8365/83.17`，未超过 E10a watershed；
-graph-v2 改用 affinity 加权种子最大生成森林，`area150` 已完成全量并等待黑盒裁决。详见
+graph-v2 `area150` 因笔直、失真的归并边界被目检淘汰。当前 G7 回到固定分水岭，只学习
+1024-grid 短程 affinity residual。详见
 [AFFINITY_GRAPH_AB_20260828.md](AFFINITY_GRAPH_AB_20260828.md)；历史 affinity 审计见
 [AFFINITY_DEPLOYMENT_EVALUATION.md](AFFINITY_DEPLOYMENT_EVALUATION.md)。
 
@@ -73,6 +74,10 @@ python train_stage2.py \
 # E10a：冻结 V6 LoRA/G4b，冷启动完整高分辨率语义解码器（20 epoch）
 python train_stage2.py \
   --config config/train/stage2_semantic_e10a_cold20.yaml
+
+# G7：固定 E10a/G4b，只训练高分辨率短程 affinity 残差（20 epoch）
+python train_affinity_geometry_g1.py \
+  --config config/train/affinity_geometry_g7_highres_short.yaml
 
 # E7b 完成后：同一 G4b 几何，只替换 semantic decoder
 python tools/run_affinity_submission.py \

@@ -26,7 +26,10 @@ from data.dataset import letterbox
 from data.offset_geometry_dataset import OffsetGeometryDataset
 from data.sam2_geometry_dataset import SAM2GeometryDataset
 from inference import build_model as build_reference_model
-from models.affinity_geometry import AffinityGeometryDecoder
+from models.affinity_geometry import (
+    AffinityGeometryDecoder,
+    HighResolutionShortAffinityResidual,
+)
 from models.gda_mim import GenerativeDomainAdapterPyramid
 from models.offset_geometry import (
     FrozenSemanticGeometrySystem,
@@ -52,7 +55,11 @@ from utils.affinity_loss import (
     build_affinity_targets_torch,
     negative_affinity_tail_loss,
 )
-from utils.affinity_deployment import postprocess, predict_maps
+from utils.affinity_deployment import (
+    postprocess,
+    predict_maps,
+    predict_maps_with_challenger,
+)
 from utils.config import load_config, project_path
 from utils.instance_metrics import (
     evaluate_instance_pair,
@@ -60,6 +67,7 @@ from utils.instance_metrics import (
     summarize_instance_results,
 )
 from utils.offset_letterbox import geometry_letterbox_metadata
+from utils.semantic_challenger import build_semantic_challenger
 
 
 logging.basicConfig(
@@ -129,6 +137,22 @@ def load_geometry_checkpoint_state(system, checkpoint):
             "checkpoint contains a geometry feature adapter, but the selected "
             "config has feature_adapter.enabled=false"
         )
+    refiner_state = checkpoint.get("geometry_highres_refiner_state_dict")
+    if system.geometry_highres_refiner is not None:
+        if refiner_state is None:
+            system.geometry_highres_refiner.reset_parameters()
+            logger.info(
+                "Initialized zero-output high-resolution affinity residual"
+            )
+        else:
+            system.geometry_highres_refiner.load_state_dict(
+                refiner_state, strict=True
+            )
+    elif refiner_state is not None:
+        raise RuntimeError(
+            "checkpoint contains a high-resolution affinity refiner, but the "
+            "selected config has highres_refiner.enabled=false"
+        )
 
 
 def build_system(config, cfg, device):
@@ -139,7 +163,7 @@ def build_system(config, cfg, device):
         affinity_channels=len(DEFAULT_AFFINITY_OFFSETS),
         fpn_channels=int(cfg.get("fpn_channels", 256)),
         up_channels=int(cfg.get("up_channels", 128)),
-        output_grid=int(cfg.get("output_grid", 512)),
+        output_grid=int(cfg.get("coarse_output_grid", cfg.get("output_grid", 512))),
     ).to(device)
     init_path = project_path(config, cfg["geometry_init_checkpoint"])
     checkpoint = torch.load(init_path, map_location="cpu", weights_only=False)
@@ -162,9 +186,40 @@ def build_system(config, cfg, device):
                 "Initialized zero-gated geometry feature adapter; epoch 0 "
                 "preserves the source geometry path"
             )
+    highres_cfg = cfg.get("highres_refiner", {})
+    geometry_highres_refiner = None
+    if bool(highres_cfg.get("enabled", False)):
+        geometry_highres_refiner = HighResolutionShortAffinityResidual(
+            feature_channels=int(cfg.get("up_channels", 128)),
+            short_channels=int(highres_cfg.get("short_channels", 4)),
+            feature_hidden=int(highres_cfg.get("feature_hidden", 32)),
+            image_hidden=int(highres_cfg.get("image_hidden", 16)),
+            fusion_hidden=int(highres_cfg.get("fusion_hidden", 32)),
+            max_logit_delta=float(highres_cfg.get("max_logit_delta", 1.0)),
+        )
+        refiner_state = checkpoint.get("geometry_highres_refiner_state_dict")
+        if refiner_state is not None:
+            geometry_highres_refiner.load_state_dict(refiner_state, strict=True)
+            logger.info("Loaded high-resolution affinity refiner from %s", init_path)
+        else:
+            logger.info(
+                "Initialized zero-output high-resolution affinity residual; "
+                "G4b body remains the coarse anchor"
+            )
     system = FrozenSemanticGeometrySystem(
-        reference, decoder, geometry_feature_adapter
+        reference,
+        decoder,
+        geometry_feature_adapter,
+        geometry_highres_refiner,
     ).to(device)
+    if geometry_highres_refiner is not None and bool(
+        highres_cfg.get("train_only", True)
+    ):
+        for parameter in system.geometry_decoder.parameters():
+            parameter.requires_grad_(False)
+        if system.geometry_feature_adapter is not None:
+            for parameter in system.geometry_feature_adapter.parameters():
+                parameter.requires_grad_(False)
     digest = semantic_state_digest(reference)
     validate_semantic_geometry_contract(
         config, cfg, checkpoint, reference_path, digest
@@ -173,14 +228,23 @@ def build_system(config, cfg, device):
 
 
 def build_optimizer(system, cfg):
-    groups = [{
-        "params": list(system.geometry_decoder.parameters()),
-        "lr": float(cfg.get("learning_rate", 5e-5)),
-        "name": "geometry_decoder",
-    }]
+    groups = []
+    decoder_parameters = [
+        parameter
+        for parameter in system.geometry_decoder.parameters()
+        if parameter.requires_grad
+    ]
+    if decoder_parameters:
+        groups.append({
+            "params": decoder_parameters,
+            "lr": float(cfg.get("learning_rate", 5e-5)),
+            "name": "geometry_decoder",
+        })
     adapter_cfg = cfg.get("feature_adapter", {})
     adapter = system.geometry_feature_adapter
-    if adapter is not None:
+    if adapter is not None and any(
+        parameter.requires_grad for parameter in adapter.parameters()
+    ):
         groups.extend([
             {
                 "params": list(adapter.adapter_parameters()),
@@ -198,6 +262,24 @@ def build_optimizer(system, cfg):
                 "name": "geometry_feature_gates",
             },
         ])
+    if system.geometry_highres_refiner is not None:
+        refiner_parameters = [
+            parameter
+            for parameter in system.geometry_highres_refiner.parameters()
+            if parameter.requires_grad
+        ]
+        if refiner_parameters:
+            groups.append({
+                "params": refiner_parameters,
+                "lr": float(
+                    cfg.get("highres_refiner", {}).get(
+                        "learning_rate", cfg.get("learning_rate", 5e-5)
+                    )
+                ),
+                "name": "geometry_highres_refiner",
+            })
+    if not groups:
+        raise ValueError("affinity training selected no trainable parameters")
     return torch.optim.AdamW(
         groups, weight_decay=float(cfg.get("weight_decay", 1e-4))
     )
@@ -358,20 +440,46 @@ def deployment_validation_recipe(cfg):
 
 @torch.no_grad()
 def evaluate_deployment_validation(
-    system, image_paths, image_size, device, infer_cfg, recipe
+    system,
+    image_paths,
+    image_size,
+    device,
+    infer_cfg,
+    recipe,
+    semantic_challenger=None,
+    replace_reference_semantic=False,
 ):
     """Score the exact deployment path; GT is loaded only after prediction."""
     metrics = []
     with tempfile.TemporaryDirectory(prefix="affinity-deploy-val-") as temp_dir:
         for image_path in image_paths:
-            image, _, affinity_output, _ = predict_maps(
-                system,
-                image_path,
-                image_size,
-                device,
-                recipe["fusion_mode"],
-                recipe["fusion_kwargs"],
-            )
+            challenger_logits = None
+            if semantic_challenger is None:
+                image, _, affinity_output, _ = predict_maps(
+                    system,
+                    image_path,
+                    image_size,
+                    device,
+                    recipe["fusion_mode"],
+                    recipe["fusion_kwargs"],
+                )
+            else:
+                (
+                    image,
+                    _,
+                    affinity_output,
+                    _,
+                    challenger_logits,
+                ) = predict_maps_with_challenger(
+                    system,
+                    semantic_challenger,
+                    image_path,
+                    image_size,
+                    device,
+                    recipe["fusion_mode"],
+                    recipe["fusion_kwargs"],
+                    replace_reference_semantic=replace_reference_semantic,
+                )
             _, pred_map, pred_class_map = postprocess(
                 affinity_output,
                 image.shape[:2],
@@ -381,6 +489,7 @@ def evaluate_deployment_validation(
                 recipe["boundary_threshold"],
                 False,
                 image_rgb=image,
+                semantic_challenger_logits=challenger_logits,
             )
             gt_map, gt_class_map, _ = load_labelme_instances(
                 image_path.with_suffix(".json"), image.shape[:2]
@@ -417,6 +526,10 @@ def save_checkpoint(
         payload["geometry_feature_adapter_state_dict"] = (
             system.geometry_feature_adapter.state_dict()
         )
+    if system.geometry_highres_refiner is not None:
+        payload["geometry_highres_refiner_state_dict"] = (
+            system.geometry_highres_refiner.state_dict()
+        )
     torch.save(payload, path)
 
 
@@ -433,6 +546,14 @@ def main():
         else "cpu"
     )
     system, reference_path, init_path, digest = build_system(config, cfg, device)
+    semantic_challenger, _ = build_semantic_challenger(
+        config, system, reference_path, device
+    )
+    replace_reference_semantic = bool(
+        config.get("semantic_challenger", {}).get(
+            "replace_reference_semantic", False
+        )
+    )
     reference_sha = file_sha256(reference_path)
     raw_dir = project_path(config, config["paths"]["raw_data_dir"])
     index_dataset = OffsetGeometryDataset(raw_dir)
@@ -574,13 +695,18 @@ def main():
         train_parts[0] if len(train_parts) == 1 else ConcatDataset(train_parts)
     )
     val_dataset = OffsetGeometryDataset(raw_dir, sample_names=val_names, **dataset_kwargs)
+    loader_workers = int(cfg.get("num_workers", 0))
     loader = DataLoader(
         train_dataset,
         batch_size=int(cfg.get("batch_size", 2)),
         shuffle=sampler is None,
         sampler=sampler,
-        num_workers=0,
+        num_workers=loader_workers,
         pin_memory=device.type == "cuda",
+        persistent_workers=loader_workers > 0,
+        prefetch_factor=(
+            int(cfg.get("prefetch_factor", 2)) if loader_workers > 0 else None
+        ),
         drop_last=False,
     )
     unlabeled_dir = Path(project_path(config, cfg.get("unlabeled_dir", "data/unlabeled")))
@@ -624,6 +750,8 @@ def main():
             device,
             config["inference"],
             deployment_recipe,
+            semantic_challenger,
+            replace_reference_semantic,
         )
         (output_dir / "deployment_baseline.json").write_text(
             json.dumps(deployment_baseline, ensure_ascii=False, indent=2),
@@ -686,11 +814,12 @@ def main():
             image = batch["image"].to(device, non_blocking=True)
             labels = batch["instance_map"].to(device, non_blocking=True)
             valid = batch["valid_content"].to(device, non_blocking=True)
+            manual_source = batch["uncovered_boundary_source"].to(
+                device, non_blocking=True
+            ).bool()
             uncovered_as_boundary = None
             if bool(cfg.get("manual_uncovered_as_boundary", False)):
-                uncovered_as_boundary = batch["uncovered_boundary_source"].to(
-                    device, non_blocking=True
-                )
+                uncovered_as_boundary = manual_source
             target, edge_valid, uncovered_edge = build_affinity_targets_torch(
                 labels,
                 valid,
@@ -698,6 +827,21 @@ def main():
                 return_uncovered_mask=True,
             )
             edge_weight = None
+            pseudo_negative_weight = float(
+                cfg.get("sam2_geometry", {}).get("negative_edge_weight", 1.0)
+            )
+            if not 0.0 <= pseudo_negative_weight <= 1.0:
+                raise ValueError(
+                    "sam2_geometry.negative_edge_weight must be within [0, 1]"
+                )
+            if pseudo_negative_weight != 1.0:
+                edge_weight = torch.ones_like(target)
+                pseudo_negative = (
+                    (~manual_source)[:, None, None, None]
+                    & edge_valid
+                    & (target <= 0.5)
+                )
+                edge_weight[pseudo_negative] = pseudo_negative_weight
             if uncovered_as_boundary is not None:
                 gap_weight = float(
                     cfg.get("manual_uncovered_boundary_weight", 1.0)
@@ -706,16 +850,30 @@ def main():
                     raise ValueError(
                         "manual_uncovered_boundary_weight must be within [0, 1]"
                     )
-                edge_weight = torch.ones_like(target)
+                if edge_weight is None:
+                    edge_weight = torch.ones_like(target)
                 edge_weight[uncovered_edge] = gap_weight
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type=device.type, enabled=amp_enabled):
                 output = system.geometry_forward(image)
+                loss_logits = output["affinity_logits"]
+                loss_target = target
+                loss_valid = edge_valid
+                loss_edge_weight = edge_weight
+                if bool(cfg.get("train_short_channels_only", False)):
+                    short_channels = int(
+                        cfg.get("highres_refiner", {}).get("short_channels", 4)
+                    )
+                    loss_logits = loss_logits[:, :short_channels]
+                    loss_target = loss_target[:, :short_channels]
+                    loss_valid = loss_valid[:, :short_channels]
+                    if loss_edge_weight is not None:
+                        loss_edge_weight = loss_edge_weight[:, :short_channels]
                 loss_cfg = cfg.get("loss", {})
                 loss, train_metrics = balanced_affinity_loss(
-                    output["affinity_logits"],
-                    target,
-                    edge_valid,
+                    loss_logits,
+                    loss_target,
+                    loss_valid,
                     negative_weight=float(loss_cfg.get("negative_weight", 1.0)),
                     hard_negative_weight=float(
                         loss_cfg.get("hard_negative_weight", 0.0)
@@ -723,16 +881,19 @@ def main():
                     hard_negative_gamma=float(
                         loss_cfg.get("hard_negative_gamma", 2.0)
                     ),
-                    edge_weight=edge_weight,
+                    edge_weight=loss_edge_weight,
+                    normalize_edge_weights=bool(
+                        loss_cfg.get("normalize_edge_weights", True)
+                    ),
                 )
                 tail_weight = float(
                     loss_cfg.get("negative_tail_weight", 0.0)
                 )
                 if tail_weight > 0:
                     tail_loss, tail_metrics = negative_affinity_tail_loss(
-                        output["affinity_logits"],
-                        target,
-                        edge_valid,
+                        loss_logits,
+                        loss_target,
+                        loss_valid,
                         margin=float(
                             loss_cfg.get("negative_tail_margin", 0.45)
                         ),
@@ -740,7 +901,7 @@ def main():
                             loss_cfg.get("negative_tail_fraction", 0.05)
                         ),
                         sample_mask=(
-                            uncovered_as_boundary
+                            manual_source
                             if bool(
                                 loss_cfg.get(
                                     "negative_tail_manual_only", True
@@ -748,7 +909,7 @@ def main():
                             )
                             else None
                         ),
-                        edge_weight=edge_weight,
+                        edge_weight=loss_edge_weight,
                     )
                     loss = loss + tail_weight * tail_loss
                     train_metrics.update(tail_metrics)
@@ -784,6 +945,8 @@ def main():
                 device,
                 config["inference"],
                 deployment_recipe,
+                semantic_challenger,
+                replace_reference_semantic,
             )
         deployment_values = {
             "val_deployment_score_total": (

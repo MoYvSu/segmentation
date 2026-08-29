@@ -8,7 +8,10 @@ from pathlib import Path
 import torch
 from torch import nn
 
-from models.affinity_geometry import AffinityGeometryDecoder
+from models.affinity_geometry import (
+    AffinityGeometryDecoder,
+    HighResolutionShortAffinityResidual,
+)
 from models.fpn_decoder import FPNDecoder
 from models.gda_mim import GenerativeDomainAdapterPyramid
 from models.lora import inject_trunk_lora
@@ -31,12 +34,14 @@ class FusedPhaseAffinityModel(nn.Module):
         semantic_decoder: nn.Module,
         affinity_decoder: nn.Module,
         geometry_feature_adapter: nn.Module | None = None,
+        geometry_highres_refiner: nn.Module | None = None,
     ):
         super().__init__()
         self.encoder = encoder
         self.semantic_decoder = semantic_decoder
         self.affinity_decoder = affinity_decoder
         self.geometry_feature_adapter = geometry_feature_adapter
+        self.geometry_highres_refiner = geometry_highres_refiner
 
     def forward(self, image: torch.Tensor):
         features = self.encoder(image)
@@ -46,9 +51,12 @@ class FusedPhaseAffinityModel(nn.Module):
             geometry_features = self.geometry_feature_adapter(
                 geometry_features, gated=True
             )
-        affinity_logits = self.affinity_decoder(geometry_features)[
-            "affinity_logits"
-        ]
+        affinity_output = self.affinity_decoder(geometry_features)
+        affinity_logits = affinity_output["affinity_logits"]
+        if self.geometry_highres_refiner is not None:
+            affinity_logits = self.geometry_highres_refiner(
+                affinity_output["affinity_feature"], affinity_logits, image
+            )["affinity_logits"]
         return {
             "semantic_logits": semantic_logits,
             "affinity_logits": affinity_logits,
@@ -66,6 +74,10 @@ class FusedPhaseAffinityModel(nn.Module):
             "geometry_feature_adapter": (
                 sum(p.numel() for p in self.geometry_feature_adapter.parameters())
                 if self.geometry_feature_adapter is not None else 0
+            ),
+            "geometry_highres_refiner": (
+                sum(p.numel() for p in self.geometry_highres_refiner.parameters())
+                if self.geometry_highres_refiner is not None else 0
             ),
         }
         values["total"] = sum(values.values())
@@ -137,6 +149,17 @@ def build_fused_model_from_bundle(bundle, config, device):
         up_channels=int(affinity_cfg["up_channels"]),
         output_grid=int(affinity_cfg["output_grid"]),
     )
+    refiner_cfg = architecture.get("geometry_highres_refiner")
+    highres_refiner = None
+    if refiner_cfg is not None:
+        highres_refiner = HighResolutionShortAffinityResidual(
+            feature_channels=int(affinity_cfg["up_channels"]),
+            short_channels=int(refiner_cfg.get("short_channels", 4)),
+            feature_hidden=int(refiner_cfg.get("feature_hidden", 32)),
+            image_hidden=int(refiner_cfg.get("image_hidden", 16)),
+            fusion_hidden=int(refiner_cfg.get("fusion_hidden", 32)),
+            max_logit_delta=float(refiner_cfg.get("max_logit_delta", 1.0)),
+        )
     adapter_cfg = architecture.get("geometry_feature_adapter")
     adapter = None
     if adapter_cfg is not None:
@@ -152,6 +175,7 @@ def build_fused_model_from_bundle(bundle, config, device):
         semantic_decoder,
         affinity_decoder,
         geometry_feature_adapter=adapter,
+        geometry_highres_refiner=highres_refiner,
     ).to(device)
     model.load_state_dict(bundle["model_state_dict"], strict=True)
     model.eval()

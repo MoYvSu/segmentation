@@ -100,6 +100,7 @@ def balanced_affinity_loss(
     hard_negative_weight: float = 0.0,
     hard_negative_gamma: float = 2.0,
     edge_weight: torch.Tensor | None = None,
+    normalize_edge_weights: bool = True,
 ):
     if logits.shape != target.shape or logits.shape != edge_valid.shape:
         raise ValueError(
@@ -129,7 +130,11 @@ def balanced_affinity_loss(
             positive_weights = supervision_weight[:, channel][positive]
             terms.append(
                 (positive_raw * positive_weights).sum()
-                / positive_weights.sum().clamp_min(1.0e-12)
+                / (
+                    positive_weights.sum().clamp_min(1.0e-12)
+                    if normalize_edge_weights
+                    else positive_weights.new_tensor(positive_weights.numel())
+                )
             )
             term_weights.append(1.0)
         if negative.any():
@@ -144,7 +149,11 @@ def balanced_affinity_loss(
                 )
             negative_term = (
                 (negative_raw * weights).sum()
-                / weights.sum().clamp_min(1.0e-12)
+                / (
+                    weights.sum().clamp_min(1.0e-12)
+                    if normalize_edge_weights
+                    else weights.new_tensor(weights.numel())
+                )
             )
             terms.append(negative_term)
             term_weights.append(float(negative_weight))

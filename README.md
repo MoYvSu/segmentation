@@ -20,14 +20,15 @@
 - **统一部署模型**：`outputs/deployment/e10a_g4b_fused.pth` 把共享 SAM2+LoRA encoder、
   E10a semantic decoder 与 G4b affinity decoder 打包为一个 81.67M 参数模型；加载时不再依赖
   三份源 checkpoint，`test_009` 与原管线最终实例图/类别 JSON 字节级一致。
-- **方向图切分候选**：graph-v1 `area200` 黑盒为 `0.8268/0.8365/83.17`，未超过 E10a
-  watershed。graph-v2 保持 `short=0.40`，以 affinity 加权的种子最大生成森林替代欧氏
-  Voronoi 回填；`area150` 全量 5649 实例，当前等待一次黑盒裁决。详见
+- **方向图切分结论**：graph-v1 `area200` 黑盒为 `0.8268/0.8365/83.17`，未超过 E10a
+  watershed；graph-v2 `area150` 目检出现不自然的笔直边界，已停止晋级，不再提交。详见
   [docs/AFFINITY_GRAPH_AB_20260828.md](docs/AFFINITY_GRAPH_AB_20260828.md)。
 - **中心热图实验已降级为负面对照**：共享 `boundary_fpn` 的中心辅助任务破坏了边界表征；
   `outputs/stage2_center_heatmap/best_model_stage2.pth` 不作为后续初始化主线。
-- **当前目标**：用一次黑盒提交裁决 graph-v2 area150；若不超过 `83.94`，恢复 E10a-only
-  watershed 为唯一部署主线，后续语义训练从 E10a 初始化并同时守住 mIoU 与面积项。
+- **当前目标**：G7 冻结 E10a、V6 LoRA 与 G4b affinity 基座，只在 1024 网格训练四个
+  短程 affinity 的零初始化残差；SAM2 未覆盖区 ignore，伪实例跨 mask 负边降权。现有
+  `high=0.65`、seal2 与分水岭不变。详见
+  [docs/AFFINITY_G7_HIGHRES_SHORT_20260829.md](docs/AFFINITY_G7_HIGHRES_SHORT_20260829.md)。
 - **审计结论（2026-08-27）**：G3 的验证提升尚不能等同于竞赛增益；G3 相比 G2 同时改变了
   native crop、采样、训练时长、学习率和外观增强，需在统一部署评估链上做单变量复验。详见
   [docs/AFFINITY_DEPLOYMENT_EVALUATION.md](docs/AFFINITY_DEPLOYMENT_EVALUATION.md)。
@@ -154,6 +155,13 @@ E10a 冷启动完整语义解码器：
 
 ```bash
 python train_stage2.py --config config/train/stage2_semantic_e10a_cold20.yaml
+```
+
+G7 高分辨率短程 affinity 残差：
+
+```bash
+python train_affinity_geometry_g1.py \
+  --config config/train/affinity_geometry_g7_highres_short.yaml
 ```
 
 E9 输出目录为 `outputs/stage2_semantic_e9_highres20/`。训练固定 G4b geometry、V6 decoder

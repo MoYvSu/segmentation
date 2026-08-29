@@ -18,11 +18,15 @@ V6 教师只在高置信无标签像素提供衰减蒸馏。部署配置
 `0.8408`、总分 `83.94`，是当前单语义模型主线；E9 保留为历史回退，不执行连续融合。详见
 `docs/SEMANTIC_EXPERIMENT_E10A_20260828.md`。
 
-`tools/run_affinity_graph_ab.py` 是 GT-free 几何筛查工具：E10a 单独提供语义，G4b 提供未融合的
-8 通道 affinity。graph-v1 `short=0.40/area200` 黑盒总分为 `83.17`，未超过 E10a watershed；
-graph-v2 使用 `--regularizer affinity_msf --min-instance-areas 150` 做 affinity 加权归并，已完成
-68 图并等待一次黑盒裁决。`short=0.30` 继续淘汰。详见
+`tools/run_affinity_graph_ab.py` 是 GT-free 历史几何筛查工具：graph-v1
+`short=0.40/area200` 黑盒总分为 `83.17`，未超过 E10a watershed；graph-v2 `area150`
+出现不自然的笔直边界，已按目检淘汰，不再提交。详见
 `docs/AFFINITY_GRAPH_AB_20260828.md`。
+
+`train/affinity_geometry_g7_highres_short.yaml` 是当前几何训练实验：冻结 E10a/V6 LoRA、
+G4b 512-grid decoder 和 long affinity，只训练 1024-grid 四个 distance-1 通道的有界残差。
+SAM2 same-mask 正边保持全权重，cross-mask 负边权重 `0.25`，未覆盖像素对保持 ignore；不蒸馏
+G4b 概率。checkpoint 由 E10a + gated affinity + `high=0.65` + seal2 完整部署代理选择。
 
 当前类别纠错候选为 `experiments/affinity_g4b_high065_semantic_dual_e7c_relaxed.yaml`：固定
 V6 前景与 G4b 实例几何，仅用 E7b core 分数覆盖部分 V6 hard vote。阈值由缓存置信度扫参
