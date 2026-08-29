@@ -20,12 +20,12 @@ from data.mim_dataset import list_images
 from models.fused_deployment import load_fused_deployment_model
 from train_offset_geometry import file_sha256
 from utils.affinity_deployment import (
+    crop_affinity_boundary_output,
     crop_letterbox_output,
     postprocess,
     prepare_image,
     probability_to_logit,
 )
-from utils.affinity_fusion import affinity_boundary_probability
 from utils.config import load_config, project_path
 
 
@@ -84,15 +84,14 @@ def main():
             pad_w,
             image.shape[:2],
         ).cpu()
-        boundary = affinity_boundary_probability(
-            outputs["affinity_logits"], mode=fusion_mode, **fusion_kwargs
-        )
-        boundary_native = crop_letterbox_output(
-            boundary,
+        boundary_native = crop_affinity_boundary_output(
+            outputs,
             int(cfg.get("input_size", 1024)),
             pad_h,
             pad_w,
             image.shape[:2],
+            fusion_mode,
+            fusion_kwargs,
         ).cpu()
         postprocess_output = torch.cat(
             [semantic_native, probability_to_logit(boundary_native)], dim=1

@@ -10,7 +10,10 @@ import torch
 import torch.nn.functional as F
 
 from data.dataset import letterbox
-from utils.affinity_fusion import affinity_boundary_probability
+from utils.affinity_fusion import (
+    affinity_boundary_base_and_residual,
+    affinity_boundary_probability,
+)
 from utils.post_process import post_process_prediction_boundary
 
 
@@ -58,6 +61,31 @@ def prepare_image(image_path: str | Path, image_size: int, device):
     return rgb, tensor, int(pad_h), int(pad_w)
 
 
+def crop_affinity_boundary_output(
+    geometry_output,
+    image_size,
+    pad_h,
+    pad_w,
+    original_size,
+    fusion_mode,
+    fusion_kwargs=None,
+):
+    """Crop a geometry boundary while preserving the exact coarse baseline."""
+    base, residual = affinity_boundary_base_and_residual(
+        geometry_output,
+        mode=fusion_mode,
+        **(fusion_kwargs or {}),
+    )
+    native = crop_letterbox_output(
+        base, image_size, pad_h, pad_w, original_size
+    )
+    if residual is not None:
+        native = native + crop_letterbox_output(
+            residual, image_size, pad_h, pad_w, original_size
+        )
+    return native.clamp(0.0, 1.0)
+
+
 @torch.no_grad()
 def predict_maps(
     system,
@@ -70,17 +98,18 @@ def predict_maps(
     image, tensor, pad_h, pad_w = prepare_image(image_path, image_size, device)
     original_size = image.shape[:2]
     reference_output = system.reference_model(tensor)
-    affinity_output = system.geometry_forward(tensor)["affinity_logits"]
+    geometry_output = system.geometry_forward(tensor)
     reference_native = crop_letterbox_output(
         reference_output, image_size, pad_h, pad_w, original_size
     ).cpu()
-    affinity_boundary = affinity_boundary_probability(
-        affinity_output,
-        mode=fusion_mode,
-        **(fusion_kwargs or {}),
-    )
-    affinity_boundary_native = crop_letterbox_output(
-        affinity_boundary, image_size, pad_h, pad_w, original_size
+    affinity_boundary_native = crop_affinity_boundary_output(
+        geometry_output,
+        image_size,
+        pad_h,
+        pad_w,
+        original_size,
+        fusion_mode,
+        fusion_kwargs,
     ).cpu()
     affinity_logits_native = probability_to_logit(affinity_boundary_native)
     affinity_watershed_output = torch.cat(
@@ -117,9 +146,7 @@ def predict_maps_with_challenger(
         features = [
             feature.detach() for feature in system.reference_model.encoder(tensor)
         ]
-    affinity_output = system.geometry_forward_from_features(
-        tensor, features
-    )["affinity_logits"]
+    geometry_output = system.geometry_forward_from_features(tensor, features)
     challenger_output = semantic_challenger(features, tensor)
 
     challenger_native = crop_letterbox_output(
@@ -132,13 +159,14 @@ def predict_maps_with_challenger(
             reference_output, image_size, pad_h, pad_w, original_size
         ).cpu()
     )
-    affinity_boundary = affinity_boundary_probability(
-        affinity_output,
-        mode=fusion_mode,
-        **(fusion_kwargs or {}),
-    )
-    affinity_boundary_native = crop_letterbox_output(
-        affinity_boundary, image_size, pad_h, pad_w, original_size
+    affinity_boundary_native = crop_affinity_boundary_output(
+        geometry_output,
+        image_size,
+        pad_h,
+        pad_w,
+        original_size,
+        fusion_mode,
+        fusion_kwargs,
     ).cpu()
     affinity_logits_native = probability_to_logit(affinity_boundary_native)
     affinity_watershed_output = torch.cat(
@@ -171,9 +199,8 @@ def predict_directional_maps_with_challenger(
     image, tensor, pad_h, pad_w = prepare_image(image_path, image_size, device)
     original_size = image.shape[:2]
     features = [feature.detach() for feature in system.reference_model.encoder(tensor)]
-    affinity_logits = system.geometry_forward_from_features(
-        tensor, features
-    )["affinity_logits"]
+    geometry_output = system.geometry_forward_from_features(tensor, features)
+    affinity_logits = geometry_output["affinity_logits"]
     challenger_output = semantic_challenger(features, tensor)
 
     challenger_native = crop_letterbox_output(
@@ -182,13 +209,14 @@ def predict_directional_maps_with_challenger(
     affinity_grid = torch.sigmoid(
         crop_letterbox_grid(affinity_logits, image_size, pad_h, pad_w)
     ).cpu()
-    affinity_boundary = affinity_boundary_probability(
-        affinity_logits,
-        mode=fusion_mode,
-        **(fusion_kwargs or {}),
-    )
-    boundary_native = crop_letterbox_output(
-        affinity_boundary, image_size, pad_h, pad_w, original_size
+    boundary_native = crop_affinity_boundary_output(
+        geometry_output,
+        image_size,
+        pad_h,
+        pad_w,
+        original_size,
+        fusion_mode,
+        fusion_kwargs,
     ).cpu()
     return (
         image,

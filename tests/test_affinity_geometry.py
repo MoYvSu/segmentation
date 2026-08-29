@@ -11,6 +11,10 @@ from utils.affinity_loss import (
     build_affinity_targets_torch,
     negative_affinity_tail_loss,
 )
+from utils.affinity_fusion import (
+    affinity_boundary_base_and_residual,
+    affinity_boundary_probability,
+)
 
 
 def test_affinity_decoder_outputs_requested_channels_and_grid():
@@ -71,6 +75,23 @@ def test_highres_short_residual_never_changes_long_channels_after_update():
     )
     assert not torch.equal(output[:, :4], expected[:, :4])
     assert torch.equal(output[:, 4:], expected[:, 4:])
+
+
+def test_zero_highres_residual_preserves_coarse_fusion_contract():
+    coarse = torch.randn(1, 8, 8, 8)
+    refined = torch.nn.functional.interpolate(
+        coarse, size=(16, 16), mode="bilinear", align_corners=False
+    )
+    base, residual = affinity_boundary_base_and_residual(
+        {
+            "affinity_logits": refined,
+            "coarse_affinity_logits": coarse,
+        },
+        mode="gated",
+    )
+    expected = affinity_boundary_probability(coarse, mode="gated")
+    assert torch.equal(base, expected)
+    assert torch.count_nonzero(residual) == 0
 
 
 def test_torch_targets_match_same_instance_pairs_and_loss_backpropagates():

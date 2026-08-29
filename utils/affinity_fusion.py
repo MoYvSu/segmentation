@@ -102,3 +102,45 @@ def affinity_boundary_probability(
         short + weighted2 * distance2 + weighted4 * distance4
     ) / (1.0 + weighted2 + weighted4)
     return fused.clamp(0.0, 1.0)
+
+
+def affinity_boundary_base_and_residual(
+    geometry_output,
+    *,
+    mode: str = "mean",
+    **fusion_kwargs,
+):
+    """Return the historical coarse boundary and an optional native residual.
+
+    Applying sigmoid/fusion after logit interpolation is not identical to
+    fusing on G4b's 512 grid and then interpolating the scalar boundary.  A
+    zero-initialized high-resolution refiner must nevertheless reproduce the
+    deployed G4b boundary exactly.  We therefore keep the coarse fused map as
+    the base and compute only the *difference* introduced by the refined
+    short-range logits on the high-resolution grid.
+    """
+    refined_logits = geometry_output["affinity_logits"]
+    coarse_logits = geometry_output.get("coarse_affinity_logits")
+    if coarse_logits is None:
+        return (
+            affinity_boundary_probability(
+                refined_logits, mode=mode, **fusion_kwargs
+            ),
+            None,
+        )
+    coarse_boundary = affinity_boundary_probability(
+        coarse_logits, mode=mode, **fusion_kwargs
+    )
+    interpolated_coarse = F.interpolate(
+        coarse_logits,
+        size=refined_logits.shape[-2:],
+        mode="bilinear",
+        align_corners=False,
+    )
+    highres_baseline = affinity_boundary_probability(
+        interpolated_coarse, mode=mode, **fusion_kwargs
+    )
+    highres_refined = affinity_boundary_probability(
+        refined_logits, mode=mode, **fusion_kwargs
+    )
+    return coarse_boundary, highres_refined - highres_baseline

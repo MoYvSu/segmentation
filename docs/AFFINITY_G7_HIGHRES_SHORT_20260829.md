@@ -15,6 +15,10 @@ E10a + G4b watershed 的主要几何问题不是缺少另一种图切分算法�
 - distance-2/4 通道只做双线性插值，没有可训练参数；
 - 不蒸馏 G4b affinity 概率，避免复制其背景雾化。
 
+部署时保留历史 512-grid fusion 作为 base boundary，只叠加“refined high-resolution fusion −
+interpolated-coarse high-resolution fusion”的差值。因为 sigmoid/fusion 与 logit 插值不可交换，
+该差分形式是保证零残差时最终 boundary 严格复现 G4b 的必要条件。
+
 ## 监督可靠性
 
 - 人工实例内/实例间 pixel pair 使用完整 affinity 监督；

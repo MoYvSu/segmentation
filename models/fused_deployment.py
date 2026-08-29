@@ -53,14 +53,20 @@ class FusedPhaseAffinityModel(nn.Module):
             )
         affinity_output = self.affinity_decoder(geometry_features)
         affinity_logits = affinity_output["affinity_logits"]
+        coarse_affinity_logits = None
         if self.geometry_highres_refiner is not None:
-            affinity_logits = self.geometry_highres_refiner(
+            refined_output = self.geometry_highres_refiner(
                 affinity_output["affinity_feature"], affinity_logits, image
-            )["affinity_logits"]
-        return {
+            )
+            affinity_logits = refined_output["affinity_logits"]
+            coarse_affinity_logits = refined_output["coarse_affinity_logits"]
+        output = {
             "semantic_logits": semantic_logits,
             "affinity_logits": affinity_logits,
         }
+        if coarse_affinity_logits is not None:
+            output["coarse_affinity_logits"] = coarse_affinity_logits
+        return output
 
     def parameter_summary(self):
         values = {
