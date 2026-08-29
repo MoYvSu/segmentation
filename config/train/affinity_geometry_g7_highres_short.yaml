@@ -11,6 +11,9 @@ affinity_geometry_g1:
   input_size: 1024
   coarse_output_grid: 512
   output_grid: 1024
+  # CPU-only Oracle graph diagnostics stay comparable to historical G4b.
+  # Training targets and exact deployment output remain at 1024.
+  oracle_validation_grid: 512
   batch_size: 1
   epochs: 20
   learning_rate: 6.0e-5

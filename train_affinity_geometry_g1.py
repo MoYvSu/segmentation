@@ -15,6 +15,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import ConcatDataset, DataLoader, WeightedRandomSampler
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -308,13 +309,38 @@ def adapter_metrics(system):
 
 
 @torch.no_grad()
-def evaluate_sample(system, sample, graph_thresholds, return_arrays=False):
+def evaluate_sample(
+    system,
+    sample,
+    graph_thresholds,
+    return_arrays=False,
+    validation_grid=None,
+):
     device = next(system.geometry_decoder.parameters()).device
     output = system.geometry_forward(sample["image"].unsqueeze(0).to(device))
-    probability = torch.sigmoid(output["affinity_logits"])[0].cpu().numpy()
-    labels = sample["instance_map"].numpy().astype(np.int32)
+    probability_tensor = torch.sigmoid(output["affinity_logits"]).cpu()
+    labels_tensor = sample["instance_map"][None, None].float()
+    valid_tensor = sample["valid_content"][None].float()
+    if validation_grid is not None:
+        target_size = (int(validation_grid), int(validation_grid))
+        if probability_tensor.shape[-2:] != target_size:
+            probability_tensor = F.interpolate(
+                probability_tensor,
+                size=target_size,
+                mode="bilinear",
+                align_corners=False,
+            )
+            labels_tensor = F.interpolate(
+                labels_tensor, size=target_size, mode="nearest"
+            )
+            valid_tensor = F.interpolate(
+                valid_tensor, size=target_size, mode="nearest"
+            )
+    probability = probability_tensor[0].numpy()
+    labels = labels_tensor[0, 0].numpy().astype(np.int32)
+    valid_pixels = valid_tensor[0, 0].numpy().astype(bool)
     target, valid = build_affinity_targets(
-        labels, sample["valid_content"][0].numpy().astype(bool)
+        labels, valid_pixels
     )
     prediction, graph = reconstruct_affinity_components(
         labels > 0, probability, threshold=graph_thresholds, max_instances=255
@@ -340,12 +366,23 @@ def evaluate_sample(system, sample, graph_thresholds, return_arrays=False):
 
 
 @torch.no_grad()
-def write_val_monitor(system, dataset, output_dir, epoch, graph_thresholds):
+def write_val_monitor(
+    system,
+    dataset,
+    output_dir,
+    epoch,
+    graph_thresholds,
+    validation_grid=None,
+):
     monitor_dir = output_dir / "val_monitor" / f"epoch_{epoch:03d}"
     for index in range(min(2, len(dataset))):
         sample = dataset[index]
         metrics, probability, labels, prediction = evaluate_sample(
-            system, sample, graph_thresholds, return_arrays=True
+            system,
+            sample,
+            graph_thresholds,
+            return_arrays=True,
+            validation_grid=validation_grid,
         )
         sample_dir = monitor_dir / Path(sample["image_name"]).stem
         sample_dir.mkdir(parents=True, exist_ok=True)
@@ -729,11 +766,17 @@ def main():
         json.dumps(split, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     graph_thresholds = cfg.get("graph_thresholds")
+    oracle_validation_grid = cfg.get("oracle_validation_grid")
     deployment_recipe = deployment_validation_recipe(cfg)
     val_image_paths = [Path(raw_dir) / f"{name}.jpg" for name in val_names]
     system.eval()
     baseline_rows = [
-        evaluate_sample(system, val_dataset[index], graph_thresholds)
+        evaluate_sample(
+            system,
+            val_dataset[index],
+            graph_thresholds,
+            validation_grid=oracle_validation_grid,
+        )
         for index in range(len(val_dataset))
     ]
     baseline = aggregate_validation(baseline_rows)
@@ -771,7 +814,14 @@ def main():
         reference_path, reference_sha, init_path, digest, split,
         selection_metric, best_oracle_score,
     )
-    write_val_monitor(system, val_dataset, output_dir, 0, graph_thresholds)
+    write_val_monitor(
+        system,
+        val_dataset,
+        output_dir,
+        0,
+        graph_thresholds,
+        validation_grid=oracle_validation_grid,
+    )
     for path in unlabeled_monitors:
         write_unlabeled_monitor(
             system, path, output_dir, 0,
@@ -932,7 +982,12 @@ def main():
         scheduler.step()
         system.eval()
         val_rows = [
-            evaluate_sample(system, val_dataset[index], graph_thresholds)
+            evaluate_sample(
+                system,
+                val_dataset[index],
+                graph_thresholds,
+                validation_grid=oracle_validation_grid,
+            )
             for index in range(len(val_dataset))
         ]
         val = aggregate_validation(val_rows)
@@ -1039,7 +1094,14 @@ def main():
                 reference_path, reference_sha, init_path, digest, split,
                 selection_metric, best_oracle_score,
             )
-            write_val_monitor(system, val_dataset, output_dir, epoch, graph_thresholds)
+            write_val_monitor(
+                system,
+                val_dataset,
+                output_dir,
+                epoch,
+                graph_thresholds,
+                validation_grid=oracle_validation_grid,
+            )
             for path in unlabeled_monitors:
                 write_unlabeled_monitor(
                     system, path, output_dir, epoch,

@@ -27,6 +27,8 @@ E10a + G4b watershed 的主要几何问题不是缺少另一种图切分算法�
 
 checkpoint 选择运行完整 E10a semantic → gated affinity → `high=0.65` → seal2/局部重建 →
 watershed → 类别投票代理。GT 前景 affinity graph 重建只作诊断，不作为主选择指标。
+该 CPU-only Oracle 诊断固定在历史 512 网格，避免把百万节点连通图误当作训练负载；训练目标和
+完整部署输出仍保持 1024。
 
 ```bash
 conda activate sam2_env
