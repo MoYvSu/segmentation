@@ -34,6 +34,7 @@ from utils.affinity_deployment import (
 from utils.affinity_graph import (
     reconstruct_affinity_components,
     regularize_affinity_components,
+    regularize_affinity_components_by_affinity,
 )
 from utils.config import load_config, project_path
 from utils.post_process import classify_instance_partition
@@ -114,6 +115,12 @@ def main():
             "the inference config value is used and legacy arm names are kept."
         ),
     )
+    parser.add_argument(
+        "--regularizer",
+        choices=("nearest", "affinity_msf"),
+        default="nearest",
+        help="How sub-area graph components are assigned to retained cores.",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -178,7 +185,10 @@ def main():
         )
         if requested_min_areas:
             for min_area in requested_min_areas:
-                graph_arms[f"graph_short{short_value:.2f}_area{min_area}"] = {
+                suffix = "_msf" if args.regularizer == "affinity_msf" else ""
+                graph_arms[
+                    f"graph_short{short_value:.2f}_area{min_area}{suffix}"
+                ] = {
                     "thresholds": thresholds,
                     "min_instance_area": min_area,
                 }
@@ -257,10 +267,20 @@ def main():
                     / float(image.shape[0] * image.shape[1])
                 )),
             )
-            core_grid, regularize_audit = regularize_affinity_components(
-                raw_grid,
-                min_component_area=grid_min_area,
-            )
+            if args.regularizer == "affinity_msf":
+                core_grid, regularize_audit = (
+                    regularize_affinity_components_by_affinity(
+                        raw_grid,
+                        affinity,
+                        min_component_area=grid_min_area,
+                        max_components=int(infer_cfg.get("max_instance_id", 255)),
+                    )
+                )
+            else:
+                core_grid, regularize_audit = regularize_affinity_components(
+                    raw_grid,
+                    min_component_area=grid_min_area,
+                )
             native_regions = cv2.resize(
                 core_grid.astype(np.int32),
                 (image.shape[1], image.shape[0]),
@@ -314,6 +334,7 @@ def main():
         "graph_arms": graph_arms,
         "distance2_threshold": args.distance2_threshold,
         "distance4_threshold": args.distance4_threshold,
+        "regularizer": args.regularizer,
         "summary": summary,
     }
     (output_root / "graph_ab_summary.json").write_text(

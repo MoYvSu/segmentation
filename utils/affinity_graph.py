@@ -242,6 +242,174 @@ def regularize_affinity_components(
     }
 
 
+def regularize_affinity_components_by_affinity(
+    component_map: np.ndarray,
+    affinity: np.ndarray,
+    min_component_area: int,
+    offsets: Sequence[Tuple[int, int]] = DEFAULT_AFFINITY_OFFSETS,
+    max_components: int | None = 255,
+    assignment_channels: int = 4,
+):
+    """Assign small graph components with a seeded maximum spanning forest.
+
+    Large components are immutable seeds.  Small components are agglomerated
+    through the strongest *mean* affinity between adjacent raw components.
+    Edges joining two different seeded cores are rejected, so the operation
+    cannot merge retained instances.  Only local radius-1 channels participate
+    by default; longer links remain useful for the initial graph reconstruction
+    but cannot jump a cut band during cleanup.
+    """
+    source = np.asarray(component_map)
+    scores = np.asarray(affinity, dtype=np.float32)
+    if source.ndim != 2:
+        raise ValueError(f"component_map must be 2-D, got {source.shape}")
+    if scores.shape != (len(offsets), *source.shape):
+        raise ValueError(
+            f"affinity shape {scores.shape} != {(len(offsets), *source.shape)}"
+        )
+    channel_count = int(assignment_channels)
+    if channel_count < 1 or channel_count > len(offsets):
+        raise ValueError(
+            f"assignment_channels must be within [1, {len(offsets)}]"
+        )
+    if max_components is not None and int(max_components) < 1:
+        raise ValueError("max_components must be positive or None")
+
+    source = source.astype(np.int32, copy=False)
+    labels, counts = np.unique(source[source > 0], return_counts=True)
+    if labels.size == 0:
+        return np.zeros(source.shape, dtype=np.int32), {
+            "raw_component_count": 0,
+            "retained_core_count": 0,
+            "removed_fragment_count": 0,
+            "removed_core_count_for_cap": 0,
+            "reassigned_pixels": 0,
+            "adjacency_pair_count": 0,
+            "blocked_seed_edge_count": 0,
+            "promoted_disconnected_group_count": 0,
+            "assignment_method": "affinity_seeded_maximum_spanning_forest",
+        }
+
+    minimum = max(1, int(min_component_area))
+    eligible = np.flatnonzero(counts >= minimum)
+    if eligible.size == 0:
+        eligible = np.array([int(np.argmax(counts))], dtype=np.int64)
+    cap_removed = 0
+    if max_components is not None and eligible.size > int(max_components):
+        order = np.lexsort((labels[eligible], -counts[eligible]))
+        cap_removed = int(eligible.size - int(max_components))
+        eligible = eligible[order[: int(max_components)]]
+    eligible = eligible[np.argsort(labels[eligible], kind="stable")]
+
+    label_to_node = np.full(int(labels.max()) + 1, -1, dtype=np.int32)
+    label_to_node[labels] = np.arange(labels.size, dtype=np.int32)
+    node_map = np.full(source.shape, -1, dtype=np.int32)
+    positive = source > 0
+    node_map[positive] = label_to_node[source[positive]]
+
+    edge_keys = []
+    edge_scores = []
+    node_base = int(labels.size)
+    for channel in range(channel_count):
+        dy, dx = offsets[channel]
+        source_slice, target_slice = _edge_slices(
+            source.shape[0], source.shape[1], int(dy), int(dx)
+        )
+        left = node_map[source_slice]
+        right = node_map[target_slice]
+        valid = (left >= 0) & (right >= 0) & (left != right)
+        if not np.any(valid):
+            continue
+        low = np.minimum(left[valid], right[valid]).astype(np.int64)
+        high = np.maximum(left[valid], right[valid]).astype(np.int64)
+        edge_keys.append(low * node_base + high)
+        edge_scores.append(scores[channel][source_slice][valid].astype(np.float64))
+
+    if edge_keys:
+        keys = np.concatenate(edge_keys)
+        values = np.concatenate(edge_scores)
+        unique_keys, inverse = np.unique(keys, return_inverse=True)
+        sums = np.bincount(inverse, weights=values)
+        contacts = np.bincount(inverse)
+        means = sums / np.maximum(contacts, 1)
+        edge_order = np.lexsort((unique_keys, -means))
+        edge_left = (unique_keys // node_base).astype(np.int32)
+        edge_right = (unique_keys % node_base).astype(np.int32)
+    else:
+        unique_keys = np.empty(0, dtype=np.int64)
+        edge_order = np.empty(0, dtype=np.int64)
+        edge_left = np.empty(0, dtype=np.int32)
+        edge_right = np.empty(0, dtype=np.int32)
+
+    parent = np.arange(labels.size, dtype=np.int32)
+    tree_size = counts.astype(np.int64, copy=True)
+    seed = np.zeros(labels.size, dtype=np.int32)
+    seed[eligible] = np.arange(1, eligible.size + 1, dtype=np.int32)
+
+    def find(node: int) -> int:
+        root = int(node)
+        while int(parent[root]) != root:
+            root = int(parent[root])
+        while int(parent[node]) != node:
+            next_node = int(parent[node])
+            parent[node] = root
+            node = next_node
+        return root
+
+    blocked = 0
+    for edge_index in edge_order:
+        left_root = find(int(edge_left[edge_index]))
+        right_root = find(int(edge_right[edge_index]))
+        if left_root == right_root:
+            continue
+        left_seed = int(seed[left_root])
+        right_seed = int(seed[right_root])
+        if left_seed and right_seed and left_seed != right_seed:
+            blocked += 1
+            continue
+        if tree_size[left_root] < tree_size[right_root] or (
+            tree_size[left_root] == tree_size[right_root]
+            and left_root > right_root
+        ):
+            left_root, right_root = right_root, left_root
+            left_seed, right_seed = right_seed, left_seed
+        parent[right_root] = left_root
+        tree_size[left_root] += tree_size[right_root]
+        seed[left_root] = left_seed or right_seed
+
+    roots = np.array([find(index) for index in range(labels.size)], dtype=np.int32)
+    node_seed = seed[roots]
+    promoted = 0
+    for root in np.unique(roots[node_seed == 0]):
+        promoted += 1
+        seed[int(root)] = int(eligible.size + promoted)
+    if promoted:
+        node_seed = seed[roots]
+
+    unique_seeds = np.unique(node_seed[node_seed > 0])
+    seed_lookup = np.zeros(int(unique_seeds.max()) + 1, dtype=np.int32)
+    seed_lookup[unique_seeds] = np.arange(1, unique_seeds.size + 1, dtype=np.int32)
+    node_partition = seed_lookup[node_seed]
+    label_partition = np.zeros(int(labels.max()) + 1, dtype=np.int32)
+    label_partition[labels] = node_partition
+    partition = label_partition[source]
+    retained_labels = labels[eligible]
+    retained_lookup = np.zeros(int(labels.max()) + 1, dtype=bool)
+    retained_lookup[retained_labels] = True
+    reassigned = int(np.count_nonzero(positive & ~retained_lookup[source]))
+    return partition, {
+        "raw_component_count": int(labels.size),
+        "retained_core_count": int(eligible.size),
+        "removed_fragment_count": int(labels.size - eligible.size),
+        "removed_core_count_for_cap": cap_removed,
+        "reassigned_pixels": reassigned,
+        "adjacency_pair_count": int(unique_keys.size),
+        "blocked_seed_edge_count": int(blocked),
+        "promoted_disconnected_group_count": int(promoted),
+        "assignment_method": "affinity_seeded_maximum_spanning_forest",
+    }
+
+
 def audit_instance_recovery(gt_map: np.ndarray, prediction: np.ndarray):
     """Count graph-induced GT splits and prediction merges."""
     gt = np.asarray(gt_map)

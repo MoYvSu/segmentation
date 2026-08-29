@@ -6,6 +6,7 @@ from utils.affinity_graph import (
     build_affinity_targets,
     reconstruct_affinity_components,
     regularize_affinity_components,
+    regularize_affinity_components_by_affinity,
 )
 
 
@@ -98,3 +99,53 @@ def test_regularizer_reassigns_boundary_fragments_without_losing_pixels():
     assert audit["retained_core_count"] == 2
     assert audit["removed_fragment_count"] == 21
     assert audit["reassigned_pixels"] == 21
+
+
+def test_affinity_regularizer_follows_stronger_graph_path_than_nearest_core():
+    components = np.zeros((3, 7), dtype=np.int32)
+    components[:, :2] = 1
+    components[:, 2] = 3
+    components[:, 3] = 4
+    components[:, 4] = 5
+    components[:, 5:] = 2
+    affinity = np.zeros(
+        (len(DEFAULT_AFFINITY_OFFSETS), *components.shape), dtype=np.float32
+    )
+    affinity[0, :, 1] = 0.10
+    affinity[0, :, 2] = 0.90
+    affinity[0, :, 3] = 0.90
+    affinity[0, :, 4] = 0.80
+
+    partition, audit = regularize_affinity_components_by_affinity(
+        components,
+        affinity,
+        min_component_area=5,
+        max_components=255,
+    )
+
+    assert set(np.unique(partition)) == {1, 2}
+    assert np.all(partition[:, :2] == partition[0, 0])
+    assert np.all(partition[:, 2:] == partition[0, -1])
+    assert partition[0, 0] != partition[0, -1]
+    assert audit["retained_core_count"] == 2
+    assert audit["removed_fragment_count"] == 3
+    assert audit["reassigned_pixels"] == 9
+    assert audit["promoted_disconnected_group_count"] == 0
+
+
+def test_affinity_regularizer_enforces_seed_cap_without_unassigned_pixels():
+    components = np.arange(1, 10, dtype=np.int32).reshape(3, 3)
+    affinity = np.full(
+        (len(DEFAULT_AFFINITY_OFFSETS), *components.shape), 0.5,
+        dtype=np.float32,
+    )
+    partition, audit = regularize_affinity_components_by_affinity(
+        components,
+        affinity,
+        min_component_area=1,
+        max_components=3,
+    )
+    assert len(np.unique(partition)) == 3
+    assert np.all(partition > 0)
+    assert audit["retained_core_count"] == 3
+    assert audit["removed_core_count_for_cap"] == 6
