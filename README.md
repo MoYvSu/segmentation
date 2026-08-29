@@ -1,8 +1,7 @@
 # 低碳钢金相图像相区分割
 
-> 当前几何基线：G4b 8 通道 affinity → gated boundary → `high=0.65` 封边/受阻分水岭。
-> 黑盒最佳语义结果为 E9；当前目检优先候选为单一 E10a 语义解码器，不采用 E9/E10a
-> 连续融合。E10a 是否晋级仍须单独提交确认。
+> 当前黑盒最佳：单一 E10a 语义解码器 + G4b `high=0.65` 封边/受阻分水岭，mIoU
+> `0.8381`、铁素体面积项 `0.8408`、总分 `83.94`。E9 保留为历史回退，不做连续融合。
 > 当前状态、入口与产物约定以 [docs/PIPELINE.md](docs/PIPELINE.md) 为准。
 
 颜色先验分析已记录在 [docs/COLOR_SEPARABILITY.md](docs/COLOR_SEPARABILITY.md)。后续对话进程在
@@ -15,21 +14,20 @@
 - **当前几何基线**：G4b affinity + `high=0.65` + 封边/受阻分水岭。相较 G3，G4b 是当前
   更稳定的部署基线；测试集仍以欠分割和局部合并为主要风险，尚未证明黑盒竞赛分数提升。
   详见 [docs/AFFINITY_DEPLOYMENT_EVALUATION.md](docs/AFFINITY_DEPLOYMENT_EVALUATION.md)。
-- **当前语义选择**：E9 黑盒结果为 mIoU `0.8421`、铁素体平均面积项 `0.7917`；E10a
-  冷启动完整高分辨率语义解码器在测试目检上更受偏好，当前按单模型候选保留，E9 作为稳定
-  回退，不做连续融合。详见 [docs/SEMANTIC_EXPERIMENT_E10A_20260828.md](docs/SEMANTIC_EXPERIMENT_E10A_20260828.md)。
+- **当前语义选择**：E10a 黑盒结果为 mIoU `0.8381`、铁素体平均面积项 `0.8408`、总分
+  `83.94`，已取代 E9 成为单模型主线；E9 的 `0.8421/0.7917/81.69` 仅作稳定历史回退。
+  详见 [docs/SEMANTIC_EXPERIMENT_E10A_20260828.md](docs/SEMANTIC_EXPERIMENT_E10A_20260828.md)。
 - **统一部署模型**：`outputs/deployment/e10a_g4b_fused.pth` 把共享 SAM2+LoRA encoder、
   E10a semantic decoder 与 G4b affinity decoder 打包为一个 81.67M 参数模型；加载时不再依赖
   三份源 checkpoint，`test_009` 与原管线最终实例图/类别 JSON 字节级一致。
-- **方向图切分候选**：直接阈值化 8 通道 affinity 再做核心回填。`short=0.40` 的 68 图
-  全量结果相对 E10a watershed 将实例数由 `6178` 提至 `7559`（`+22.35%`），目检显示新增
-  切分多数沿真实晶界、弱密集区更贴形，现已晋级为黑盒候选；`short=0.30` 会把部分粗暗晶界
-  保留成珠光体细带伪核心，继续淘汰。0.40 尚未获得官方分数，G4b watershed 仍是稳定回退。详见
+- **方向图切分候选**：graph-v1 `area200` 黑盒为 `0.8268/0.8365/83.17`，未超过 E10a
+  watershed。graph-v2 保持 `short=0.40`，以 affinity 加权的种子最大生成森林替代欧氏
+  Voronoi 回填；`area150` 全量 5649 实例，当前等待一次黑盒裁决。详见
   [docs/AFFINITY_GRAPH_AB_20260828.md](docs/AFFINITY_GRAPH_AB_20260828.md)。
 - **中心热图实验已降级为负面对照**：共享 `boundary_fpn` 的中心辅助任务破坏了边界表征；
   `outputs/stage2_center_heatmap/best_model_stage2.pth` 不作为后续初始化主线。
-- **当前目标**：在固定 G4b 实例图上降低小实例 ferrite/pearlite 错配，并同时守住类别 mIoU
-  与 ferrite 平均面积代理；Oracle GT 前景图重建指标仅作诊断，不得用于模型晋级。
+- **当前目标**：用一次黑盒提交裁决 graph-v2 area150；若不超过 `83.94`，恢复 E10a-only
+  watershed 为唯一部署主线，后续语义训练从 E10a 初始化并同时守住 mIoU 与面积项。
 - **审计结论（2026-08-27）**：G3 的验证提升尚不能等同于竞赛增益；G3 相比 G2 同时改变了
   native crop、采样、训练时长、学习率和外观增强，需在统一部署评估链上做单变量复验。详见
   [docs/AFFINITY_DEPLOYMENT_EVALUATION.md](docs/AFFINITY_DEPLOYMENT_EVALUATION.md)。
@@ -118,8 +116,8 @@ segmentationv2/
 ## 当前训练与基线
 
 G4b high0.65 + V6 语义的黑盒结果为总分 `80.67`、实例 mIoU `0.8441`、铁素体平均面积项
-`0.7693`。E9 进一步得到 mIoU `0.8421`、面积项 `0.7917`，总分约 `81.69`：少量小铁素体
-纠错以轻微 mIoU 代价换得显著面积收益，当前是黑盒确认最佳。E7b-A 已完成验证但不晋级：它从 V6
+`0.7693`。E9 进一步得到 `0.8421/0.7917/81.69`；E10a 最终得到
+`0.8381/0.8408/83.94`，以显著面积收益成为当前黑盒最佳。E7b-A 已完成验证但不晋级：它从 V6
 初始化只更新语义 decoder，训练期 semantic loss 虽下降；严格同部署口径下，代理分数由
 当前 hard 基线的 `79.1800` 小幅降至 `78.8379`（阈值 `0.65`）。详见
 [docs/SEMANTIC_TRAINING_E7B_20260827.md](docs/SEMANTIC_TRAINING_E7B_20260827.md)。
@@ -135,8 +133,8 @@ E8 已证明低分辨率残差能够产生局部纠错，但 `+/-2` logit 很快
 [docs/SEMANTIC_EXPERIMENT_E9_20260828.md](docs/SEMANTIC_EXPERIMENT_E9_20260828.md)。
 
 当前 E10a 冻结 V6 LoRA、边界和 G4b affinity，随机重置完整 semantic FPN/head 与高分辨率
-解码路径；固定 V6 只在无标签高置信区域提供衰减蒸馏。测试目检优先采用 E10a 单语义输出，
-不与 E9 连续融合；几何仍固定为 G4b watershed，最终晋级等待黑盒提交。详见
+解码路径；固定 V6 只在无标签高置信区域提供衰减蒸馏。E10a 已获黑盒总分 `83.94`，不与
+E9 连续融合；标准几何仍固定为 G4b watershed。详见
 [docs/SEMANTIC_EXPERIMENT_E10A_20260828.md](docs/SEMANTIC_EXPERIMENT_E10A_20260828.md)。
 
 如需复现实验，按既定约定可直接在训练服务器运行：

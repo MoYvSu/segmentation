@@ -48,17 +48,53 @@ affinity 连接阈值 `1 - 0.65 = 0.35`，因此扫描短程通道 `0.30/0.35/0.
 255 合并上限；在没有 GT 的测试集上不能仅凭实例数证明提升，最终仍需官方黑盒的 mIoU 与
 铁素体平均面积项共同裁决。G4b watershed 在此之前保留为稳定回退。
 
+### graph-v1 面积去噪与黑盒结果
+
+原生 `min_instance_area=50` 映射到约 428×512 affinity 网格后通常只剩约 3 个像素，导致
+粗暗裂缝中出现大量细小 ferrite/pearlite 分量。提高到 `area200` 后，test_001 从 154 个实例
+降至 104 个，并显著清除裂缝细碎噪声；68 图总实例数为 5464。
+
+| 方案 | mIoU | 铁素体面积项 | 总分 |
+|---|---:|---:|---:|
+| E10a-only watershed | 0.8381 | 0.8408 | 83.94 |
+| graph-v1 `short0.40/area200` | 0.8268 | 0.8365 | 83.17 |
+
+area200 两项均低于 E10a watershed，因此 graph-v1 不晋级。面积项仅下降 `0.0043`，而 mIoU
+下降 `0.0113`，说明小实例噪声已基本受控，主要剩余问题更可能来自图分区关系或欧氏最近核心
+回填，而不能简单归结为 graph 边界目检无效。
+
+### graph-v2：affinity 加权种子最大生成森林
+
+graph-v2 不回退到分水岭，也不加入厚度、形状、裂缝或类别规则。达到面积门槛的 raw graph
+component 作为不可互相合并的种子；小分量之间的边按局部半径 1 接触界面的平均 affinity 从强
+到弱处理，通过带种子的 maximum spanning forest 并入证据最强的邻区。距离 2/4 通道仍参与
+初始 graph reconstruction，但不能在清理阶段跨越 cut band。若种子超过 255，只保留面积最大
+的 255 个种子，其余分量继续按同一 affinity 规则归并。
+
+代表图比较选择 `area150` 而非 `area100`：test_001 为 110 个实例，既清除明显裂缝噪声，
+又比 v1-area200 多保留少量 affinity 支持的切分。68 图结果如下：
+
+| 项目 | E10a watershed | graph-v1 area200 | graph-v2 area150 |
+|---|---:|---:|---:|
+| 实例总数 | 6178 | 5464 | 5649 |
+| 相对 watershed | - | -11.56% | -8.56% |
+| 达到 255 上限 | 0 | 1 | 2（test_010、test_055） |
+| 未分配像素 | - | 0 | 0 |
+
+graph-v2 尚未获得官方分数，只允许一次黑盒提交；若不能超过 E10a-only 的 `83.94`，直接 graph
+解码即停止作为部署方向，affinity 只保留为训练辅助或诊断输出。
+
 10 图报告位于服务器 `outputs/experiments/e10a_graph_ab_v2/graph_ab_summary.json`。68 图报告、
 实例结果和对比图位于 `outputs/experiments/e10a_graph_040_full/`；本地下载位于忽略跟踪的
-`downloads/e10a_graph_040_full/`。可提交包为 `e10a_graph040_full.zip`。
+`downloads/e10a_graph_040_full/`。graph-v2 全量位于服务器
+`outputs/experiments/e10a_graph_v2_area150_full/`，本地位于
+`downloads/e10a_graph_v2_area150_full/`，提交包为 `e10a_graph_v2_area150_msf.zip`。
 
 ## 下一步约束
 
-固定 E10a 为唯一语义来源，优先提交 graph 0.40，以官方黑盒结果决定是否取代 G4b watershed：
+固定 E10a 为唯一语义来源，只提交 graph-v2 area150：
 
-1. 不再继续扫描 0.30 一侧，避免重新引入粗暗晶界珠光体细带；
+1. 不再扫描 affinity 阈值、面积门槛或加入图样自适应规则；
 2. 严守每图实例 ID `<=255`，但不强制固定实例数或平均面积；
-3. 若 0.40 黑盒 mIoU 或面积项明显下降，再退回 watershed 并研究只在泄漏处使用 affinity 的
-   局部补缝，而不是凭无 GT 目检提前否决整图图切分；
-4. 若 0.40 晋级，再把 E10a semantic decoder 与 G4b affinity decoder 的统一 checkpoint 接入
-   单入口图切分推理，消除多 checkpoint 搭管线的复现负担。
+3. 黑盒总分超过 `83.94` 才取代 watershed；否则恢复 E10a-only watershed 为唯一部署主线；
+4. graph 若晋级，再把统一 E10a/G4b checkpoint 接入单入口 MSF 推理，消除多 checkpoint 复现负担。

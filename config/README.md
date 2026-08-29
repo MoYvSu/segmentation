@@ -14,12 +14,14 @@ residual。训练增加整实例平均概率目标和温和细实例权重，不
 `train/stage2_semantic_e10a_cold20.yaml` 是完整语义解码器冷启动实验：保留并冻结 V6 LoRA
 特征及 G4b 几何，随机重置 `seg_fpn`、`seg_branch` 和高分辨率语义路径；重置前复制的固定
 V6 教师只在高置信无标签像素提供衰减蒸馏。部署配置
-`experiments/affinity_g4b_high065_semantic_e10a_cold.yaml` 是当前目检优先的单语义模型候选；
-E9 保留为黑盒稳定回退，不执行二者连续融合。详见 `docs/SEMANTIC_EXPERIMENT_E10A_20260828.md`。
+`experiments/affinity_g4b_high065_semantic_e10a_cold.yaml` 已获黑盒 mIoU `0.8381`、面积项
+`0.8408`、总分 `83.94`，是当前单语义模型主线；E9 保留为历史回退，不执行连续融合。详见
+`docs/SEMANTIC_EXPERIMENT_E10A_20260828.md`。
 
 `tools/run_affinity_graph_ab.py` 是 GT-free 几何筛查工具：E10a 单独提供语义，G4b 提供未融合的
-8 通道 affinity。直接图连通 + 核心回填的 `short=0.40` 已完成 68 图全量推理并晋级为黑盒
-候选，`short=0.30` 因粗暗晶界形成珠光体细带伪核心而淘汰；正式晋级仍等待官方提交分数。详见
+8 通道 affinity。graph-v1 `short=0.40/area200` 黑盒总分为 `83.17`，未超过 E10a watershed；
+graph-v2 使用 `--regularizer affinity_msf --min-instance-areas 150` 做 affinity 加权归并，已完成
+68 图并等待一次黑盒裁决。`short=0.30` 继续淘汰。详见
 `docs/AFFINITY_GRAPH_AB_20260828.md`。
 
 当前类别纠错候选为 `experiments/affinity_g4b_high065_semantic_dual_e7c_relaxed.yaml`：固定

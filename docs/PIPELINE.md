@@ -2,19 +2,19 @@
 
 ## 结论与主线
 
-当前几何基线为“G4b 8 通道 affinity → gated boundary → `high=0.65` + seal2 + 局部重建
-→ 受阻分水岭”。E9 已获黑盒 mIoU `0.8421`、铁素体面积项 `0.7917`；E10a 冻结 V6
-特征并冷启动完整高分辨率语义解码器，当前目检优先但尚未黑盒确认。部署决策坚持一个语义
-模型：E10a 为候选、E9 为回退，不做连续融合；V6/B2 边界路线继续作为几何回退。
+当前黑盒最佳为“E10a 单语义模型 + G4b 8 通道 affinity → gated boundary → `high=0.65`、
+seal2、局部重建 → 受阻分水岭”，得分 `0.8381/0.8408/83.94`。E10a 冻结 V6 特征并
+冷启动完整高分辨率语义解码器，现已晋级；E9 的 `0.8421/0.7917/81.69` 保留为历史回退，
+不做连续融合。V6/B2 边界路线继续作为几何回退。
 
 当前推荐部署产物为 `outputs/deployment/e10a_g4b_fused.pth`：单个共享 SAM2+LoRA encoder
 同时连接 E10a semantic decoder 和 G4b affinity decoder。组合包参数量 `81.667394M`、大小
 `326836899` bytes；保存后重新构建的 semantic/affinity logits 最大绝对误差均为 `0.0`，
 `test_009` 的实例 PNG 与类别 JSON 也和原三 checkpoint 管线字节级一致。
 
-G3/G4b 尚不能证明黑盒竞赛成绩提升，测试目检仍以欠分割为主要风险；GT 前景上的 Oracle
-图重建仅作诊断。当前 E9 在冻结 V6/G4b 的前提下学习输入分辨率语义残差，并以整实例概率
-聚合处理纤细/非凸实例错配。直接方向 affinity 图切分的 10 图筛查未晋级，详见
+G3/G4b 尚不能单独证明黑盒竞赛成绩提升，测试目检仍以欠分割为主要风险；GT 前景上的 Oracle
+图重建仅作诊断。graph-v1 `area200` 黑盒为 `0.8268/0.8365/83.17`，未超过 E10a watershed；
+graph-v2 改用 affinity 加权种子最大生成森林，`area150` 已完成全量并等待黑盒裁决。详见
 [AFFINITY_GRAPH_AB_20260828.md](AFFINITY_GRAPH_AB_20260828.md)；历史 affinity 审计见
 [AFFINITY_DEPLOYMENT_EVALUATION.md](AFFINITY_DEPLOYMENT_EVALUATION.md)。
 
