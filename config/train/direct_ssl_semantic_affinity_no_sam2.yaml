@@ -1,0 +1,11 @@
+# Arm A: test the shortest SSL -> semantic/affinity path without pseudo geometry.
+_base: direct_ssl_semantic_affinity.yaml
+
+paths:
+  output_dir: outputs/direct_ssl_semantic_affinity_no_sam2
+
+direct_semantic_affinity:
+  output_dir: outputs/direct_ssl_semantic_affinity_no_sam2
+  pseudo_affinity_weight: 0.0
+  sam2_geometry:
+    enabled: false

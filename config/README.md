@@ -23,10 +23,14 @@ V6 教师只在高置信无标签像素提供衰减蒸馏。部署配置
 出现不自然的笔直边界，已按目检淘汰，不再提交。详见
 `docs/AFFINITY_GRAPH_AB_20260828.md`。
 
-`train/affinity_geometry_g7_highres_short.yaml` 是当前几何训练实验：冻结 E10a/V6 LoRA、
-G4b 512-grid decoder 和 long affinity，只训练 1024-grid 四个 distance-1 通道的有界残差。
-SAM2 same-mask 正边保持全权重，cross-mask 负边权重 `0.25`，未覆盖像素对保持 ignore；不蒸馏
-G4b 概率。checkpoint 由 E10a + gated affinity + `high=0.65` + seal2 完整部署代理选择。
+`train/affinity_geometry_g7_highres_short.yaml` 现只保留为历史对照：固定协议测试 A/B 显示其
+相较 G4b 进一步减少实例、加重欠分割风险，不再作为当前晋级目标。
+
+`train/direct_ssl_semantic_affinity.yaml` 是当前短训练链候选：从 SSL LoRA 同时冷启动 E10a 式
+高分辨率 semantic head 与 8 通道 affinity head；先冻结 LoRA 预热，再联合微调。人工样本在
+同一增强下监督两头，经人工审核的 SAM2 候选只监督无类别 affinity；完整契约见
+`docs/DIRECT_SSL_SEMANTIC_AFFINITY.md`。首轮 Arm A 使用同目录下的 `_no_sam2.yaml`，先隔离检验
+最短链路；SAM2 数据审核完成后再运行原配置作为 Arm B。
 
 当前类别纠错候选为 `experiments/affinity_g4b_high065_semantic_dual_e7c_relaxed.yaml`：固定
 V6 前景与 G4b 实例几何，仅用 E7b core 分数覆盖部分 V6 hard vote。阈值由缓存置信度扫参

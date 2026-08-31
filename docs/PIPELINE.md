@@ -14,10 +14,12 @@ seal2、局部重建 → 受阻分水岭”，得分 `0.8381/0.8408/83.94`。E10
 
 G3/G4b 尚不能单独证明黑盒竞赛成绩提升，测试目检仍以欠分割为主要风险；GT 前景上的 Oracle
 图重建仅作诊断。graph-v1 `area200` 黑盒为 `0.8268/0.8365/83.17`，未超过 E10a watershed；
-graph-v2 `area150` 因笔直、失真的归并边界被目检淘汰。当前 G7 回到固定分水岭，只学习
-1024-grid 短程 affinity residual。详见
+graph-v2 `area150` 因笔直、失真的归并边界被目检淘汰。G7 在固定协议测试 A/B 中进一步
+减少实例并加重欠分割风险，已停止晋级。当前候选检验 `SSL LoRA → semantic/affinity 双头`
+短训练链，主线部署仍完全不变。详见
 [AFFINITY_GRAPH_AB_20260828.md](AFFINITY_GRAPH_AB_20260828.md)；历史 affinity 审计见
-[AFFINITY_DEPLOYMENT_EVALUATION.md](AFFINITY_DEPLOYMENT_EVALUATION.md)。
+[AFFINITY_DEPLOYMENT_EVALUATION.md](AFFINITY_DEPLOYMENT_EVALUATION.md)，短链实验见
+[DIRECT_SSL_SEMANTIC_AFFINITY.md](DIRECT_SSL_SEMANTIC_AFFINITY.md)。
 
 `outputs/stage2_center_heatmap/best_model_stage2.pth` 只保留为负面对照。现有中心 GT 由每个
 Labelme polygon 生成一个种子，polygon 与物理晶粒并不等价；同时中心损失和边界损失共享
@@ -75,9 +77,11 @@ python train_stage2.py \
 python train_stage2.py \
   --config config/train/stage2_semantic_e10a_cold20.yaml
 
-# G7：固定 E10a/G4b，只训练高分辨率短程 affinity 残差（20 epoch）
-python train_affinity_geometry_g1.py \
-  --config config/train/affinity_geometry_g7_highres_short.yaml
+# SSL 直达双头：先检查数据门槛，再执行 5 epoch head warm-up + 20 epoch joint LoRA
+python train_direct_semantic_affinity.py \
+  --config config/train/direct_ssl_semantic_affinity.yaml --check
+python train_direct_semantic_affinity.py \
+  --config config/train/direct_ssl_semantic_affinity.yaml
 
 # E7b 完成后：同一 G4b 几何，只替换 semantic decoder
 python tools/run_affinity_submission.py \

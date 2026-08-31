@@ -25,10 +25,11 @@
   [docs/AFFINITY_GRAPH_AB_20260828.md](docs/AFFINITY_GRAPH_AB_20260828.md)。
 - **中心热图实验已降级为负面对照**：共享 `boundary_fpn` 的中心辅助任务破坏了边界表征；
   `outputs/stage2_center_heatmap/best_model_stage2.pth` 不作为后续初始化主线。
-- **当前目标**：G7 冻结 E10a、V6 LoRA 与 G4b affinity 基座，只在 1024 网格训练四个
-  短程 affinity 的零初始化残差；SAM2 未覆盖区 ignore，伪实例跨 mask 负边降权。现有
-  `high=0.65`、seal2 与分水岭不变。详见
-  [docs/AFFINITY_G7_HIGHRES_SHORT_20260829.md](docs/AFFINITY_G7_HIGHRES_SHORT_20260829.md)。
+- **G7 已停止**：固定协议测试 A/B 显示其相较 G4b 进一步减少实例，欠分割风险加重；不再作为
+  当前晋级目标。配置与说明仅保留为历史对照。
+- **当前训练猜想**：检验 `SSL LoRA → 随机 semantic/affinity 双头` 的短链路；先冻结 LoRA
+  预热双头，再以小学习率联合训练，并可加入经人工审核的无类别 SAM2 geometry affinity 监督。
+  详见 [docs/DIRECT_SSL_SEMANTIC_AFFINITY.md](docs/DIRECT_SSL_SEMANTIC_AFFINITY.md)。
 - **审计结论（2026-08-27）**：G3 的验证提升尚不能等同于竞赛增益；G3 相比 G2 同时改变了
   native crop、采样、训练时长、学习率和外观增强，需在统一部署评估链上做单变量复验。详见
   [docs/AFFINITY_DEPLOYMENT_EVALUATION.md](docs/AFFINITY_DEPLOYMENT_EVALUATION.md)。
@@ -157,11 +158,14 @@ E10a 冷启动完整语义解码器：
 python train_stage2.py --config config/train/stage2_semantic_e10a_cold20.yaml
 ```
 
-G7 高分辨率短程 affinity 残差：
+SSL 直达 semantic/affinity 双头候选：
 
 ```bash
-python train_affinity_geometry_g1.py \
-  --config config/train/affinity_geometry_g7_highres_short.yaml
+python train_direct_semantic_affinity.py \
+  --config config/train/direct_ssl_semantic_affinity.yaml --check
+
+python train_direct_semantic_affinity.py \
+  --config config/train/direct_ssl_semantic_affinity.yaml
 ```
 
 E9 输出目录为 `outputs/stage2_semantic_e9_highres20/`。训练固定 G4b geometry、V6 decoder

@@ -1,0 +1,135 @@
+# Direct challenger: SSL LoRA -> random semantic/affinity heads.
+# No Stage-1, joint-v3, V6 boundary, G0/G1 curriculum, G7, or center task.
+_base: ../default_config.yaml
+
+paths:
+  output_dir: outputs/direct_ssl_semantic_affinity
+
+lora:
+  enabled: true
+  rank: 16
+  alpha: 32.0
+  target_layers:
+    - attn.qkv
+    - attn.proj
+  init_from: outputs/lora_pretrain/lora_state_dict.pth
+  gradient_checkpointing: true
+
+direct_semantic_affinity:
+  output_dir: outputs/direct_ssl_semantic_affinity
+  input_size: 1024
+  affinity_grid: 512
+  seed: 42
+  val_fraction: 0.20
+  forced_train_names: [train_001, train_002]
+
+  # Phase 1 trains random heads without touching SSL LoRA. Phase 2 jointly
+  # adapts the same LoRA with aligned semantic and affinity supervision.
+  head_warmup_epochs: 5
+  joint_epochs: 20
+  pseudo_start_epoch: 5
+  manual_samples_per_epoch: 64
+  batch_size: 1
+  num_workers: 4
+  prefetch_factor: 2
+  amp: true
+  grad_clip: 1.0
+  weight_decay: 1.0e-4
+  minimum_learning_rate: 1.0e-6
+  loss_calibration_batches: 4
+  pseudo_affinity_weight: 0.50
+
+  learning_rates:
+    warmup_semantic: 1.0e-4
+    warmup_affinity: 5.0e-5
+    joint_semantic: 2.0e-5
+    joint_affinity: 1.0e-5
+    joint_lora: 2.0e-6
+
+  semantic_decoder:
+    fpn_channels: 256
+    dropout: 0.10
+    use_group_norm: true
+    highres: true
+    highres_hidden: 64
+    color_channels: 16
+    half_channels: 48
+    full_channels: 24
+    use_photometric: true
+    max_logit_delta: 2.0
+
+  affinity_decoder:
+    channels: 8
+    fpn_channels: 256
+    up_channels: 128
+
+  semantic_loss:
+    dice_weight: 0.30
+    instance_weight: 0.75
+    core_radius: 3
+    core_min_pixels: 12
+    core_boundary_threshold: 0.20
+    class_balance: true
+    ferrite_weight: 1.0
+    hard_gamma: 0.5
+    hard_floor: 0.50
+    pool_weight: 0.50
+    thin_weight: 1.50
+
+  affinity_loss:
+    negative_weight: 1.5
+    hard_negative_weight: 1.0
+    hard_negative_gamma: 2.0
+    manual_uncovered_as_boundary: true
+    manual_uncovered_boundary_weight: 0.20
+    # Class-agnostic SAM2 supervision: same-mask positive, cross-mask
+    # negative, covered-uncovered and uncovered-uncovered remain ignore.
+    pseudo_negative_weight: 1.0
+    normalize_edge_weights: true
+
+  sam2_geometry:
+    enabled: true
+    dataset_dir: data/sam2_geometry_g2
+    source_dir: data/unlabeled
+    batch_size: 1
+    use_eroded_interiors: false
+    cache_in_memory: false
+
+  augmentation:
+    horizontal_flip: true
+    vertical_flip: true
+    rotation90: true
+    brightness: 0.08
+    contrast: 0.08
+    gamma: 0.06
+    noise_probability: 0.10
+    noise_std: 0.01
+    blur_probability: 0.10
+    crop_probability: 0.0
+
+  deployment_validation:
+    fusion_mode: gated
+    boundary_threshold: 0.65
+    distance2_weight: 0.50
+    distance4_weight: 0.25
+    support_threshold: 0.20
+    support_temperature: 0.05
+    short_reduction: mean
+    short_softmax_temperature: 0.15
+
+# Exact current watershed/reconstruction contract; both foreground terrain and
+# instance voting use the new direct semantic head.
+inference:
+  boundary_threshold: 0.65
+  min_instance_area: 50
+  max_instance_id: 255
+  bridge_width: 1
+  watershed_dilate_width: 1
+  marker_border_seal_width: 2
+  marker_boundary_low_threshold: 0.45
+  marker_boundary_reconstruction_steps: 8
+  semantic_vote_mode: probability_mean
+  semantic_vote_erode_width: 0
+
+post_process:
+  save_visualization: false
