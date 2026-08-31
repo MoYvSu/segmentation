@@ -1,0 +1,6 @@
+interface:
+  display_name: "Project Knowledge Maintainer"
+  short_description: "Curate reusable segmentation project knowledge"
+  default_prompt: "Use $maintain-project-knowledge to capture and curate reusable lessons from this task."
+policy:
+  allow_implicit_invocation: true

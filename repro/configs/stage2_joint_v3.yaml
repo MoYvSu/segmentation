@@ -1,0 +1,177 @@
+# Effective joint-v3 run snapshot from 2026-08-05 14:10:30.
+# project_root is portable; base_checkpoint is an explicit current-loader alias
+# for the same historical --init_from_checkpoint input.
+paths:
+  project_root: auto
+  raw_data_dir: data/raw
+  weights_dir: weights
+  sam2_ckpt: sam2_hiera_base_plus.pt
+  output_dir: outputs/stage1
+  pseudo_label_dir: outputs/pseudo_labels
+  active_learning_log: outputs/active_learning_log.csv
+sam2:
+  model_version: sam2_hiera_base_plus
+  config_file: configs/sam2/sam2_hiera_b+.yaml
+  device: cuda
+  freeze: true
+  sam2_repo_path: segment-anything-2
+decoder:
+  fpn_channels: 256
+  num_classes: 2
+  dropout: 0.1
+  use_bn: true
+  boundary_refine: false
+data:
+  image_size: 1024
+  crop_size: 512
+  erode_pixels: 5
+  dist_scale_factor: 10.0
+  classes:
+    0: pearlite
+    1: ferrite
+  train_ratio: 0.8
+  seed: 42
+  batch_size: 4
+  num_workers: 8
+  augmentation:
+    horizontal_flip: true
+    vertical_flip: true
+    rotation: true
+train:
+  learning_rate: 0.00015
+  weight_decay: 0.0001
+  epochs: 100
+  scheduler: cosine
+  warmup_epochs: 25
+  grad_clip: 1.0
+  amp: false
+  focal_gamma: 2.0
+  focal_alpha: 0.75
+  boundary_alpha: 4.0
+  seg_dice_weight: 0.3
+  composite_sem_weight: 0.2
+  composite_boundary_weight: 0.8
+  save_checkpoints: true
+boundary:
+  gt_dir: data/purified_gt
+  purify_erode_radius: 2
+  purify_dilate_width: 2
+  purify_canny_low: 30
+  purify_canny_high: 100
+  edt_scale_factor: 10.0
+  edt_weight_floor: 1.0
+  edt_weight_ceil: 4.0
+inference:
+  test_dir: data/test
+  output_dir: outputs/inference
+  threshold: 0.5
+  min_instance_area: 500
+  max_instance_id: 255
+  boundary_threshold: 0.4
+  boundary_logit_scale: 1.0
+  tta: false
+  watershed_dilate_width: 1
+  checkpoint_stage: stage2
+  stage1_checkpoint: outputs/stage1/best_model.pth
+  stage2_checkpoint: outputs/stage2/stage2_epoch100stage1_direct.pth
+lora:
+  enabled: true
+  rank: 16
+  alpha: 32.0
+  target_layers:
+    - attn.qkv
+    - attn.proj
+  lr_ratio: 2.0
+  init_from: ''
+  freeze: false
+active_learning:
+  strategy: entropy
+  sample_size: 10
+  entropy_threshold: 0.5
+  boundary_variance_threshold: 0.1
+post_process:
+  interpolate_mode: bilinear
+  align_corners: true
+  connectivity: 8
+  min_noise_area: 50
+  save_visualization: false
+semi_supervised:
+  base_checkpoint: outputs/stage1_lora/best_model.pth
+  unlabeled_dir: data/unlabeled
+  output_dir: outputs/stage2_joint_v3
+  init_from_checkpoint: ''
+  ema_decay: 0.999
+  adaptive_ema: true
+  boundary_teacher_mode: stage1_direct
+  use_cached_pseudo_labels: true
+  pseudo_label_cache_dir: outputs/pseudo_labels/stage1_boundary
+  unsup_weight: 0.4
+  unsup_seg_weight: 0.0
+  unsup_seg_sharpen_temperature: 0.5
+  unsup_rampup_epochs: 10
+  epochs: 100
+  learning_rate: 5.0e-05
+  seg_lr_ratio: 0.3
+  boundary_lr_ratio: 1.0
+  lr_schedule: flat_decay
+  warmup_epochs: 5
+  warmup_start_factor: 0.01
+  cosine_end_factor: 0.0
+  flat_epochs: 50
+  decay_end_factor: 0.4
+  batch_size_labeled: 4
+  batch_size_unlabeled: 4
+  unlabeled_samples_per_epoch: 250
+  save_checkpoints: true
+  checkpoint_interval: 5
+  monitor:
+    image_dir: data/test
+    num_images: 10
+    output_dir: outputs/stage2_joint_v3/monitor
+  patch_mask_ratio: 0.2
+  patch_mask_size: 160
+  num_patches: 8
+  seg_mask_region_weight: 1.0
+  boundary_mask_region_weight: 1.0
+  boundary_anchor:
+    enabled: true
+    anchor_floor: 0.5
+    anchor_ramp_epochs: 20
+  boundary_consistency:
+    sobel_weight: 0.5
+    tv_weight: 0.05
+    tv_dilate_radius: 2
+    tv_bg_weight: 1.0
+    tv_boundary_weight: 0.1
+    bg_suppress_weight: 0.2
+    bg_suppress_threshold: 0.05
+    pos_weight: 3.0
+    margin_loss_weight: 1.0
+    margin: 0.4
+    rate_regularizer_weight: 0.1
+    rate_regularizer_weight_end: 0.6
+    rate_regularizer_ramp_epochs: 40
+    rate_slack: 0.03
+    peak_hinge_weight: 0.5
+    peak_threshold: 0.8
+  freeze:
+    seg_branch: false
+    boundary_branch: false
+  sem_boundary_align_weight: 0.0
+  sem_degrade_warn_factor: 0.9
+  skeleton_filter:
+    enabled: true
+    threshold: 0.5
+    threshold_end: 0.5
+    threshold_ramp_epochs: 60
+    dilate_width: 1
+    blur_sigma: 0.01
+progressive_aug:
+  enabled: true
+  start_epoch: 5
+  ramp_epochs: 20
+  max_prob: 0.8
+  brightness_range: [0.55, 1.45]
+  contrast_range: [0.45, 1.45]
+  sharpness_range: [-0.5, 1.0]
+  gaussian_noise_std: 0.015

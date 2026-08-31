@@ -1,0 +1,8 @@
+{
+  "approved": false,
+  "reviewed_by": "",
+  "reviewed_at": "",
+  "source_count": 64,
+  "manifest": "data/sam2_geometry_g2/manifest.jsonl",
+  "notes": "确认候选互斥、无类别、未覆盖区保持 ignore，且源图均来自赛方无标签训练集。"
+}
