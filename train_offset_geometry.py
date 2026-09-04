@@ -108,7 +108,7 @@ def write_monitor(system, batch, output_dir: Path, step: int, grid_size: int):
     endpoint_x = np.clip(xx + offsets[1], 0, grid_size - 1)
     pred_instances, reconstruction_audit = cluster_endpoints(
         endpoint_y, endpoint_x, foreground,
-        close_radius=1, min_instance_area=1, max_instances=255,
+        close_radius=1, min_instance_area=1, max_instances=65535,
     )
     gt_instances = batch["instance_map"][0].numpy().astype(np.int32)
     gt_ids = [int(value) for value in np.unique(gt_instances) if int(value) != 0]

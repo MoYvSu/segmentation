@@ -5,7 +5,7 @@ _base: ../train/stage2_refine_v6_physaug.yaml
 inference:
   output_dir: outputs/inference_b2_quality_aware
   stage2_checkpoint: outputs/stage2_refine_v6_physaug/best_model_stage2.pth
-  max_instance_id: 255
+  max_instance_id: 65535
   tta: true
   quality_aware:
     enabled: true

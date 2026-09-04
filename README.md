@@ -237,7 +237,7 @@ E7b 与 V6 的 LoRA 张量逐字节一致；若 LoRA 发生变化，将拒绝复
 
 推理后在输出目录生成：
 
-- `{basename}_inst.png` : 单通道 uint8 实例图（1~255，按面积降序编号）
+- `{basename}_inst.png` : 单通道 uint16 实例图（1~65535，按面积降序编号）
 - `{basename}_class.json` : `{"实例ID": 类别标签}` 映射（0=珠光体，1=铁素体）
 - `{basename}_mask.png` : 语义掩码可视化（`post_process.save_visualization=true` 时）
 - `{basename}_boundary.png` : 边界概率热力图

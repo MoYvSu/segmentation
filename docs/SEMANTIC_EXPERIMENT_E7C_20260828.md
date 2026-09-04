@@ -20,7 +20,7 @@ E7b 只读取与 V6 完全相同的冻结 encoder/LoRA 特征，只加载自己�
 - pearlite→ferrite：V6 hard ratio ≥0.35、E7b core ≥0.85，并且核心相对整实例至少提高
   0.08，显式针对“亮核心 + 粗黑边”；
 - ferrite→pearlite：V6 hard ratio ≤0.65 且 E7b core ≤0.15；
-- 不固定每图翻转数、实例数或平均面积，不改变 255 ID 上限。
+- 不固定每图翻转数、实例数或平均面积，不改变当时的 255 ID 上限。
 
 配置：`config/experiments/affinity_g4b_high065_semantic_dual_e7c.yaml`。
 
@@ -70,7 +70,7 @@ GT 新增一个 IoU `0.631` 的有效匹配。总分下降约 `0.061` 并非该�
 
 部署配置为
 `config/experiments/affinity_g4b_high065_semantic_dual_e7c_relaxed.yaml`。它只改变
-67/6178 个测试实例的类别，不改变任何实例像素、实例数或 `<=255` 输出约束。完整 68 图
+67/6178 个测试实例的类别，不改变任何实例像素、实例数或当时的 `<=255` 输出约束。完整 68 图
 重跑已验证：实例图 geometry mismatch 为 0，翻转数与缓存重放均严格等于 67。产物位于
 `outputs/submission_affinity_g4b_high065_semantic_dual_e7c_relaxed/`，审计报告为
 `outputs/analysis_e7c_relaxed_vs_g4b.json`。最终是否晋级

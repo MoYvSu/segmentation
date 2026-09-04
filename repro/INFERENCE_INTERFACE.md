@@ -26,4 +26,4 @@ python repro/inference.py \
 
 当前不创建 `repro/inference.py`，避免在训练复现尚未验证前维护第二套推理包装。后续实现必须
 复用现有 `tools/run_affinity_submission.py` 或组合 checkpoint 入口，并保持实例 PNG、类别 JSON、
-实际配置快照和 `max_instance_id <= 255` 输出契约。
+实际配置快照和 `uint16` / `max_instance_id <= 65535` 输出契约。

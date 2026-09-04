@@ -20,7 +20,7 @@ inference:
   output_dir: outputs/submission_affinity_g4b
   boundary_threshold: 0.72
   min_instance_area: 50
-  max_instance_id: 255
+  max_instance_id: 65535
   bridge_width: 1
   watershed_dilate_width: 1
   marker_border_seal_width: 2

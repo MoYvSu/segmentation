@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Audit disconnected instance IDs and the uint8 overflow bucket."""
+"""Audit disconnected instance IDs, including historical ID-255 outputs."""
 
 from __future__ import annotations
 
@@ -19,9 +19,14 @@ def parse_input(value: str) -> tuple[str, Path]:
 
 
 def audit_map(path: Path, only_id255: bool = False) -> dict:
-    instance_map = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+    instance_map = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
     if instance_map is None:
         raise FileNotFoundError(path)
+    if instance_map.ndim != 2 or not np.issubdtype(instance_map.dtype, np.integer):
+        raise ValueError(
+            f"instance map must be single-channel integer: {path} "
+            f"shape={instance_map.shape}, dtype={instance_map.dtype}"
+        )
     all_ids = [int(value) for value in np.unique(instance_map) if int(value) > 0]
     ids = [255] if only_id255 and 255 in all_ids else ([] if only_id255 else all_ids)
     disconnected = {}

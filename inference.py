@@ -233,7 +233,7 @@ def _predict_with_tta(model, image_tensor, use_tta=False):
 def predict_single_image(
     model, image_path, device,
     image_size=1024,
-    min_instance_area=50, max_instance_id=255,
+    min_instance_area=50, max_instance_id=65535,
     threshold=0.5, boundary_threshold=0.5,
     boundary_logit_scale=1.0,
     sem_edge_boost_alpha=0.0,
@@ -347,14 +347,15 @@ def predict_single_image(
         )
     else:
         output_paths = {}
-        inst_map = np.zeros((h_orig, w_orig), dtype=np.uint8)
+        inst_map = np.zeros((h_orig, w_orig), dtype=np.uint16)
         class_map = {}
 
     n_ferrite = sum(1 for v in class_map.values() if v == 1)
     n_pearlite = sum(1 for v in class_map.values() if v == 0)
-    if len(class_map) > min(int(max_instance_id), 255):
+    if len(class_map) > min(int(max_instance_id), 65535):
         raise RuntimeError(
-            f"Instance cap violated: {len(class_map)} > {min(int(max_instance_id), 255)}"
+            f"Instance cap violated: {len(class_map)} > "
+            f"{min(int(max_instance_id), 65535)}"
         )
 
     return {

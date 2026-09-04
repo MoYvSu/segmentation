@@ -116,7 +116,7 @@ def main():
             image_rgb=image,
         )
         max_instance_id = int(instance_map.max())
-        if max_instance_id > int(infer_cfg.get("max_instance_id", 255)):
+        if max_instance_id > int(infer_cfg.get("max_instance_id", 65535)):
             raise RuntimeError(
                 f"{image_path.name} instance id {max_instance_id} exceeds limit"
             )

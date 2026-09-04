@@ -3,7 +3,7 @@
 
 The training metrics in :mod:`utils.metrics` are pixel semantic metrics.  This
 module deliberately stays independent from them and evaluates the submitted
-``uint8`` instance map plus its instance-to-class mapping.
+``uint16`` instance map plus its instance-to-class mapping.
 
 The public rule text averages IoU only over one-to-one, same-class matches with
 IoU >= 0.5.  That number is reported as ``instance_miou_valid``.  Diagnostic
@@ -53,8 +53,8 @@ def load_class_map(path: str | Path) -> Dict[int, int]:
     result: Dict[int, int] = {}
     for key, value in raw.items():
         instance_id = int(key)
-        if not 1 <= instance_id <= 255:
-            raise ValueError(f"Instance id outside [1, 255]: {instance_id}")
+        if not 1 <= instance_id <= 65535:
+            raise ValueError(f"Instance id outside [1, 65535]: {instance_id}")
         result[instance_id] = normalize_class_id(value)
     return result
 
@@ -124,13 +124,13 @@ def validate_instance_prediction(
     instance_map: np.ndarray,
     class_map: Mapping[int, int],
 ) -> None:
-    """Validate the competition's 8-bit instance-map contract."""
+    """Validate the competition's 16-bit instance-map value contract."""
     if instance_map.ndim != 2:
         raise ValueError(f"Instance map must be 2-D, got {instance_map.shape}")
     if not np.issubdtype(instance_map.dtype, np.integer):
         raise ValueError(f"Instance map must be integer, got {instance_map.dtype}")
-    if int(instance_map.min()) < 0 or int(instance_map.max()) > 255:
-        raise ValueError("Instance map values must stay within [0, 255]")
+    if int(instance_map.min()) < 0 or int(instance_map.max()) > 65535:
+        raise ValueError("Instance map values must stay within [0, 65535]")
     present = {int(value) for value in np.unique(instance_map) if int(value) != 0}
     declared = {int(key) for key in class_map}
     missing = sorted(present - declared)

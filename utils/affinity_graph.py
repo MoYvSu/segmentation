@@ -82,7 +82,7 @@ def reconstruct_affinity_components(
     affinity: np.ndarray,
     offsets: Sequence[Tuple[int, int]] = DEFAULT_AFFINITY_OFFSETS,
     threshold: float | Sequence[float] = 0.5,
-    max_instances: int | None = 255,
+    max_instances: int | None = 65535,
 ):
     """Partition foreground pixels by thresholded undirected affinity edges.
 
@@ -110,13 +110,13 @@ def reconstruct_affinity_components(
             f"got {threshold_array.shape}"
         )
     if max_instances is not None and (
-        int(max_instances) < 1 or int(max_instances) > 255
+        int(max_instances) < 1 or int(max_instances) > 65535
     ):
-        raise ValueError("max_instances must be within [1, 255]")
+        raise ValueError("max_instances must be within [1, 65535]")
 
     height, width = mask.shape
     foreground_flat = np.flatnonzero(mask.ravel())
-    output_dtype = np.int32 if max_instances is None else np.uint8
+    output_dtype = np.int32 if max_instances is None else np.uint16
     output = np.zeros((height, width), dtype=output_dtype)
     if foreground_flat.size == 0:
         return output, {
@@ -159,7 +159,7 @@ def reconstruct_affinity_components(
 
     areas = np.bincount(component, minlength=raw_count)
     order = np.argsort(-areas, kind="stable")
-    component_to_instance = np.zeros(raw_count, dtype=np.uint16)
+    component_to_instance = np.zeros(raw_count, dtype=output_dtype)
     if max_instances is None:
         component_to_instance[order] = np.arange(1, raw_count + 1)
         kept_count = raw_count

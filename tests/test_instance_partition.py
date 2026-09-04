@@ -9,7 +9,7 @@ def test_partition_assigns_every_pixel_and_obeys_cap():
     instances, classes, audit = classify_instance_partition(
         regions, probability, min_area=2, max_instance_id=17
     )
-    assert instances.dtype == np.uint8
+    assert instances.dtype == np.uint16
     assert np.all(instances > 0)
     assert int(instances.max()) <= 17
     assert len(classes) <= 17
@@ -22,7 +22,7 @@ def test_partition_uses_supplied_semantic_probability():
     probability = np.zeros((8, 12), dtype=np.float32)
     probability[:, :6] = 0.9
     instances, classes, _ = classify_instance_partition(
-        regions, probability, min_area=1, max_instance_id=255
+        regions, probability, min_area=1, max_instance_id=65535
     )
     left_id = int(instances[2, 2])
     right_id = int(instances[2, 9])

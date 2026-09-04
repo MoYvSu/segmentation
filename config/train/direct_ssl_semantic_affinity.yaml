@@ -122,7 +122,7 @@ direct_semantic_affinity:
 inference:
   boundary_threshold: 0.65
   min_instance_area: 50
-  max_instance_id: 255
+  max_instance_id: 65535
   bridge_width: 1
   watershed_dilate_width: 1
   marker_border_seal_width: 2

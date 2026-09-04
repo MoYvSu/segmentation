@@ -50,7 +50,7 @@ def main():
         positive_edges += np.sum((affinity > 0.5) & edge_valid, axis=(1, 2))
         negative_edges += np.sum((affinity <= 0.5) & edge_valid, axis=(1, 2))
         prediction, graph_audit = reconstruct_affinity_components(
-            labels > 0, affinity, max_instances=255
+            labels > 0, affinity, max_instances=65535
         )
         recovery = audit_instance_recovery(labels, prediction)
         rows.append({

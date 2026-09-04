@@ -273,7 +273,7 @@ def boundary_watershed_separation(
     boundary_mask: np.ndarray,
     dilate_width: int = 2,
     min_area: int = 50,
-    max_instance_id: int = 255,
+    max_instance_id: int = 65535,
     bridge_width: int = 1,
     center_prob: Optional[np.ndarray] = None,
     center_threshold: float = 0.25,
@@ -304,9 +304,9 @@ def boundary_watershed_separation(
     7. 面积过滤 + ID 分配
     """
     max_instance_id = int(max_instance_id)
-    if not 1 <= max_instance_id <= 255:
+    if not 1 <= max_instance_id <= 65535:
         raise ValueError(
-            f"max_instance_id must be within [1, 255], got {max_instance_id}"
+            f"max_instance_id must be within [1, 65535], got {max_instance_id}"
         )
     h, w = semantic_mask.shape[:2]
 
@@ -356,7 +356,7 @@ def boundary_watershed_separation(
             markers[labels == label_id] = valid_id
 
     if valid_id == 0:
-        return np.zeros((h, w), dtype=np.uint8), {}
+        return np.zeros((h, w), dtype=np.uint16), {}
 
     # Step 5: 受阻分水岭
     img_for_ws = np.full((h, w, 3), 128, dtype=np.uint8)
@@ -380,7 +380,7 @@ def boundary_watershed_separation(
             continue
         candidate_map[inst_mask] = int(label_id)
 
-    # Step 7: 超过 8-bit 上限时按局部邻接合并最小区域。严禁把所有溢出
+    # Step 7: 超过 16-bit 上限时按局部邻接合并最小区域。严禁把所有溢出
     # 区域写入同一个 ID，否则会制造跨图像的不连通伪实例。
     candidate_map, _ = _merge_region_map_to_cap(candidate_map, max_instance_id)
     final_labels, final_counts = np.unique(
@@ -392,7 +392,7 @@ def boundary_watershed_separation(
             zip(final_labels, final_counts), key=lambda item: int(item[1]), reverse=True
         )
     ]
-    inst_map = np.zeros((h, w), dtype=np.uint8)
+    inst_map = np.zeros((h, w), dtype=np.uint16)
     class_map = {}
     for current_id, label in enumerate(final_labels, start=1):
         instance_mask = candidate_map == label
@@ -430,7 +430,7 @@ def classify_instance_partition(
     candidate_map: np.ndarray,
     semantic_probability: np.ndarray,
     min_area: int = 50,
-    max_instance_id: int = 255,
+    max_instance_id: int = 65535,
     semantic_vote_mode: str = "probability_mean",
     semantic_vote_threshold: float = 0.5,
     semantic_vote_erode_width: int = 0,
@@ -441,7 +441,7 @@ def classify_instance_partition(
 
     This is the common finishing stage for non-watershed geometry decoders.
     The input may use arbitrary positive integer IDs.  Small regions are
-    agglomerated into spatial neighbours before the 8-bit competition cap is
+    agglomerated into spatial neighbours before the 16-bit competition cap is
     applied, so pixels are not silently discarded and unrelated overflow
     regions are never assigned one shared ID.
     """
@@ -454,15 +454,15 @@ def classify_instance_partition(
             f"semantic probability shape {probability.shape} != {regions.shape}"
         )
     max_instance_id = int(max_instance_id)
-    if not 1 <= max_instance_id <= 255:
+    if not 1 <= max_instance_id <= 65535:
         raise ValueError(
-            f"max_instance_id must be within [1, 255], got {max_instance_id}"
+            f"max_instance_id must be within [1, 65535], got {max_instance_id}"
         )
 
     regions = regions.astype(np.int32, copy=False)
     labels, counts = np.unique(regions[regions > 0], return_counts=True)
     if labels.size == 0:
-        return np.zeros(regions.shape, dtype=np.uint8), {}, {
+        return np.zeros(regions.shape, dtype=np.uint16), {}, {
             "raw_instance_count": 0,
             "retained_instance_count": 0,
             "merge_count": 0,
@@ -471,7 +471,7 @@ def classify_instance_partition(
 
     # Keep every sufficiently large component where possible.  Components
     # below min_area are merged through local contact until this target count
-    # is reached; the hard 255 cap always takes precedence.
+    # is reached; the hard 65535 cap always takes precedence.
     large_count = int(np.count_nonzero(counts >= max(1, int(min_area))))
     target_count = max(1, min(max_instance_id, large_count or 1))
     merged, merge_edges = _merge_region_map_to_cap(regions, target_count)
@@ -485,7 +485,7 @@ def classify_instance_partition(
         )
     ]
     semantic_mask = (probability > float(semantic_vote_threshold)).astype(np.uint8)
-    inst_map = np.zeros(regions.shape, dtype=np.uint8)
+    inst_map = np.zeros(regions.shape, dtype=np.uint16)
     class_map = {}
     vote_audit = {}
     for instance_id, label in enumerate(ordered, start=1):
@@ -564,7 +564,7 @@ def post_process_prediction_boundary(
     output_dir: str,
     image_basename: str,
     min_instance_area: int = 50,
-    max_instance_id: int = 255,
+    max_instance_id: int = 65535,
     threshold: float = 0.5,
     boundary_threshold: float = 0.5,
     boundary_logit_scale: float = 1.0,

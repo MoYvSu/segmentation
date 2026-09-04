@@ -73,7 +73,7 @@ def partition_mask_records(
     min_area: int,
     max_area_fraction: float,
     max_overlap_fraction: float,
-    max_instances: int = 255,
+    max_instances: int = 65535,
     cap_instances: bool = False,
 ):
     """Convert overlapping SAM2 proposals into one unambiguous instance map."""

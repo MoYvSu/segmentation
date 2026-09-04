@@ -270,7 +270,7 @@ def main():
                 output_dir=mode_dir,
                 image_basename=basename,
                 min_instance_area=effective_min_area,
-                max_instance_id=int(infer_cfg.get("max_instance_id", 255)),
+                max_instance_id=int(infer_cfg.get("max_instance_id", 65535)),
                 threshold=float(infer_cfg.get("threshold", 0.5)),
                 boundary_threshold=float(infer_cfg.get("boundary_threshold", 0.5)),
                 boundary_logit_scale=float(infer_cfg.get("boundary_logit_scale", 1.0)),

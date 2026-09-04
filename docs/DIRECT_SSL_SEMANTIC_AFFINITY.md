@@ -129,7 +129,7 @@ python tools/run_direct_semantic_affinity_submission.py \
   --checkpoint outputs/direct_ssl_semantic_affinity/best_direct_dual.pth
 ```
 
-提交入口逐图检查实例 ID `<=255`，并生成包含 checkpoint SHA-256、epoch、phase、参数量、融合
+提交入口逐图检查实例 ID `<=65535`，并生成包含 checkpoint SHA-256、epoch、phase、参数量、融合
 配置和实例统计的 `submission_manifest.json`。
 
 ## 晋级

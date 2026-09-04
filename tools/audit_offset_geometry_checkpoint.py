@@ -133,7 +133,7 @@ def audit_sample(system, sample, output_dir: Path, grid_size: int, radii):
 
     baseline, baseline_audit = cluster_endpoints(
         endpoint_y, endpoint_x, foreground,
-        close_radius=1, min_instance_area=1, max_instances=255,
+        close_radius=1, min_instance_area=1, max_instances=65535,
     )
     cv2.imwrite(
         str(sample_dir / "instances_endpoint_components_content.png"),

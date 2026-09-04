@@ -83,7 +83,7 @@ def write_monitor(
         )
         instances, graph_audit = reconstruct_affinity_components(
             labels > 0, probability, threshold=graph_thresholds,
-            max_instances=255,
+            max_instances=65535,
         )
         recovery = audit_instance_recovery(labels, instances)
         gt_ids = [int(value) for value in np.unique(labels) if int(value) != 0]

@@ -118,7 +118,7 @@ competition's <=500 self-labeled-image limit.
 ## Inference contract
 
 1. Run one global 1024 letterbox geometry pass.
-2. Detect at most 255 center peaks after NMS.
+2. Detect at most 65535 center peaks after NMS.
 3. Add predicted offsets to every valid geometry pixel and assign endpoints to
    detected global centers.
 4. Inverse-letterbox the coarse instance map to native resolution.
@@ -151,8 +151,8 @@ On the fixed six-image labeled split and the G2 latest checkpoint:
 The gain is small and comes mainly from the ferrite mean-area term; mIoU changes
 only slightly. On the same 12 label-free monitor images, gated fusion reduces
 mean boundary probability from about 0.271 to 0.266 while leaving the mean final
-instance count nearly unchanged. Raw components above 255 are diagnostic only;
-the exported map must still enforce `max_instance_id=255`.
+instance count nearly unchanged. The exported map now uses the formal uint16
+submission contract and enforces `max_instance_id=65535`.
 
 ### Direction-aware short-range reduction
 

@@ -2,7 +2,7 @@
 """
 Instance ID map color visualization
 ====================================
-Read _inst.png (uint8 instance IDs) and _class.json (ID->class mapping),
+Read _inst.png (uint16 instance IDs) and _class.json (ID->class mapping),
 render each instance with a distinct color:
   - Ferrite (class=1): warm hues (red/orange/yellow, HSV H: 0-60)
   - Pearlite (class=0): cool hues (cyan/blue/purple, HSV H: 180-300)
@@ -77,7 +77,7 @@ def visualize_instance_map(
     Render an instance ID map as a color image.
 
     Args:
-        inst_map: [H, W] uint8 array, pixel value = instance ID (0=background)
+        inst_map: [H, W] integer array, pixel value = instance ID (0=background)
         class_map: {str(id): int(class)} mapping (1=ferrite, 0=pearlite)
         seed: random seed for color generation
 
@@ -137,9 +137,14 @@ def process_file(
         output_path = base
 
     # Read instance map
-    inst_map = cv2.imread(inst_path, cv2.IMREAD_GRAYSCALE)
+    inst_map = cv2.imread(inst_path, cv2.IMREAD_UNCHANGED)
     if inst_map is None:
         raise FileNotFoundError(f"Cannot read instance map: {inst_path}")
+    if inst_map.ndim != 2 or not np.issubdtype(inst_map.dtype, np.integer):
+        raise ValueError(
+            f"Instance map must be single-channel integer, got "
+            f"shape={inst_map.shape}, dtype={inst_map.dtype}"
+        )
 
     # Read class mapping
     with open(class_json_path, "r", encoding="utf-8") as f:

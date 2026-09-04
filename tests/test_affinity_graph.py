@@ -47,17 +47,17 @@ def test_disconnected_label_is_reported_as_split():
     assert not recovery["exact_partition"]
 
 
-def test_component_cap_never_exceeds_uint8_contract():
+def test_component_cap_never_exceeds_uint16_contract():
     labels = np.zeros((40, 40), dtype=np.int32)
     labels[::2, ::2] = np.arange(1, 401).reshape(20, 20)
     affinity, _ = build_affinity_targets(labels)
     prediction, audit = reconstruct_affinity_components(
-        labels > 0, affinity, max_instances=255
+        labels > 0, affinity, max_instances=300
     )
-    assert prediction.dtype == np.uint8
-    assert int(prediction.max()) <= 255
-    assert audit["kept_instance_count"] == 255
-    assert audit["merged_components_for_cap"] == 145
+    assert prediction.dtype == np.uint16
+    assert int(prediction.max()) <= 300
+    assert audit["kept_instance_count"] == 300
+    assert audit["merged_components_for_cap"] == 100
 
 def test_uncapped_diagnostic_preserves_every_raw_component():
     labels = np.zeros((40, 40), dtype=np.int32)

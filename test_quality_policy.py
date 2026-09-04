@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Physical augmentation, quality policy, and 8-bit instance-cap tests."""
+"""Physical augmentation, quality policy, and uint16 instance-cap tests."""
 
 import unittest
 
@@ -107,15 +107,15 @@ class QualityPolicyTest(unittest.TestCase):
 
 
 class InstanceCapTest(unittest.TestCase):
-    def test_rejects_non_uint8_cap(self):
+    def test_rejects_cap_outside_uint16_range(self):
         semantic = np.ones((32, 32), dtype=np.uint8)
         boundary = np.zeros_like(semantic)
         with self.assertRaises(ValueError):
             boundary_watershed_separation(
-                semantic, boundary, max_instance_id=256
+                semantic, boundary, max_instance_id=65536
             )
 
-    def test_more_than_255_candidates_are_capped_and_classified(self):
+    def test_more_than_255_candidates_are_preserved_and_classified(self):
         size = 128
         semantic = np.ones((size, size), dtype=np.uint8)
         boundary = np.zeros_like(semantic)
@@ -127,16 +127,16 @@ class InstanceCapTest(unittest.TestCase):
             semantic,
             boundary,
             min_area=1,
-            max_instance_id=255,
+            max_instance_id=65535,
             bridge_width=0,
             dilate_width=0,
             center_prob=center,
             center_threshold=0.5,
             center_nms_kernel=3,
         )
-        self.assertLessEqual(int(instance_map.max()), 255)
-        self.assertLessEqual(len(class_map), 255)
-        self.assertEqual(len(class_map), 255)
+        self.assertEqual(instance_map.dtype, np.uint16)
+        self.assertGreater(int(instance_map.max()), 255)
+        self.assertEqual(len(class_map), 324)
         self.assertTrue(all(value == 1 for value in class_map.values()))
 
 

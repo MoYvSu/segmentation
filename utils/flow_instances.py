@@ -250,7 +250,7 @@ def cluster_endpoints(
     foreground: np.ndarray,
     close_radius: int = 1,
     min_instance_area: int = 1,
-    max_instances: int = 255,
+    max_instances: int = 65535,
 ) -> Tuple[np.ndarray, Dict[str, int]]:
     """Cluster endpoint occupancy without using GT ids or a GT instance count."""
     height, width = foreground.shape

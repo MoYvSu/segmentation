@@ -26,9 +26,9 @@ def validate_pair(image_path: Path, prediction_dir: Path) -> tuple[Path, Path, i
     instance_map = cv2.imread(str(instance_path), cv2.IMREAD_UNCHANGED)
     if image is None or instance_map is None:
         raise ValueError(f"failed to read image or instance map for {stem}")
-    if instance_map.ndim != 2 or instance_map.dtype != np.uint8:
+    if instance_map.ndim != 2 or instance_map.dtype != np.uint16:
         raise ValueError(
-            f"{instance_path.name} must be single-channel uint8, got "
+            f"{instance_path.name} must be single-channel uint16, got "
             f"shape={instance_map.shape}, dtype={instance_map.dtype}"
         )
     if instance_map.shape != image.shape[:2]:
@@ -49,8 +49,8 @@ def validate_pair(image_path: Path, prediction_dir: Path) -> tuple[Path, Path, i
             f"mask_only={sorted(present_ids - declared_ids)}, "
             f"json_only={sorted(declared_ids - present_ids)}"
         )
-    if any(not 1 <= value <= 255 for value in present_ids):
-        raise ValueError(f"{stem} has an instance id outside 1..255")
+    if any(not 1 <= value <= 65535 for value in present_ids):
+        raise ValueError(f"{stem} has an instance id outside 1..65535")
     return instance_path, class_path, len(present_ids)
 
 

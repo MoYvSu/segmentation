@@ -192,7 +192,7 @@ def main():
                 }.items()
             },
             "max_instance_id": int(
-                config["inference"].get("max_instance_id", 255)
+                config["inference"].get("max_instance_id", 65535)
             ),
         },
         "images": results,

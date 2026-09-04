@@ -74,7 +74,7 @@ inference:
   output_dir: outputs/inference
   threshold: 0.5
   min_instance_area: 50
-  max_instance_id: 255
+  max_instance_id: 65535
   boundary_threshold: 0.35
   boundary_logit_scale: 1.0
   sem_edge_boost_alpha: 0.0

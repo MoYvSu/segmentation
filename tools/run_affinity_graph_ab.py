@@ -273,7 +273,7 @@ def main():
                         raw_grid,
                         affinity,
                         min_component_area=grid_min_area,
-                        max_components=int(infer_cfg.get("max_instance_id", 255)),
+                        max_components=int(infer_cfg.get("max_instance_id", 65535)),
                     )
                 )
             else:
@@ -290,7 +290,7 @@ def main():
                 native_regions,
                 semantic_probability,
                 min_area=min_instance_area,
-                max_instance_id=int(infer_cfg.get("max_instance_id", 255)),
+                max_instance_id=int(infer_cfg.get("max_instance_id", 65535)),
                 semantic_vote_mode=str(
                     infer_cfg.get("semantic_vote_mode", "probability_mean")
                 ),

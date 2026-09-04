@@ -227,7 +227,7 @@ def main():
                 boundary,
                 dilate_width=dilate_width,
                 min_area=args.min_area,
-                max_instance_id=255,
+                max_instance_id=65535,
                 bridge_width=bridge_width,
                 center_prob=None,
                 marker_boundary_mask=marker_boundary,

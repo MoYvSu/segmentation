@@ -317,7 +317,7 @@ def main():
                 infer_cfg.get("semantic_vote_threshold", 0.5)
             ),
             "center_seeds": False,
-            "max_instance_id": int(infer_cfg.get("max_instance_id", 255)),
+            "max_instance_id": int(infer_cfg.get("max_instance_id", 65535)),
         },
         "summaries": summaries,
     }

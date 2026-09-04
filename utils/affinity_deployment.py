@@ -243,7 +243,7 @@ def postprocess(
         output_dir=str(output_dir),
         image_basename=basename,
         min_instance_area=int(infer_cfg.get("min_instance_area", 50)),
-        max_instance_id=int(infer_cfg.get("max_instance_id", 255)),
+        max_instance_id=int(infer_cfg.get("max_instance_id", 65535)),
         threshold=float(infer_cfg.get("threshold", 0.5)),
         boundary_threshold=float(boundary_threshold),
         boundary_logit_scale=1.0,
