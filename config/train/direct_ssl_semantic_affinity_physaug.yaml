@@ -1,0 +1,34 @@
+# ArmB-T2：保持原损失，只增加显微成像清晰度退化增强。
+_base: direct_ssl_semantic_affinity.yaml
+
+paths:
+  output_dir: outputs/direct_ssl_semantic_affinity_physaug
+
+direct_semantic_affinity:
+  output_dir: outputs/direct_ssl_semantic_affinity_physaug
+
+  # 用物理退化替换原先固定且很弱的 3x3 average blur。
+  augmentation:
+    blur_probability: 0.0
+
+  appearance_augmentation:
+    enabled: true
+    policy: physical_v1
+    start_epoch: 0
+    ramp_epochs: 3
+    max_prob: 0.50
+    min_ops: 1
+    max_ops: 1
+    op_weights:
+      gaussian_blur: 1.0
+      downsample: 0.7
+    blur_sigma_range: [0.3, 2.0]
+    blur_kernel_size: 9
+    downsample_scale_range: [0.55, 0.95]
+
+  # 沿用 ArmB 的损失，使用已校准阈值选择 checkpoint。
+  deployment_validation:
+    boundary_threshold: 0.59
+
+inference:
+  boundary_threshold: 0.59

@@ -5,7 +5,7 @@
 用 1000 张无标签金相图对冻结 SAM2 trunk 做掩码重建，只训练 LoRA + 轻量重建头：
 
   1. letterbox 1024 -> 随机块掩码（覆盖 mask_ratio 面积，块 32~64px）
-  2. 带掩码图 -> SAM2 trunk（仅 LoRA 可训练）-> stage-1 特征 [B,112,256,256]
+  2. 带掩码图 -> SAM2 trunk（仅 LoRA 可训练）-> stage-1 多尺度特征
   3. 轻量重建头（3 层卷积）-> 重建原图 RGB；L1 loss 仅统计掩码区域
   4. 训练结束丢弃重建头，保存 trunk LoRA 状态
      outputs/lora_pretrain/lora_state_dict.pth 作为 Stage-1 域适配起点
@@ -43,7 +43,10 @@ from models.lora import (
     inject_trunk_lora,
     load_lora_state_dict,
 )
-from models.sam2_encoder import SAM2Encoder
+from models.sam2_encoder import (
+    SAM2Encoder,
+    canonical_sam2_input_normalization,
+)
 from utils.config import load_config, project_path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -54,12 +57,22 @@ class MaskedUnlabeledDataset(Dataset):
     """无标签金相图 + 随机块掩码（自监督重建用）。"""
 
     def __init__(self, data_dir, image_size=1024, mask_ratio=0.4,
-                 patch_min=32, patch_max=64, max_patches=32):
+                 patch_min=32, patch_max=64, max_patches=32,
+                 exclude_stems=None):
         valid_exts = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
         self.samples = []
         for ext in valid_exts:
             self.samples.extend(glob.glob(os.path.join(data_dir, f"*{ext}")))
         self.samples.sort()
+        excluded = set(exclude_stems or ())
+        self.excluded_samples = [
+            path for path in self.samples
+            if os.path.splitext(os.path.basename(path))[0] in excluded
+        ]
+        self.samples = [
+            path for path in self.samples
+            if os.path.splitext(os.path.basename(path))[0] not in excluded
+        ]
         self.image_size = image_size
         self.mask_ratio = mask_ratio
         self.patch_min = patch_min
@@ -95,6 +108,22 @@ class MaskedUnlabeledDataset(Dataset):
         mask = self._gen_mask()
         m = torch.from_numpy(mask).float().unsqueeze(0)                     # [1,H,W]
         return t * (1.0 - m), t, m
+
+
+def load_excluded_stems(manifest_path):
+    """读取不应进入 SSL 的固定 monitor 清单，返回不带扩展名的文件名。"""
+    if not manifest_path:
+        return set()
+    if not os.path.isfile(manifest_path):
+        raise FileNotFoundError(f"SSL exclude manifest not found: {manifest_path}")
+    stems = set()
+    with open(manifest_path, "r", encoding="utf-8-sig") as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            stems.add(os.path.splitext(os.path.basename(line))[0])
+    return stems
 
 
 class ReconstructionHead(nn.Module):
@@ -171,7 +200,7 @@ def downstream_probe(encoder, device, config, decoder_path):
     from torch.utils.data import DataLoader
 
     root = config["paths"]["project_root"]
-    dec = FPNDecoder(in_channels=[112, 224, 448, 896], fpn_channels=256,
+    dec = FPNDecoder(in_channels=encoder.get_stage_channels(), fpn_channels=256,
                      num_classes=2, dropout=0.1, use_bn=True)
     ck = torch.load(decoder_path, map_location=device, weights_only=False)
     dec.load_state_dict(ck["decoder_state_dict"])
@@ -221,6 +250,11 @@ def main():
     ap.add_argument("--num_workers", type=int, default=4)
     ap.add_argument("--checkpoint_interval", type=int, default=5)
     ap.add_argument("--resume", default=None)
+    ap.add_argument(
+        "--exclude_manifest",
+        default=None,
+        help="从 SSL 训练中排除的图像清单；用于保持固定无标签 monitor 独立",
+    )
     ap.add_argument("--monitor_every", type=int, default=5,
                     help="每隔 N epoch 保存重建监控图（0=关闭）")
     ap.add_argument("--eval_every", type=int, default=5,
@@ -232,8 +266,11 @@ def main():
     config = load_config(args.config)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     root = config["paths"]["project_root"]
+    exclude_manifest_arg = args.exclude_manifest
     args.outdir = project_path(config, args.outdir)
     args.eval_decoder = project_path(config, args.eval_decoder)
+    if args.exclude_manifest:
+        args.exclude_manifest = project_path(config, args.exclude_manifest)
     if args.resume:
         args.resume = project_path(config, args.resume)
     os.makedirs(args.outdir, exist_ok=True)
@@ -243,11 +280,14 @@ def main():
         ckpt_path=os.path.join(root, "weights", config["paths"]["sam2_ckpt"]),
         device=device, freeze=True,
         sam2_repo_path=os.path.join(root, config["sam2"]["sam2_repo_path"]),
+        input_normalization=config["sam2"].get(
+            "input_normalization", "legacy_none"
+        ),
     )
     n_layer = inject_trunk_lora(encoder, rank=args.rank, alpha=args.alpha,
                                 target_layers=["attn.qkv", "attn.proj"])
     encoder = encoder.to(device)
-    head = ReconstructionHead().to(device)
+    head = ReconstructionHead(in_ch=encoder.get_stage_channels()[0]).to(device)
     n_lora = count_lora_params(encoder)
     logger.info(f"LoRA: {n_layer} 层, {n_lora / 1e6:.2f}M 参数; 重建头: "
                 f"{sum(p.numel() for p in head.parameters()) / 1e6:.2f}M")
@@ -262,6 +302,16 @@ def main():
     start_epoch = 0
     if args.resume and os.path.exists(args.resume):
         ck = torch.load(args.resume, map_location=device, weights_only=False)
+        resume_mode = canonical_sam2_input_normalization(
+            ck.get("config", {}).get("sam2", {}).get(
+                "input_normalization", "legacy_none"
+            )
+        )
+        if resume_mode != encoder.input_normalization:
+            raise RuntimeError(
+                "SSL resume input_normalization mismatch: "
+                f"checkpoint={resume_mode}, model={encoder.input_normalization}"
+            )
         # encoder 本身即 trunk 容器，直接按 trunk 状态键加载 LoRA
         cur = encoder.trunk.state_dict()
         for k, v in ck.get("lora_state_dict", {}).items():
@@ -276,7 +326,18 @@ def main():
         os.path.join(root, config["semi_supervised"]["unlabeled_dir"]),
         image_size=config["data"]["image_size"],
         mask_ratio=args.mask_ratio,
+        exclude_stems=load_excluded_stems(args.exclude_manifest),
     )
+    if args.exclude_manifest:
+        logger.info(
+            "SSL holdout excluded: %d images from %s",
+            len(dataset.excluded_samples),
+            args.exclude_manifest,
+        )
+        if not dataset.excluded_samples:
+            raise RuntimeError(
+                "SSL exclude manifest matched no image; refusing a misleading holdout"
+            )
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True,
                         num_workers=args.num_workers, pin_memory=True,
                         drop_last=True)
@@ -333,6 +394,14 @@ def main():
             "head_state_dict": head.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "config": config,
+            "ssl_data_contract": {
+                "dataset_size": len(dataset),
+                "exclude_manifest": exclude_manifest_arg,
+                "excluded_stems": sorted(
+                    os.path.splitext(os.path.basename(path))[0]
+                    for path in dataset.excluded_samples
+                ),
+            },
         }
         if avg < best_loss:
             best_loss = avg
@@ -348,6 +417,13 @@ def main():
         "rank": args.rank, "alpha": args.alpha,
         "epochs": total_epochs, "best_loss": best_loss,
         "injected_layers": n_layer, "lora_params": n_lora,
+        "input_normalization": encoder.input_normalization,
+        "dataset_size": len(dataset),
+        "exclude_manifest": exclude_manifest_arg,
+        "excluded_stems": sorted(
+            os.path.splitext(os.path.basename(path))[0]
+            for path in dataset.excluded_samples
+        ),
     }
     import json
     json.dump(meta, open(os.path.join(args.outdir, "meta.json"), "w", encoding="utf-8"),

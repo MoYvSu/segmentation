@@ -1,0 +1,10 @@
+# Hiera-L 公平性对照：保持 SSL、损失、LoRA 和双头不变，只延长任务训练日程。
+_base: direct_ssl_semantic_affinity_hiera_l.yaml
+
+paths:
+  output_dir: outputs/direct_ssl_semantic_affinity_hiera_l_long100
+
+direct_semantic_affinity:
+  output_dir: outputs/direct_ssl_semantic_affinity_hiera_l_long100
+  head_warmup_epochs: 5
+  joint_epochs: 95

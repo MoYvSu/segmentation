@@ -73,7 +73,15 @@ def main():
     parser.add_argument("--left-name", default="left")
     parser.add_argument("--right-name", default="right")
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument(
+        "--overview-layout", choices=("grid", "rows"), default="grid",
+        help="grid 每行两组；rows 每行一组，适合生成可放大的单张目检大图",
+    )
+    parser.add_argument("--overview-panel-width", type=int, default=300)
+    parser.add_argument("--overview-panel-height", type=int, default=225)
     args = parser.parse_args()
+    if args.overview_panel_width <= 0 or args.overview_panel_height <= 0:
+        parser.error("overview panel dimensions must be positive")
     image_dir = Path(args.image_dir)
     left_dir = Path(args.left_dir)
     right_dir = Path(args.right_dir)
@@ -102,14 +110,17 @@ def main():
         cv2.imwrite(str(output_dir / f"{image_path.stem}_comparison.png"), large)
         overview_items.append(triplet(
             image_path, left_dir, right_dir,
-            args.left_name, args.right_name, (300, 225),
+            args.left_name, args.right_name,
+            (args.overview_panel_width, args.overview_panel_height),
         ))
-    rows = []
-    for index in range(0, len(overview_items), 2):
-        row = overview_items[index:index + 2]
-        if len(row) == 1:
-            row.append(np.full_like(row[0], 245))
-        rows.append(np.concatenate(row, axis=1))
+    rows = overview_items
+    if args.overview_layout == "grid":
+        rows = []
+        for index in range(0, len(overview_items), 2):
+            row = overview_items[index:index + 2]
+            if len(row) == 1:
+                row.append(np.full_like(row[0], 245))
+            rows.append(np.concatenate(row, axis=1))
     cv2.imwrite(str(output_dir / "overview.png"), np.concatenate(rows, axis=0))
     print(f"Rendered {len(image_paths)} comparisons to {output_dir}")
 

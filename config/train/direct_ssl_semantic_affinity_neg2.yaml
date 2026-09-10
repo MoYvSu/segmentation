@@ -1,0 +1,18 @@
+# ArmB-T1：仅增强人工标注中跨实例 affinity 负样本约束。
+_base: direct_ssl_semantic_affinity.yaml
+
+paths:
+  output_dir: outputs/direct_ssl_semantic_affinity_neg2
+
+direct_semantic_affinity:
+  output_dir: outputs/direct_ssl_semantic_affinity_neg2
+
+  affinity_loss:
+    negative_weight: 2.0
+
+  # 使用已在 ArmB 上重新校准的部署阈值选择 checkpoint。
+  deployment_validation:
+    boundary_threshold: 0.59
+
+inference:
+  boundary_threshold: 0.59

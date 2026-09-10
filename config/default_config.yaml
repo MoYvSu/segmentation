@@ -20,6 +20,8 @@ sam2:
   device: "cuda"
   freeze: true
   sam2_repo_path: "segment-anything-2"
+  # 老 checkpoint 的输入合同；新实验必须显式覆盖并使用独立 SSL/task 权重。
+  input_normalization: "legacy_none"
 
 # -----------------------------------------------------------------------------
 # FPN 解码头配置（默认输出 2 通道；center_head=true 时增加中心热图通道）

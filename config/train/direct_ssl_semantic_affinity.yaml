@@ -23,6 +23,10 @@ direct_semantic_affinity:
   val_fraction: 0.20
   forced_train_names: [train_001, train_002]
 
+  # 原尺寸热力图用于追溯；preview 目录提供服务器端快速浏览的小图。
+  monitor:
+    preview_max_side: 512
+
   # Phase 1 trains random heads without touching SSL LoRA. Phase 2 jointly
   # adapts the same LoRA with aligned semantic and affinity supervision.
   head_warmup_epochs: 5

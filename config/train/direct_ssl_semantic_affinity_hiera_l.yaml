@@ -1,0 +1,23 @@
+# SAM2.1 Hiera-L 单变量短链：只更换底座并重做该架构的 SSL-LoRA。
+_base: direct_ssl_semantic_affinity.yaml
+
+paths:
+  sam2_ckpt: sam2.1_hiera_large.pt
+  output_dir: outputs/direct_ssl_semantic_affinity_hiera_l
+
+sam2:
+  model_version: sam2.1_hiera_large
+  config_file: configs/sam2.1/sam2.1_hiera_l.yaml
+
+lora:
+  # B+ 的 SSL-LoRA 与 Large 层数和张量形状不兼容，必须独立预训练。
+  init_from: outputs/lora_pretrain_hiera_l/lora_state_dict.pth
+
+direct_semantic_affinity:
+  output_dir: outputs/direct_ssl_semantic_affinity_hiera_l
+  # 固定原 ArmB 的损失、增强和双头结构；0.59 是已完成的 B+ 部署校准点。
+  deployment_validation:
+    boundary_threshold: 0.59
+
+inference:
+  boundary_threshold: 0.59

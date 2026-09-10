@@ -1,0 +1,32 @@
+# 纯人工新 GT 长程短链：冻结 LoRA 双头 60 epoch，再解冻 LoRA 联训 60 epoch。
+# 不引入 SAM2 几何伪标签、旧模型蒸馏或额外 recovery 阶段。
+_base: direct_ssl_semantic_affinity_imagenet_norm_target_v2.yaml
+
+paths:
+  output_dir: outputs/20260908_133740_clean60
+
+lora:
+  # 与本轮 SSL 60 的损失最低 checkpoint 对接，不使用最终 epoch 或历史教师。
+  init_from: outputs/20260908_133740_ssl60/best_lora.pth
+
+direct_semantic_affinity:
+  output_dir: outputs/20260908_133740_clean60
+  head_warmup_epochs: 60
+  joint_epochs: 60
+  pseudo_start_epoch: 60
+  pseudo_affinity_weight: 0.0
+  checkpoint_interval: 10
+
+  sam2_geometry:
+    enabled: false
+
+  semantic_recovery:
+    enabled: false
+
+  affinity_recovery:
+    enabled: false
+
+  monitor:
+    enabled: true
+    interval: 5
+    output_dir: outputs/20260908_133740_clean60/monitor

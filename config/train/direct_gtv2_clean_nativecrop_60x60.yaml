@@ -1,0 +1,36 @@
+# 单变量候选：人工新 GT 的均匀原生裁剪；先通过固定尺度探针，再启动。
+# SSL → 冻结双头 60 epoch → 联训 60 epoch → 独立固定部署验证。
+_base: direct_gtv2_clean_60x60.yaml
+
+paths:
+  output_dir: outputs/20260910_clean60_nativecrop
+
+direct_semantic_affinity:
+  output_dir: outputs/20260910_clean60_nativecrop
+  split_file: config/train/clean60_split.json
+  manual_samples_per_epoch: 64
+  batch_size: 1
+  checkpoint_interval: 60
+
+  native_crop:
+    enabled: true
+    probability: 0.50
+    size: 1024
+
+  # 固定既有 clean60 标定值，避免采样变化同时改变任务损失的相对权重。
+  loss_scales:
+    semantic: 7.797723293304443
+    manual_affinity: 0.6930767446756363
+    pseudo_affinity: 1.0
+
+  loss_selection:
+    enabled: true
+    restore_warmup_best: true
+
+  # 每 epoch 保留完整六图的验证损失；昂贵分水岭诊断在训练后独立执行。
+  deployment_validation:
+    enabled: false
+
+  monitor:
+    enabled: false
+    output_dir: outputs/20260910_clean60_nativecrop/monitor

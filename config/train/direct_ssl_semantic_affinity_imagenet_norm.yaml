@@ -1,0 +1,31 @@
+# SAM2 B+ 输入合同对照：仅恢复官方 ImageNet 归一化，并重做 SSL 与双头短链。
+_base: direct_ssl_semantic_affinity.yaml
+
+paths:
+  output_dir: outputs/direct_ssl_semantic_affinity_imagenet_norm
+
+sam2:
+  input_normalization: imagenet_v1
+
+lora:
+  # 输入合同变化后，禁止复用 legacy_none 的 SSL-LoRA。
+  init_from: outputs/lora_pretrain_imagenet_norm/lora_state_dict.pth
+
+direct_semantic_affinity:
+  output_dir: outputs/direct_ssl_semantic_affinity_imagenet_norm
+  checkpoint_interval: 5
+
+  monitor:
+    enabled: true
+    interval: 5
+    image_dir: data/unlabeled
+    manifest: config/monitor/unlabeled_holdout_v1.txt
+    num_images: 10
+    output_dir: outputs/direct_ssl_semantic_affinity_imagenet_norm/monitor
+
+  # 先沿用 ArmB 已验证的全局点；训练结束后再为该 checkpoint 独立校准。
+  deployment_validation:
+    boundary_threshold: 0.59
+
+inference:
+  boundary_threshold: 0.59

@@ -1,0 +1,25 @@
+# Hiera-B+ 长程公平对照：只延长任务训练，并补齐周期 checkpoint 与既有双热力图 monitor。
+_base: direct_ssl_semantic_affinity.yaml
+
+paths:
+  output_dir: outputs/direct_ssl_semantic_affinity_long100
+
+direct_semantic_affinity:
+  output_dir: outputs/direct_ssl_semantic_affinity_long100
+  head_warmup_epochs: 5
+  joint_epochs: 95
+  checkpoint_interval: 10
+
+  monitor:
+    enabled: true
+    interval: 10
+    image_dir: data/unlabeled
+    manifest: config/monitor/unlabeled_holdout_v1.txt
+    num_images: 10
+    output_dir: outputs/direct_ssl_semantic_affinity_long100/monitor
+
+  deployment_validation:
+    boundary_threshold: 0.59
+
+inference:
+  boundary_threshold: 0.59

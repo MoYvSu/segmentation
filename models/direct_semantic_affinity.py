@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 
 import torch
@@ -12,12 +13,79 @@ from models.affinity_geometry import AffinityGeometryDecoder
 from models.fpn_decoder import FPNDecoder
 from models.fused_deployment import FusedPhaseAffinityModel
 from models.lora import inject_trunk_lora, load_lora_state_dict
-from models.sam2_encoder import SAM2Encoder
+from models.sam2_encoder import (
+    SAM2Encoder,
+    SAM2_INPUT_NORMALIZATION_NONE,
+    canonical_sam2_input_normalization,
+)
 from utils.config import project_path
 from utils.semantic_challenger import SemanticChallenger
 
 
 DIRECT_SEMANTIC_AFFINITY_FORMAT = "direct_semantic_affinity_v1"
+
+
+def direct_input_normalization(config: dict) -> str:
+    """读取 direct/SSL 共用的 Hiera 输入合同，旧配置默认兼容原路径。"""
+    return canonical_sam2_input_normalization(
+        config.get("sam2", {}).get(
+            "input_normalization", SAM2_INPUT_NORMALIZATION_NONE
+        )
+    )
+
+
+def _ssl_artifact_input_normalization(path: Path, payload) -> str | None:
+    if isinstance(payload, dict) and isinstance(payload.get("config"), dict):
+        return direct_input_normalization(payload["config"])
+    meta_path = path.parent / "meta.json"
+    if not meta_path.is_file():
+        return None
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    if "input_normalization" not in meta:
+        return None
+    return canonical_sam2_input_normalization(meta["input_normalization"])
+
+
+def load_direct_ssl_lora_state(path: str | Path, config: dict):
+    """加载 SSL-LoRA，并拒绝同形状但输入合同不同的静默错配。"""
+    path = Path(path)
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    expected = direct_input_normalization(config)
+    actual = _ssl_artifact_input_normalization(path, payload)
+    if actual is None:
+        if expected != SAM2_INPUT_NORMALIZATION_NONE:
+            raise RuntimeError(
+                "normalized direct training requires SSL input_normalization "
+                f"metadata: {path}"
+            )
+        actual = SAM2_INPUT_NORMALIZATION_NONE
+    if actual != expected:
+        raise RuntimeError(
+            "SSL/direct input_normalization mismatch: "
+            f"ssl={actual}, direct={expected}, path={path}"
+        )
+    state = payload.get("lora_state_dict") if isinstance(payload, dict) else None
+    if state is None:
+        state = payload
+    if not isinstance(state, dict):
+        raise RuntimeError(f"invalid SSL LoRA artifact: {path}")
+    return state, actual
+
+
+def assert_direct_checkpoint_input_contract(model, payload: dict):
+    """在 resume/recovery 前验证模型与 checkpoint 的输入语义一致。"""
+    stored = payload.get("config")
+    if not isinstance(stored, dict):
+        raise RuntimeError("direct checkpoint does not contain its build config")
+    checkpoint_mode = direct_input_normalization(stored)
+    model_mode = canonical_sam2_input_normalization(
+        getattr(model.encoder, "input_normalization", SAM2_INPUT_NORMALIZATION_NONE)
+    )
+    if checkpoint_mode != model_mode:
+        raise RuntimeError(
+            "direct checkpoint input_normalization mismatch: "
+            f"checkpoint={checkpoint_mode}, model={model_mode}"
+        )
 
 
 def _load_complete_lora_state(model, state: dict) -> int:
@@ -114,6 +182,7 @@ def _build_direct_architecture(config: dict, device):
         device=str(device),
         freeze=True,
         sam2_repo_path=project_path(config, sam2_cfg["sam2_repo_path"]),
+        input_normalization=direct_input_normalization(config),
     )
     injected = inject_trunk_lora(
         encoder,
@@ -151,13 +220,12 @@ def build_direct_semantic_affinity_model(config: dict, device):
     ssl_path = Path(project_path(config, config["lora"]["init_from"]))
     if not ssl_path.is_file():
         raise FileNotFoundError(ssl_path)
-    ssl_state = torch.load(ssl_path, map_location="cpu", weights_only=False)
-    if isinstance(ssl_state, dict) and "lora_state_dict" in ssl_state:
-        ssl_state = ssl_state["lora_state_dict"]
+    ssl_state, ssl_contract = load_direct_ssl_lora_state(ssl_path, config)
     loaded = _load_complete_lora_state(model, ssl_state)
     return model, {
         "ssl_lora_path": str(ssl_path.resolve()),
         "loaded_tensors": loaded,
+        "input_normalization": ssl_contract,
     }
 
 
@@ -171,6 +239,7 @@ def load_direct_semantic_affinity_model(checkpoint_path, config: dict, device):
     architecture_config = _checkpoint_architecture_config(payload, config)
     architecture_config["lora"]["gradient_checkpointing"] = False
     model = _build_direct_architecture(architecture_config, device)
+    assert_direct_checkpoint_input_contract(model, payload)
     model.semantic_decoder.load_state_dict(
         payload["semantic_state_dict"], strict=True
     )
@@ -197,6 +266,32 @@ def configure_direct_training_phase(model, *, train_lora: bool):
         parameter.requires_grad_(True)
     for parameter in model.affinity_decoder.parameters():
         parameter.requires_grad_(True)
+    model.geometry_feature_adapter = None
+    model.geometry_highres_refiner = None
+
+
+def configure_direct_semantic_recovery(model):
+    """冻结 encoder/LoRA/affinity，仅允许语义解码头继续学习。"""
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+    model.encoder.trainable_lora = False
+    for parameter in model.semantic_decoder.parameters():
+        parameter.requires_grad_(True)
+    model.encoder.eval()
+    model.affinity_decoder.eval()
+    model.geometry_feature_adapter = None
+    model.geometry_highres_refiner = None
+
+
+def configure_direct_affinity_recovery(model):
+    """冻结 encoder/LoRA/semantic，仅允许 affinity 解码头继续学习。"""
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+    model.encoder.trainable_lora = False
+    for parameter in model.affinity_decoder.parameters():
+        parameter.requires_grad_(True)
+    model.encoder.eval()
+    model.semantic_decoder.eval()
     model.geometry_feature_adapter = None
     model.geometry_highres_refiner = None
 

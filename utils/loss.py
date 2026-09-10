@@ -230,7 +230,14 @@ class BoundaryLoss(nn.Module):
         ring_loss = (raised_ring * ring_mask).sum() / ring_mask.sum().clamp_min(1.0)
         return core_loss + self.ridge_ring_weight * ring_loss
 
-    def forward(self, pred, target, weight=None, instance_map=None):
+    def forward(
+        self,
+        pred,
+        target,
+        weight=None,
+        instance_map=None,
+        seg_weight=None,
+    ):
         """
         Args:
             pred: [B, 2/3, H, W] 模型输出
@@ -240,6 +247,8 @@ class BoundaryLoss(nn.Module):
                     - target[:, 0] 为二值语义掩码 (0/1)
                     - target[:, 1] 为二值边界掩码 (0/1)
             weight: [B, 1, H, W] 或 [B, H, W] EDT 边界权重图（可选）
+            seg_weight: [B, 1, H, W] 或 [B, H, W] 的语义有效性/权重图。
+                权重为 0 的 unknown 像素不进入 BCE、Dice 或 Tversky。
 
         Returns:
             tuple: (total_loss, loss_seg_value, loss_boundary_value)
@@ -252,6 +261,23 @@ class BoundaryLoss(nn.Module):
         seg_target = target[:, 0]         # [B, H, W] 二值语义掩码
         boundary_logits = pred[:, 1]      # [B, H, W] 边界 logits
         boundary_target = target[:, 1]    # [B, H, W] 二值边界掩码
+        if seg_weight is None:
+            semantic_weight = None
+            semantic_valid = None
+        else:
+            semantic_weight = seg_weight
+            if semantic_weight.dim() == 4 and semantic_weight.shape[1] == 1:
+                semantic_weight = semantic_weight[:, 0]
+            if semantic_weight.shape != seg_logits.shape:
+                raise ValueError(
+                    f"seg_weight {semantic_weight.shape} != logits {seg_logits.shape}"
+                )
+            semantic_weight = semantic_weight.to(
+                device=seg_logits.device, dtype=seg_logits.dtype
+            )
+            if torch.any(semantic_weight < 0):
+                raise ValueError("seg_weight must be non-negative")
+            semantic_valid = (semantic_weight > 0).to(seg_logits.dtype)
 
         # ---- 语义 BCE Loss ----
         self.last_semantic_instance_loss = 0.0
@@ -259,9 +285,15 @@ class BoundaryLoss(nn.Module):
         if self.freeze_seg:
             loss_seg = torch.tensor(0.0, device=pred.device, requires_grad=False)
         else:
-            loss_seg = F.binary_cross_entropy_with_logits(
-                seg_logits, seg_target, reduction="mean"
+            semantic_bce = F.binary_cross_entropy_with_logits(
+                seg_logits, seg_target, reduction="none"
             )
+            if semantic_weight is None:
+                loss_seg = semantic_bce.mean()
+            else:
+                loss_seg = (semantic_bce * semantic_weight).sum() / (
+                    semantic_weight.sum().clamp_min(1.0)
+                )
             if self.seg_dice_weight > 0:
                 # 语义 Dice：块状低频结构，BCE 在类不平衡下易钝；
                 # Dice 对掩码边界更敏感。两类平均 Dice (DSC_0+DSC_1)/2：
@@ -269,20 +301,46 @@ class BoundaryLoss(nn.Module):
                 # （无显著小样本特性）时会对珠光体不公平，改为对称处理。
                 seg_prob = torch.sigmoid(seg_logits)
                 eps = self.eps
+                dice_mask = (
+                    semantic_valid
+                    if semantic_valid is not None
+                    else torch.ones_like(seg_prob)
+                )
                 dice0 = 1.0 - (
-                    2.0 * ((1.0 - seg_prob) * (1.0 - seg_target)).sum() + eps
-                ) / ((1.0 - seg_prob).sum() + (1.0 - seg_target).sum() + eps)
+                    2.0
+                    * (
+                        (1.0 - seg_prob) * (1.0 - seg_target) * dice_mask
+                    ).sum()
+                    + eps
+                ) / (
+                    ((1.0 - seg_prob) * dice_mask).sum()
+                    + ((1.0 - seg_target) * dice_mask).sum()
+                    + eps
+                )
                 dice1 = 1.0 - (
-                    2.0 * (seg_prob * seg_target).sum() + eps
-                ) / (seg_prob.sum() + seg_target.sum() + eps)
+                    2.0 * (seg_prob * seg_target * dice_mask).sum() + eps
+                ) / (
+                    (seg_prob * dice_mask).sum()
+                    + (seg_target * dice_mask).sum()
+                    + eps
+                )
                 dice = 0.5 * (dice0 + dice1)
                 loss_seg = loss_seg + self.seg_dice_weight * dice
 
             if self.semantic_tversky_weight > 0:
                 seg_prob = torch.sigmoid(seg_logits)
-                true_positive = (seg_prob * seg_target).sum()
-                false_positive = (seg_prob * (1.0 - seg_target)).sum()
-                false_negative = ((1.0 - seg_prob) * seg_target).sum()
+                tversky_mask = (
+                    semantic_valid
+                    if semantic_valid is not None
+                    else torch.ones_like(seg_prob)
+                )
+                true_positive = (seg_prob * seg_target * tversky_mask).sum()
+                false_positive = (
+                    seg_prob * (1.0 - seg_target) * tversky_mask
+                ).sum()
+                false_negative = (
+                    (1.0 - seg_prob) * seg_target * tversky_mask
+                ).sum()
                 tversky = 1.0 - (true_positive + self.eps) / (
                     true_positive
                     + self.semantic_tversky_alpha * false_positive

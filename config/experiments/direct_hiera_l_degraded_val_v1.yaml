@@ -1,0 +1,17 @@
+# Hiera-L direct 双头固定退化诊断；不参与训练和 checkpoint 选择。
+_base: ../train/direct_ssl_semantic_affinity_hiera_l.yaml
+
+degraded_validation:
+  output_dir: outputs/analysis/direct_hiera_l_degraded_val_v1
+  variants:
+    - clean
+    - defocus_v1
+    - low_light_v1
+    - defocus_low_light_v1
+
+direct_semantic_affinity:
+  deployment_validation:
+    boundary_threshold: 0.59
+
+inference:
+  boundary_threshold: 0.59

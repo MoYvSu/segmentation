@@ -1,0 +1,31 @@
+# 唯一变化：用人工确认的 r=8 seeded-watershed 新 GT 替换旧 purified/LabelMe 混合 target。
+# 宽 gap 保持 unknown；模型、SSL-LoRA、SAM2 geometry、增强、训练周期和推理点均不变。
+_base: direct_ssl_semantic_affinity_imagenet_norm.yaml
+
+paths:
+  output_dir: outputs/20260907_203850_gtv2
+
+direct_semantic_affinity:
+  output_dir: outputs/20260907_203850_gtv2
+
+  manual_target:
+    enabled: true
+    dataset_dir: outputs/experiments/seeded_label_completion_o1/radius_8/derived_maps
+    boundary_dilation: 2
+
+  affinity_loss:
+    # 新 GT 中相邻实例的边界直接产生 negative pair；剩余 unknown 不参与监督。
+    manual_uncovered_as_boundary: false
+
+  monitor:
+    enabled: true
+    interval: 5
+    image_dir: data/unlabeled
+    manifest: config/monitor/unlabeled_holdout_v1.txt
+    num_images: 10
+    output_dir: outputs/20260907_203850_gtv2/monitor
+    preview_max_side: 512
+
+  loss_selection:
+    enabled: true
+    restore_warmup_best: true
