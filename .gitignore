@@ -27,3 +27,6 @@ data/sam2_geometry_g2/
 **/__pycache__/
 data/smoketest/
 .ipynb_checkpoints/
+.pytest_cache/
+# 赛题原始 PDF 为本地参考资料；规则摘要维护在 COMPETITION_RULES.md。
+/data/*.pdf

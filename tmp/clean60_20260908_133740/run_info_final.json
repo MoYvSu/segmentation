@@ -1,0 +1,71 @@
+{
+  "timestamp": "2026-09-08T14:44:50",
+  "phase": "direct_dual",
+  "tag": "ssl_sem_aff",
+  "command": "train_direct_semantic_affinity.py --config config/train/direct_gtv2_clean_60x60.yaml",
+  "git": null,
+  "env": {
+    "python": "3.12.3",
+    "platform": "Linux-5.15.0-125-generic-x86_64-with-glibc2.35",
+    "hostname": "autodl-container-cbfe4794e2-b3f19bec",
+    "torch": "2.8.0+cu128",
+    "cuda_available": true,
+    "cuda_device": "NVIDIA GeForce RTX 4090"
+  },
+  "initialization": {
+    "ssl_lora_path": "/root/autodl-tmp/segmentationv2_clean60_20260908_133740/outputs/20260908_133740_ssl60/best_lora.pth",
+    "loaded_tensors": 96,
+    "input_normalization": "imagenet_v1"
+  },
+  "split": {
+    "train": [
+      "train_001",
+      "train_002",
+      "train_003",
+      "train_004",
+      "train_005",
+      "train_006",
+      "train_007",
+      "train_008",
+      "train_171",
+      "train_173",
+      "train_174",
+      "train_175",
+      "train_176",
+      "train_346",
+      "train_347",
+      "train_348",
+      "train_349",
+      "train_557",
+      "train_558",
+      "train_623",
+      "train_658",
+      "train_659",
+      "train_707",
+      "train_874",
+      "train_875",
+      "train_888"
+    ],
+    "val": [
+      "train_172",
+      "train_351",
+      "train_686",
+      "train_872",
+      "train_873",
+      "train_889"
+    ],
+    "seed": 42,
+    "sam2_geometry_count": 0
+  },
+  "loss_scales": {
+    "semantic": 7.797723293304443,
+    "manual_affinity": 0.6930767446756363,
+    "pseudo_affinity": 1.0
+  },
+  "loss_selection": {
+    "metric": "val_objective_loss",
+    "mode": "min",
+    "phase_best_loss": {},
+    "phase_best_epoch": {}
+  }
+}

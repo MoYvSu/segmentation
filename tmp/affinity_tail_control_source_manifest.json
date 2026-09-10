@@ -1,0 +1,20 @@
+{
+  "experiment": "direct_ssl_semantic_affinity_hiera_l_affinity_tail_control",
+  "recorded_at": "2026-09-07",
+  "local_head": "2dbc9bf3231350e3b5fb668a198273cbde19f9b7",
+  "working_tree_dirty": true,
+  "source_checkpoint": {
+    "path": "/root/autodl-tmp/segmentationv2_hiera_l_20260906/outputs/direct_ssl_semantic_affinity_hiera_l_e31_semantic_recovery/checkpoint_epoch_0020.pth",
+    "sha256": "a228e6239a1937c10dc0407b5bc4582477bd397867dee67ea226b216fffe4948"
+  },
+  "transferred_sources": {
+    "train_direct_semantic_affinity.py": "e761a099dd89359be2c0539e699547de68251acd3819e88df2fd972fee23e52f",
+    "models/direct_semantic_affinity.py": "bcb02feefbfc21d74106a93e87ed6b22438a30c1e169107763157d5720b15349",
+    "config/train/direct_ssl_semantic_affinity_hiera_l_affinity_tail_control.yaml": "2ac2fd4330698764e0986a4fdeb773319829d201dcb11ab724915316ce02e073",
+    "tests/test_direct_semantic_affinity.py": "fb77bc916f300472f0033624deb81f0aabe08021387b1dac9733082301937a80"
+  },
+  "local_validation": {
+    "py_compile": "passed",
+    "pytest_tests/test_direct_semantic_affinity.py": "9 passed"
+  }
+}

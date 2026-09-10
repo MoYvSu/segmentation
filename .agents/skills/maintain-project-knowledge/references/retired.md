@@ -16,6 +16,17 @@ Use this shape:
 - replacement: active entry or documentation pointer, if any
 ```
 
+## 20260910-affinity-mean-ceiling
+
+- status: retired
+- retired_on: 2026-09-10
+- previous_scope: 从特定直线的 mean 融合峰值 .50，推断 clean60/e110 主要受读出错配限制。
+- reason: .50 只适用于特定界面方向，不是普遍上限。真实 mean/top2 对照中，新版匹配仅
+  792→806，mIoU .8408→.8335，低于既有 mean/high=.59 的820匹配；选定漏口多个原始方向
+  同时偏弱，且 top2 后种子仍穿界。读出有影响，但不足以作为首因或自动改配置的依据。
+- replacement: observations.md 的 20260908-clean60-affinity-calibration；详细证据见
+  docs/AFFINITY_CLEAN60_DIAGNOSIS_20260910.md。
+
 ## 20260831-center-offset-flow
 
 - status: retired

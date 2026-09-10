@@ -1,0 +1,1 @@
+{"images": [{"stem": "synthetic_smoke", "has_gt": true, "image_path": "synthetic", "native_shape": [192, 320], "grid_content_shape": [307, 512], "rois": [{"kind": "synthetic_only", "x0": 130, "y0": 80, "x1": 258, "y1": 208}]}]}

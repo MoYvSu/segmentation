@@ -1,9 +1,10 @@
 # 配置目录
 
-当前部署基线为 `inference/final_affinity_g4b_high065.yaml`：V6 语义锚点 + G4b 8 通道
-affinity，使用 `high=0.65`、seal2、局部重建与受阻分水岭。训练 checkpoint 只能按固定的
-完整部署路径验证晋级，Oracle GT 前景重建仅作诊断。完整协议见
-`docs/AFFINITY_DEPLOYMENT_EVALUATION.md`；V6/B2 配置仍保留为回退。
+当前部署主线为 `experiments/affinity_g4b_high065_semantic_e10a_cold.yaml`：E10a 语义 + G4b
+8 通道 affinity，使用 `high=0.65`、seal2、局部重建与受阻分水岭，推荐加载融合 checkpoint。
+`inference/final_affinity_g4b_high065.yaml` 保留 V6 语义锚点作为几何对照。候选必须比较完整
+最终输出，Oracle GT 前景重建仅作诊断。部署入口见 [PIPELINE](../docs/PIPELINE.md)，
+当前与历史训练配置的关系见 [实验索引](../docs/EXPERIMENT_INDEX.md)。
 
 黑盒确认的 E9 语义实验为 `train/stage2_semantic_e9_highres20.yaml`：以 V6 语义为零漂移锚点，
 冻结 semantic FPN/head、boundary、LoRA 与 G4b affinity，只训练 256→512→1024 的高分辨率
@@ -26,13 +27,34 @@ V6 教师只在高置信无标签像素提供衰减蒸馏。部署配置
 `train/affinity_geometry_g7_highres_short.yaml` 现只保留为历史对照：固定协议测试 A/B 显示其
 相较 G4b 进一步减少实例、加重欠分割风险，不再作为当前晋级目标。
 
-`train/direct_ssl_semantic_affinity.yaml` 是当前短训练链候选：从 SSL LoRA 同时冷启动 E10a 式
+`train/direct_ssl_semantic_affinity.yaml` 是历史短训练链入口：从 SSL LoRA 同时冷启动 E10a 式
 高分辨率 semantic head 与 8 通道 affinity head；先冻结 LoRA 预热，再联合微调。人工样本在
 同一增强下监督两头，经人工审核的 SAM2 候选只监督无类别 affinity；完整契约见
 `docs/DIRECT_SSL_SEMANTIC_AFFINITY.md`。首轮 Arm A 使用同目录下的 `_no_sam2.yaml`，先隔离检验
 最短链路；SAM2 数据审核完成后再运行原配置作为 Arm B。
 
-当前类别纠错候选为 `experiments/affinity_g4b_high065_semantic_dual_e7c_relaxed.yaml`：固定
+`train/direct_gtv2_clean_nativecrop_60x60.yaml` 是新 GT clean60 的局部采样候选：50% 整图、
+50% 原尺寸 1024 方窗，固定原 26/6 名单及损失尺度，沿用 60+60 阶段与验证损失选优。
+训练时关闭分水岭代理评分，完整部署比较在训练后单独执行。尺度证据、限制与运行记录见
+`docs/AFFINITY_CLEAN60_NATIVE_CROP_20260910.md`；当前部署主线不变。
+该候选已完成 120 轮，e86 损失最优；固定部署比较未恢复主线几何，不晋级。
+详见 `docs/AFFINITY_NATIVE_CROP_COMPARISON_20260910.md`。
+
+`train/mask_set_clean60.yaml` 是直接实例掩码集合实验：复用同一 SSL LoRA，以随机初始化的
+多尺度 FPN 和掩码引导查询共同预测每个实例的类别及形状；固定新 GT 与 26/6 划分，
+60 轮预热后恢复验证损失最优，再联训 LoRA 60 轮。入口为 `train_mask_set.py`，最终评估为
+`tools/evaluate_mask_set.py`；不走旧 affinity/分水岭，不据训练拟合替换主线。实现、预检与
+训练记录见 `docs/MASK_SET_CLEAN60_EXPERIMENT_20260910.md`。
+首轮 e118 最终输出低于主线，审计发现 BF16 下 mask embedding 投影意外无梯度；已作最小修复。
+结果与梯度证据见 `docs/MASK_SET_RESULTS_20260910.md`。修复后的同条件60+60轮已完成，
+e103损失最优，最终六图几何有改善但仍低于主线。见 `docs/MASK_SET_AMPFIX_RESULTS_20260910.md`。
+后续采用固定主线生成249张伪标签，保持原SSL，人工/伪标签采样1:3；比较
+`train/mask_set_teacher249.yaml` 与 `train/mask_set_teacher249_ownership.yaml`，后者仅增加
+像素归属损失。用户已认可预览；2026-09-10 22:41 核验时，249张伪标签已生成完成，
+第一组训练进行中，第二组等待顺序启动；不启用EMA。该时间点仅为快照。
+入口与状态契约见 `docs/MASK_SET_TEACHER_PSEUDO_EXPERIMENT_20260910.md`。
+
+历史类别纠错候选为 `experiments/affinity_g4b_high065_semantic_dual_e7c_relaxed.yaml`：固定
 V6 前景与 G4b 实例几何，仅用 E7b core 分数覆盖部分 V6 hard vote。阈值由缓存置信度扫参
 产生，不按实例面积拦截；严格版配置继续保留为反面对照。详见
 `docs/SEMANTIC_EXPERIMENT_E7C_20260828.md`。
@@ -59,7 +81,7 @@ G2 初始化、数据比例、增强、学习率和 20 epoch，只对人工 Labe
 历史 B2 边界主线使用 `train/stage2_refine_v6.yaml`：从 V6 best 初始化，只增加独立高分辨率
 refine residual，关闭中心头并保持原后处理不变；当前不再把它描述为唯一主线。
 
-当前建议的下一轮单变量实验是 `train/stage2_refine_v6_physaug.yaml`：继续从 V6 best
+历史物理增强单变量实验为 `train/stage2_refine_v6_physaug.yaml`：继续从 V6 best
 初始化 B2，但在 5 个 epoch 内只训练 refine head，关闭无标签一致性，加入显微成像物理增强。
 增强每次只抽取 1~2 项（曝光/白平衡、失焦、降采样、低频照明或低对比划痕），不制造
 圆形硬遮罩，也不改 GT。

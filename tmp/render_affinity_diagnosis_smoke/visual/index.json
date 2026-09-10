@@ -1,0 +1,87 @@
+{
+  "source_summary": "../summary.json",
+  "method": "Crops of cached whole-image inference and postprocessing; no local crop inference.",
+  "color_scales": {
+    "q_1_minus_affinity": [
+      0,
+      1
+    ],
+    "S_D2_D4_B": [
+      0,
+      1
+    ],
+    "B_minus_S": [
+      -0.5,
+      0.5
+    ]
+  },
+  "offsets_dy_dx": [
+    [
+      0,
+      1
+    ],
+    [
+      1,
+      0
+    ],
+    [
+      1,
+      1
+    ],
+    [
+      1,
+      -1
+    ],
+    [
+      0,
+      2
+    ],
+    [
+      2,
+      0
+    ],
+    [
+      0,
+      4
+    ],
+    [
+      4,
+      0
+    ]
+  ],
+  "id_colors": "Deterministic per numeric ID; no cross-model instance matching is implied.",
+  "gt_overlay": "Cyan valid GT partition lines; directions use GT cross-grain edge-start contours.",
+  "coordinate_convention": "Exclusive x1/y1. Decoder letterbox content starts at (0,0); native crops use floor starts and ceil ends.",
+  "images": [
+    {
+      "stem": "synthetic_smoke",
+      "has_gt": true,
+      "rois": [
+        {
+          "grid": {
+            "kind": "synthetic_only",
+            "x0": 130,
+            "y0": 80,
+            "x1": 258,
+            "y1": 208,
+            "index": 1,
+            "selection": "diagnostic selection from summary.json; not a random sample"
+          },
+          "native": {
+            "x0": 81,
+            "y0": 50,
+            "x1": 162,
+            "y1": 131
+          },
+          "directions": "synthetic_smoke_roi1_directions.png",
+          "pipeline": "synthetic_smoke_roi1_pipeline.png"
+        }
+      ],
+      "files": [
+        "synthetic_smoke_overview.png",
+        "synthetic_smoke_roi1_directions.png",
+        "synthetic_smoke_roi1_pipeline.png"
+      ]
+    }
+  ]
+}

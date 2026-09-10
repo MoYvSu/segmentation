@@ -1,0 +1,40 @@
+{
+  "train": [
+    "train_001",
+    "train_002",
+    "train_003",
+    "train_004",
+    "train_005",
+    "train_006",
+    "train_007",
+    "train_008",
+    "train_171",
+    "train_173",
+    "train_174",
+    "train_175",
+    "train_176",
+    "train_346",
+    "train_347",
+    "train_348",
+    "train_349",
+    "train_557",
+    "train_558",
+    "train_623",
+    "train_658",
+    "train_659",
+    "train_707",
+    "train_874",
+    "train_875",
+    "train_888"
+  ],
+  "val": [
+    "train_172",
+    "train_351",
+    "train_686",
+    "train_872",
+    "train_873",
+    "train_889"
+  ],
+  "seed": 42,
+  "sam2_geometry_count": 0
+}

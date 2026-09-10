@@ -3,6 +3,8 @@
 > 当前黑盒最佳：单一 E10a 语义解码器 + G4b `high=0.65` 封边/受阻分水岭，mIoU
 > `0.8381`、铁素体面积项 `0.8408`、总分 `83.94`。E9 保留为历史回退，不做连续融合。
 > 当前状态、入口与产物约定以 [docs/PIPELINE.md](docs/PIPELINE.md) 为准。
+> 当前候选为“复用 SSL 的直接实例掩码 + 主线伪标签”对照；实验关系与入口见
+> [docs/EXPERIMENT_INDEX.md](docs/EXPERIMENT_INDEX.md)，结果证据见 [output/README.md](output/README.md)。
 
 颜色先验分析已记录在 [docs/COLOR_SEPARABILITY.md](docs/COLOR_SEPARABILITY.md)。后续对话进程在
 讨论语义阈值、颜色辅助或数据增强前应先阅读该文档。
@@ -27,9 +29,13 @@
   `outputs/stage2_center_heatmap/best_model_stage2.pth` 不作为后续初始化主线。
 - **G7 已停止**：固定协议测试 A/B 显示其相较 G4b 进一步减少实例，欠分割风险加重；不再作为
   当前晋级目标。配置与说明仅保留为历史对照。
-- **当前训练猜想**：检验 `SSL LoRA → 随机 semantic/affinity 双头` 的短链路；先冻结 LoRA
-  预热双头，再以小学习率联合训练，并可加入经人工审核的无类别 SAM2 geometry affinity 监督。
-  详见 [docs/DIRECT_SSL_SEMANTIC_AFFINITY.md](docs/DIRECT_SSL_SEMANTIC_AFFINITY.md)。
+- **当前训练候选**：复用既有 SSL LoRA，直接预测实例掩码和类别。固定主线生成 249 张伪标签，
+  人工/伪标签采样 1:3；两组各训练 60+60 轮，比较是否加入像素归属约束，按同一人工验证损失
+  选优。2026-09-10 22:41 核验时伪标签已完成，第一组训练进行中；最终效果待完整输出比较。
+  详见 [主线伪标签实验](docs/MASK_SET_TEACHER_PSEUDO_EXPERIMENT_20260910.md)。
+- **已完成的短链对照**：新 GT semantic/affinity 双头及原尺寸局部采样均未恢复主线几何；
+  掩码模型修复 BF16 投影梯度后有所改善，仍未晋级。配置、结果与历史入口统一列在
+  [实验索引](docs/EXPERIMENT_INDEX.md)。
 - **审计结论（2026-08-27）**：G3 的验证提升尚不能等同于竞赛增益；G3 相比 G2 同时改变了
   native crop、采样、训练时长、学习率和外观增强，需在统一部署评估链上做单变量复验。详见
   [docs/AFFINITY_DEPLOYMENT_EVALUATION.md](docs/AFFINITY_DEPLOYMENT_EVALUATION.md)。

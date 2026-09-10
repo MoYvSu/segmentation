@@ -15,17 +15,32 @@ seal2、局部重建 → 受阻分水岭”，得分 `0.8381/0.8408/83.94`。E10
 G3/G4b 尚不能单独证明黑盒竞赛成绩提升，测试目检仍以欠分割为主要风险；GT 前景上的 Oracle
 图重建仅作诊断。graph-v1 `area200` 黑盒为 `0.8268/0.8365/83.17`，未超过 E10a watershed；
 graph-v2 `area150` 因笔直、失真的归并边界被目检淘汰。G7 在固定协议测试 A/B 中进一步
-减少实例并加重欠分割风险，已停止晋级。当前候选检验 `SSL LoRA → semantic/affinity 双头`
-短训练链，主线部署仍完全不变。详见
+减少实例并加重欠分割风险，已停止晋级。新 GT `SSL LoRA → semantic/affinity 双头` 与
+原尺寸局部采样已完成对照，尚未恢复主线几何。当前候选为复用 SSL 的直接实例掩码模型，
+使用固定主线伪标签并比较像素归属约束；部署主线仍为 E10a + G4b。详见
 [AFFINITY_GRAPH_AB_20260828.md](AFFINITY_GRAPH_AB_20260828.md)；历史 affinity 审计见
 [AFFINITY_DEPLOYMENT_EVALUATION.md](AFFINITY_DEPLOYMENT_EVALUATION.md)，短链实验见
 [DIRECT_SSL_SEMANTIC_AFFINITY.md](DIRECT_SSL_SEMANTIC_AFFINITY.md)。
+
+## 当前训练与实验导航
+
+当前配置为 `config/train/mask_set_teacher249.yaml` 与
+`config/train/mask_set_teacher249_ownership.yaml`。两组使用同一 SSL、249 张固定主线伪标签、
+人工/伪标签 1:3 采样及相同 60+60 轮日程，第二组增加像素归属损失；保留独立输出目录和
+原监督验证损失选优。最终评估使用 `tools/evaluate_mask_set.py`。
+
+2026-09-10 22:41 核验快照：伪标签生成完成，第一组训练进行中。服务器顺序作业已经启动，
+后续两组训练状态以 `state.json`、各自 `metrics.csv` 和完成标记为准。复现条件、路径和预览见
+[主线伪标签实验](MASK_SET_TEACHER_PSEUDO_EXPERIMENT_20260910.md)；其余短链、GT 与掩码模型
+结果见 [实验索引](EXPERIMENT_INDEX.md)。当前分数不支持候选替换部署主线。
+
+## 历史几何约束
 
 `outputs/stage2_center_heatmap/best_model_stage2.pth` 只保留为负面对照。现有中心 GT 由每个
 Labelme polygon 生成一个种子，polygon 与物理晶粒并不等价；同时中心损失和边界损失共享
 `boundary_fpn`，实测造成背景雾化、铁素体大块欠分割、珠光体碎裂及薄环嵌套。
 
-当前 B2 架构实验以 V6 权重为语义锚点，并满足：
+历史 B2 架构实验以 V6 权重为语义锚点，并满足：
 
 1. 语义路径冻结或低学习率保护；
 2. 边界 refine 路径独立训练，不接收不可靠中心标签的梯度；
@@ -44,14 +59,15 @@ Lab `L*` 的 pooled 单阈值平衡准确率约 `0.9917`，包含边界混色仍
 自适应软辅助或融合信号，不能把固定全局阈值直接写入实例分割主路径。
 
 后续对话进程接续本项目时，必须先查看 `docs/COLOR_SEPARABILITY.md`，特别是其中的限制条件和
-“不能替代语义头”的结论；当前 E1/V6 主线、实例 ID `<=65535` 约束和测试集无标签原则保持不变。
+“不能替代语义头”的结论。E1/V6 是该分析当时的参考模型；实例 ID `<=65535` 约束和测试集
+无标签原则继续适用，当前部署模型见本文开头。
 
 ## 入口
 
 ```bash
 conda activate sam2_env
 
-# 当前固定 G4b 部署基线
+# V6 语义 + G4b 几何的历史对照
 python tools/run_affinity_submission.py \
   --config config/inference/final_affinity_g4b_high065.yaml
 
@@ -65,11 +81,11 @@ python tools/run_fused_affinity_submission.py \
   --config config/experiments/affinity_g4b_high065_semantic_e10a_cold.yaml \
   --checkpoint outputs/deployment/e10a_g4b_fused.pth
 
-# 当前 E7b-A 语义专项训练（V6 初始化、decoder-only、20 epoch）
+# 历史 E7b-A 语义专项训练（V6 初始化、decoder-only、20 epoch）
 python train_stage2.py \
   --config config/train/stage2_semantic_e7b_decoder20.yaml
 
-# 当前 E9：冻结 V6/G4b，只训高分辨率语义残差（20 epoch）
+# 历史 E9：冻结 V6/G4b，只训高分辨率语义残差（20 epoch）
 python train_stage2.py \
   --config config/train/stage2_semantic_e9_highres20.yaml
 
@@ -77,7 +93,7 @@ python train_stage2.py \
 python train_stage2.py \
   --config config/train/stage2_semantic_e10a_cold20.yaml
 
-# SSL 直达双头：先检查数据门槛，再执行 5 epoch head warm-up + 20 epoch joint LoRA
+# 历史 SSL 直达双头入口：5 epoch head warm-up + 20 epoch joint LoRA
 python train_direct_semantic_affinity.py \
   --config config/train/direct_ssl_semantic_affinity.yaml --check
 python train_direct_semantic_affinity.py \
