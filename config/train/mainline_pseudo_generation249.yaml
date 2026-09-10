@@ -1,0 +1,16 @@
+# 固定 E10a+G4b 的硬伪标签；不伪装成人工 GT，不使用测试/留出图。
+_base: ../default_config.yaml
+
+pseudo_generation:
+  source_dir: data/unlabeled
+  output_dir: outputs/datasets/mainline_maskset249_v1
+  teacher_config: config/experiments/affinity_g4b_high065_semantic_e10a_cold.yaml
+  teacher_checkpoint: outputs/deployment/e10a_g4b_fused.pth
+  split_file: config/train/clean60_split.json
+  holdout_file: config/monitor/unlabeled_holdout_v1.txt
+  target_count: 249
+  query_capacity: 256
+  seed: 42
+  clarity_keep_fraction: 0.70
+  minimum_coverage: 0.95
+  input_size: 1024

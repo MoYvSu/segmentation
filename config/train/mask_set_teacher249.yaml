@@ -1,0 +1,15 @@
+# 主线硬伪标签对照：复用SSL，人工64 + 伪标签192次/epoch，仍为60+60轮。
+_base: mask_set_clean60.yaml
+
+mask_set:
+  output_dir: outputs/mask_set_teacher249
+  checkpoint_interval: 60
+  pseudo:
+    enabled: true
+    dataset_dir: outputs/datasets/mainline_maskset249_v1
+    image_dir: data/unlabeled
+    holdout_file: config/monitor/unlabeled_holdout_v1.txt
+    samples_per_epoch: 192
+    loss_weight: 0.5
+  loss:
+    ownership_weight: 0.0
