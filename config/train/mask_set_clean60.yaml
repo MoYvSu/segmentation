@@ -1,0 +1,70 @@
+# 新GT实例集合预测：复用同一SSL LoRA，随机初始化任务解码器。
+# 这是多尺度FPN上的Mask2Former式适配，不是官方完整架构复刻。
+_base: ../default_config.yaml
+
+paths:
+  output_dir: outputs/20260910_mask_set_clean60
+
+sam2:
+  input_normalization: imagenet_v1
+
+lora:
+  enabled: true
+  rank: 16
+  alpha: 32.0
+  target_layers: [attn.qkv, attn.proj]
+  init_from: outputs/20260908_133740_ssl60/best_lora.pth
+  gradient_checkpointing: true
+
+mask_set:
+  output_dir: outputs/20260910_mask_set_clean60
+  manual_target_dir: outputs/experiments/seeded_label_completion_o1/radius_8/derived_maps
+  split_file: config/train/clean60_split.json
+  input_size: 1024
+  mask_grid: 512
+  num_queries: 256
+  hidden_dim: 256
+  mask_dim: 128
+  num_heads: 8
+  decoder_layers: 6
+  ffn_dim: 1024
+  seed: 42
+  validation_seed: 20260910
+  head_warmup_epochs: 60
+  joint_epochs: 60
+  manual_samples_per_epoch: 64
+  batch_size: 1
+  num_workers: 2
+  prefetch_factor: 2
+  amp: true
+  amp_dtype: bfloat16
+  grad_clip: 1.0
+  weight_decay: 0.0001
+  minimum_learning_rate: 0.000001
+  checkpoint_interval: 10
+  learning_rates:
+    warmup_decoder: 0.0001
+    joint_decoder: 0.00002
+    joint_lora: 0.000002
+  loss:
+    class_weight: 2.0
+    mask_weight: 5.0
+    dice_weight: 5.0
+    eos_coef: 0.1
+    num_points: 4096
+    aux_weight: 1.0
+  augmentation:
+    horizontal_flip: true
+    vertical_flip: true
+    rotation90: true
+    brightness: 0.08
+    contrast: 0.08
+    gamma: 0.06
+    noise_probability: 0.10
+    noise_std: 0.01
+    blur_probability: 0.10
+  inference:
+    score_threshold: 0.5
+    mask_threshold: 0.5
+    min_area: 1
+    min_overlap_ratio: 0.0
