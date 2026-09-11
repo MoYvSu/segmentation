@@ -43,9 +43,14 @@ class FusedPhaseAffinityModel(nn.Module):
         self.geometry_feature_adapter = geometry_feature_adapter
         self.geometry_highres_refiner = geometry_highres_refiner
 
-    def forward(self, image: torch.Tensor):
+    def forward(self, image: torch.Tensor, *, return_features=False):
         features = self.encoder(image)
-        semantic_logits = self.semantic_decoder(features, image)
+        if return_features:
+            semantic_logits, semantic_feature = self.semantic_decoder(
+                features, image, return_features=True
+            )
+        else:
+            semantic_logits = self.semantic_decoder(features, image)
         geometry_features = features
         if self.geometry_feature_adapter is not None:
             geometry_features = self.geometry_feature_adapter(
@@ -66,6 +71,9 @@ class FusedPhaseAffinityModel(nn.Module):
         }
         if coarse_affinity_logits is not None:
             output["coarse_affinity_logits"] = coarse_affinity_logits
+        if return_features:
+            output["semantic_feature"] = semantic_feature
+            output["affinity_feature"] = affinity_output["affinity_feature"]
         return output
 
     def parameter_summary(self):

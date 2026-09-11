@@ -16,15 +16,20 @@ G3/G4b 尚不能单独证明黑盒竞赛成绩提升，测试目检仍以欠分�
 图重建仅作诊断。graph-v1 `area200` 黑盒为 `0.8268/0.8365/83.17`，未超过 E10a watershed；
 graph-v2 `area150` 因笔直、失真的归并边界被目检淘汰。G7 在固定协议测试 A/B 中进一步
 减少实例并加重欠分割风险，已停止晋级。新 GT `SSL LoRA → semantic/affinity 双头` 与
-原尺寸局部采样已完成对照，尚未恢复主线几何。当前候选为复用 SSL 的直接实例掩码模型，
-使用固定主线伪标签并比较像素归属约束；部署主线仍为 E10a + G4b。详见
+原尺寸局部采样已完成对照，尚未恢复主线几何。直接实例掩码路线经伪标签、归属与 EMA
+对照后仍有覆盖率和几何差距，2026-09-11停止继续投入。当前实验回到冻结 E10a + G4b 上的
+等参数 self/cross 小型修正；部署主线不变。详见
 [AFFINITY_GRAPH_AB_20260828.md](AFFINITY_GRAPH_AB_20260828.md)；历史 affinity 审计见
 [AFFINITY_DEPLOYMENT_EVALUATION.md](AFFINITY_DEPLOYMENT_EVALUATION.md)，短链实验见
 [DIRECT_SSL_SEMANTIC_AFFINITY.md](DIRECT_SSL_SEMANTIC_AFFINITY.md)。
 
 ## 当前训练与实验导航
 
-当前配置为 `config/train/mask_set_continue30.yaml` 与 `config/train/mask_set_consistency30.yaml`。
+当前配置为 `config/train/mainline_cross_head_ab.yaml`，入口 `train_mainline_cross_head.py`。
+两组只改变修正模块能否读取另一头的信息，保持原模型冻结、主线后处理不变；各20轮、每轮
+128次人工新GT采样，以五图验证损失选优。见[设计与运行记录](MAINLINE_CROSS_HEAD_EXPERIMENT_20260911.md)。
+
+上一轮配置为 `config/train/mask_set_continue30.yaml` 与 `config/train/mask_set_consistency30.yaml`。
 2026-09-11已从原归属组e120完成两组各30轮续训，第二组加入筛选后的EMA实例一致性。
 两组均保留每轮64次人工、192次固定伪标签更新及归属权重.5，只有一致性权重不同。
 损失最优为对照e143、一致性e144；同五图原尺寸评估匹配609→615，漏检计零IoU .6398→.6479，

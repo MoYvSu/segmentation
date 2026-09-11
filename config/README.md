@@ -6,6 +6,11 @@
 最终输出，Oracle GT 前景重建仅作诊断。部署入口见 [PIPELINE](../docs/PIPELINE.md)，
 当前与历史训练配置的关系见 [实验索引](../docs/EXPERIMENT_INDEX.md)。
 
+当前候选配置 `train/mainline_cross_head_ab.yaml` 冻结该部署主线，顺序比较读取自身信息与
+读取双方信息的87,113参数修正模块；原模型、数据、损失、采样与后处理固定，各20轮。
+入口 `train_mainline_cross_head.py` 先检查最终输出零兼容，再按五图验证损失选优。
+直接掩码路线已停止继续投入。详见[本轮说明](../docs/MAINLINE_CROSS_HEAD_EXPERIMENT_20260911.md)。
+
 黑盒确认的 E9 语义实验为 `train/stage2_semantic_e9_highres20.yaml`：以 V6 语义为零漂移锚点，
 冻结 semantic FPN/head、boundary、LoRA 与 G4b affinity，只训练 256→512→1024 的高分辨率
 residual。训练增加整实例平均概率目标和温和细实例权重，不依赖中心或最高置信像素。部署配置为

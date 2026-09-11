@@ -1,0 +1,67 @@
+# self/cross 仅改变第二条修正分支的信息来源。主线、GT、损失与预算固定。
+_base: ../experiments/affinity_g4b_high065_semantic_e10a_cold.yaml
+
+paths:
+  output_dir: outputs/mainline_cross_head_ab
+
+cross_head:
+  base_checkpoint: outputs/deployment/e10a_g4b_fused.pth
+  base_sha256: 53e1b5c6f9bf3973723c7bf4c6ce4ebd5eaeaa45210641df9de8f01e510c790f
+  output_dir: outputs/mainline_cross_head_ab
+  data_dir: data/raw
+  manual_target_dir: outputs/experiments/seeded_label_completion_o1/radius_8/derived_maps
+  split_file: config/train/clean60_split.json
+  # 保持近期五图报告口径；889 也不加入训练，不声称划分是全新独立测试集。
+  excluded_val_names: [train_889]
+  seed: 42
+  epochs: 20
+  samples_per_epoch: 128
+  batch_size: 1
+  num_workers: 2
+  learning_rate: 0.0001
+  minimum_learning_rate: 0.00001
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  input_size: 1024
+  affinity_grid: 512
+  architecture:
+    semantic_feature_channels: 256
+    affinity_feature_channels: 128
+    hidden_channels: 32
+    max_logit_delta: 1.0
+  native_crop:
+    enabled: true
+    probability: 0.50
+    size: 1024
+  augmentation:
+    horizontal_flip: true
+    vertical_flip: true
+    rotation90: true
+    brightness: 0.08
+    contrast: 0.08
+    gamma: 0.06
+    noise_probability: 0.0
+    blur_probability: 0.0
+  semantic_loss:
+    dice_weight: 0.30
+    instance_weight: 0.75
+    core_radius: 3
+    core_min_pixels: 12
+    core_boundary_threshold: 0.20
+    class_balance: true
+    ferrite_weight: 1.0
+    hard_gamma: 0.5
+    hard_floor: 0.50
+    pool_weight: 0.50
+    thin_weight: 1.50
+  affinity_loss:
+    negative_weight: 1.5
+    hard_negative_weight: 1.0
+    hard_negative_gamma: 2.0
+    manual_uncovered_as_boundary: false
+    normalize_edge_weights: true
+  # 只作零修正契约检查，不参与训练/选优；正式全输出比较待训练后单独执行。
+  zero_check_images: [data/raw/train_172.jpg, data/test/test_009.jpg]
+
+post_process:
+  save_visualization: false

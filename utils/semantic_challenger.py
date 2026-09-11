@@ -33,24 +33,27 @@ class SemanticChallenger(nn.Module):
         self.semantic_residual = copy.deepcopy(semantic_residual)
         self.semantic_residual_version = str(semantic_residual_version)
 
-    def forward(self, features, image=None):
+    def forward(self, features, image=None, *, return_features=False):
         semantic_feature = self.seg_fpn(features)
         logits = self.seg_branch(semantic_feature)
         if self.semantic_residual is None:
-            return logits
-        if image is None:
+            pass
+        elif image is None:
             raise ValueError("high-resolution semantic challenger requires image")
-        if self.semantic_residual_version != "highres_v1":
-            return logits + self.semantic_residual(semantic_feature, image)
-        delta = self.semantic_residual(
-            semantic_feature, image, coarse_logits=logits
-        )
-        return F.interpolate(
-            logits,
-            size=delta.shape[-2:],
-            mode="bilinear",
-            align_corners=True,
-        ) + delta
+        elif self.semantic_residual_version != "highres_v1":
+            logits = logits + self.semantic_residual(semantic_feature, image)
+        else:
+            delta = self.semantic_residual(
+                semantic_feature, image, coarse_logits=logits
+            )
+            logits = F.interpolate(
+                logits,
+                size=delta.shape[-2:],
+                mode="bilinear",
+                align_corners=True,
+            ) + delta
+        # 默认返回值及运算顺序不变；冻结主线的修正实验可复用已计算的特征。
+        return (logits, semantic_feature) if return_features else logits
 
 
 def _build_checkpoint_semantic_residual(checkpoint, reference_decoder):

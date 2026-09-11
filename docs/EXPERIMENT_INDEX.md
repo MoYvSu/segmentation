@@ -6,7 +6,12 @@
 
 ## 当前实验
 
-**当前已完成：** 2026-09-11完成e120的两组30轮短续训及同五图原尺寸评价。
+**当前开展：** 冻结 E10a+G4b，比较等参数的 self/cross 信息修正。两组各20轮，仅87,113个
+新参数可训练，保留原512 affinity网格及完整部署后处理。入口
+[mainline_cross_head_ab.yaml](../config/train/mainline_cross_head_ab.yaml) 与
+[训练脚本](../train_mainline_cross_head.py)，详见[实现与运行](MAINLINE_CROSS_HEAD_EXPERIMENT_20260911.md)。
+
+**上一轮已结束，掩码路线停止继续投入：** 2026-09-11完成e120的两组30轮短续训及同五图原尺寸评价。
 对照e143/EMA e144匹配609/615，漏检计零IoU .6398/.6479，未覆盖10.29%/8.91%；
 一致性有小幅收益，仍不替换主线。见[最终结果与清理记录](MASK_SET_CONSISTENCY_RESULTS_20260911.md)。
 入口为[仅续训](../config/train/mask_set_continue30.yaml)、[一致性](../config/train/mask_set_consistency30.yaml)
