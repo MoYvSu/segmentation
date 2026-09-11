@@ -27,7 +27,10 @@ graph-v2 `area150` 因笔直、失真的归并边界被目检淘汰。G7 在固�
 
 GT affinity完整部署检验已完成：在同五图新GT上，保留正常E10a，只将有效连接替换为GT的0/1，
 原mean/high=.65链路匹配715→1；只改理想输入的短程融合为top2恢复724。当前监督表示与读出
-存在明确失配，应先解决相容性再追加训练；真实权重是否受益仍需独立对照，部署主线不变。
+存在明确失配。对依赖正确0/1连接恢复实例的新设计，应先检查这一相容性；这不是所有学习模型
+的通用性能门槛，部署主线不变。
+真实G4b/e110的六图mean→top2已测：匹配854→856/792→806，且有效匹配mIoU均下降，
+不支持直接更换融合或认定失配是模型退步的首因。见[既有对照](AFFINITY_CLEAN60_DIAGNOSIS_20260910.md)。
 见[完整检验与定位报告](AFFINITY_GT_DEPLOYMENT_ORACLE_20260911.md)。
 
 当前配置为 `config/train/mainline_cross_head_ab.yaml`，入口 `train_mainline_cross_head.py`。

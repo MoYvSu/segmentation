@@ -1,0 +1,212 @@
+{
+  "schema": "segmentationv2.asset_inventory.v1",
+  "generated": "2026-09-11",
+  "note": "所有 sha256 均为本次实际计算。anchor 字段标明该哈希被哪份已存档文件独立记录。",
+  "servers": {
+    "bjb1": {
+      "ssh": "ssh -p 23411 root@connect.bjb1.seetacloud.com",
+      "container": "autodl-container-cbfe4794e2-b3f19bec",
+      "gpu": "NVIDIA GeForce RTX 4090 24564 MiB",
+      "role": "train_and_deploy",
+      "disk": { "mount": "/root/autodl-tmp", "size": "50G", "used": "18G", "avail": "33G" }
+    },
+    "bjb2": {
+      "ssh": "ssh -p 15930 root@connect.bjb2.seetacloud.com",
+      "container": "autodl-container-smyulw5z7c-6ebed1b6",
+      "gpu": null,
+      "role": "archive",
+      "disk": { "mount": "/root/autodl-tmp", "size": "50G", "used": "31G", "avail": "20G" }
+    }
+  },
+  "shared_filesystem": {
+    "mount": "/autodl-fs/data",
+    "backing": "AutoFS:fsbjbsecond929794",
+    "size": "200G",
+    "used": "721M",
+    "writable": true,
+    "shared_between": ["bjb1", "bjb2"]
+  },
+  "assets": [
+    {
+      "name": "fused_deployment_package",
+      "host": "bjb1",
+      "path": "/root/autodl-tmp/segmentationv2_pseudo_20260908/outputs/deployment/e10a_g4b_fused.pth",
+      "size": 326836899,
+      "sha256": "53e1b5c6f9bf3973723c7bf4c6ce4ebd5eaeaa45210641df9de8f01e510c790f",
+      "anchor": "docs/HANDOFF_MAINLINE_ABLATION_20260911.md",
+      "status": "verified",
+      "note": "E10a epoch19 + G4b epoch20 + shared encoder, 81.667394M params. bjb2 亦有一份同大小副本。"
+    },
+    {
+      "name": "v6_anchor",
+      "host": "bjb1",
+      "path": "/root/autodl-tmp/segmentationv2/outputs/stage2_v6/best_model_stage2.pth",
+      "size": 100791707,
+      "sha256": "c4c9827a18ecdda105056d502e5f93a92fe7fc93ada24d63886b20726c7ec557",
+      "anchor": "docs/HANDOFF_MAINLINE_ABLATION_20260911.md + 部署包 sources.reference",
+      "status": "verified"
+    },
+    {
+      "name": "ssl_lora",
+      "host": "bjb1",
+      "path": "/root/autodl-tmp/segmentationv2/outputs/lora_pretrain/lora_state_dict.pth",
+      "size": 4110259,
+      "sha256": null,
+      "anchor": null,
+      "status": "present_not_hashed"
+    },
+    {
+      "name": "stage1_lora",
+      "host": "bjb1",
+      "path": "/root/autodl-tmp/segmentationv2/outputs/stage1_lora/best_model.pth",
+      "size": 157366961,
+      "sha256": null,
+      "anchor": null,
+      "status": "present_not_hashed"
+    },
+    {
+      "name": "joint_v3",
+      "host": "bjb1",
+      "path": "/root/autodl-tmp/segmentationv2/outputs/stage2_joint_v3/best_model_stage2.pth",
+      "size": 157371515,
+      "sha256": null,
+      "anchor": null,
+      "status": "present_not_hashed"
+    },
+    {
+      "name": "semantic_boundary_cache",
+      "host": "bjb1",
+      "path": "/root/autodl-tmp/segmentationv2/outputs/pseudo_labels/semantic_boundary/boundary_probs.npy",
+      "size": 2097152128,
+      "sha256": null,
+      "anchor": null,
+      "status": "present_not_hashed"
+    },
+    {
+      "name": "sam2_backbone_weights",
+      "host": "bjb1",
+      "path": "/root/autodl-tmp/segmentationv2/weights/sam2_hiera_base_plus.pt",
+      "size": 323493298,
+      "sha256": null,
+      "anchor": "config/reproduction_mainline_8394_from_v6.yaml 记录 d0bb7f236400a49669ffdd1be617959a8b1d1065081789d7bbff88eded3a8071",
+      "status": "present_not_hashed"
+    },
+    {
+      "name": "affinity_g0",
+      "host": "bjb2",
+      "path": "/root/autodl-tmp/segmentationv2_repo/outputs/affinity_geometry_g0/latest_affinity.pth",
+      "size": 22703830,
+      "sha256": "8ea618291d6927f2f87222ca14f4bee4aa0ff68c4a51db9c412110c51c88f4d5",
+      "anchor": "config/reproduction_mainline_8394_from_v6.yaml",
+      "status": "verified",
+      "restored_to_bjb1": "/root/autodl-tmp/_restored_assets_20260911/outputs/affinity_geometry_g0/"
+    },
+    {
+      "name": "affinity_g0_long",
+      "host": "bjb2",
+      "path": "/root/autodl-tmp/segmentationv2_repo/outputs/affinity_geometry_g0_long/latest_affinity.pth",
+      "size": 22704022,
+      "sha256": "d5a7579ddd3b6db93c058467b64a1609fde625d43a6c86a3ff1e9518cb01a845",
+      "anchor": "config/reproduction_mainline_8394_from_v6.yaml",
+      "status": "verified",
+      "restored_to_bjb1": "/root/autodl-tmp/_restored_assets_20260911/outputs/affinity_geometry_g0_long/"
+    },
+    {
+      "name": "affinity_g1",
+      "host": "bjb2",
+      "path": "/root/autodl-tmp/segmentationv2_repo/outputs/affinity_geometry_g1/best_affinity.pth",
+      "size": 22705212,
+      "sha256": "635c6b7e34bd0b9603ed55fed3e291c0c944db460f6a6c6c6ef9d5a725db1bd4",
+      "anchor": "config/reproduction_mainline_8394_from_v6.yaml",
+      "status": "verified",
+      "restored_to_bjb1": "/root/autodl-tmp/_restored_assets_20260911/outputs/affinity_geometry_g1/"
+    },
+    {
+      "name": "affinity_g2_sam2",
+      "host": "bjb2",
+      "path": "/root/autodl-tmp/segmentationv2_repo/outputs/affinity_geometry_g2_sam2/best_affinity.pth",
+      "size": 22705788,
+      "sha256": "96f9456e4562e9e0a8fa715160582c8f8aee28deceaf32324ac38ae1570ed445",
+      "anchor": null,
+      "status": "verified",
+      "restored_to_bjb1": "/root/autodl-tmp/_restored_assets_20260911/outputs/affinity_geometry_g2_sam2/"
+    },
+    {
+      "name": "affinity_g4b",
+      "host": "bjb2",
+      "path": "/root/autodl-tmp/segmentationv2_repo/outputs/affinity_geometry_g4b_gap_weight020/latest_affinity.pth",
+      "size": 22706902,
+      "sha256": "1334fdcc8472b4da67386b76b25d9099ad6bcef10b6bd9c77ae6908658b8c619",
+      "anchor": "部署包 sources.affinity.sha256",
+      "status": "verified",
+      "restored_to_bjb1": "/root/autodl-tmp/_restored_assets_20260911/outputs/affinity_geometry_g4b_gap_weight020/"
+    },
+    {
+      "name": "e10a_cold",
+      "host": "bjb2",
+      "path": "/root/autodl-tmp/segmentationv2_repo/outputs/stage2_semantic_e10a_cold20/best_model_stage2.pth",
+      "size": 103995835,
+      "sha256": "1380cf14d63fdbc17dadf2ac73dc47d7c33a7e0f5a61e5edb9d7280ec8b80b91",
+      "anchor": "部署包 sources.semantic.sha256",
+      "status": "verified",
+      "restored_to_bjb1": "/root/autodl-tmp/_restored_assets_20260911/outputs/stage2_semantic_e10a_cold20/"
+    },
+    {
+      "name": "sam2_geometry_g2_dataset",
+      "host": "bjb2",
+      "path": "/root/autodl-tmp/segmentationv2_repo/data/sam2_geometry_g2/",
+      "size": 157286400,
+      "sha256": null,
+      "anchor": null,
+      "status": "verified_by_file_count",
+      "file_count": 193,
+      "note": "含 boundaries/ manifest.jsonl masks/ overlays/。缺 approval.json（历来不存在）。",
+      "restored_to_bjb1": "/root/autodl-tmp/_restored_assets_20260911/data/sam2_geometry_g2/"
+    }
+  ],
+  "also_on_bjb2_not_transferred": [
+    "outputs/affinity_geometry_g3_native_crop/",
+    "outputs/affinity_geometry_g5_feature_adapter/",
+    "outputs/affinity_geometry_g6_negative_tail/",
+    "outputs/affinity_geometry_g7_highres_short/",
+    "outputs/affinity_geometry_oracle/",
+    "outputs/stage2_semantic_e7b_decoder20/",
+    "outputs/stage2_semantic_e8_residual20/",
+    "outputs/stage2_semantic_e9_highres20/",
+    "outputs/experiments/",
+    "outputs/packages/G4b_high065_submission_20260828.zip",
+    "data/purified_gt_uncovered/ (32 items)"
+  ],
+  "transfers": [
+    {
+      "date": "2026-09-11",
+      "direction": "bjb2 -> /autodl-fs/data/asset_transfer_20260911 -> bjb1",
+      "staging": "/autodl-fs/data/asset_transfer_20260911/",
+      "destination": "/root/autodl-tmp/_restored_assets_20260911/",
+      "files": 1082,
+      "size": "721M",
+      "manifest": "MANIFEST.sha256",
+      "verification": "1082/1082 OK, 0 failures"
+    }
+  ],
+  "cleanup": [
+    {
+      "date": "2026-09-11",
+      "action": "delete",
+      "target": "segmentationv2.zip (4,061,095,368 bytes) x3",
+      "locations": [
+        "bjb1:/root/autodl-tmp/segmentationv2.zip",
+        "bjb2:/root/autodl-tmp/segmentationv2.zip",
+        "/autodl-fs/data/segmentationv2.zip"
+      ],
+      "sha256_all_three_identical": "8b1c841f8d2e8ffbd15f0bafd069e8ecd7c7e48b2d8afce8bd39b8a906b37d8b",
+      "authorization": "user confirmed old snapshots, explicitly approved deletion",
+      "freed": { "bjb1": "29G -> 33G avail", "bjb2": "16G -> 20G avail", "shared": "4G" }
+    }
+  ],
+  "known_gaps": [
+    "data/sam2_geometry_g2/approval.json never existed; user has always passed by default. repro/train.py will block on it.",
+    "bjb1:/root/autodl-tmp/segmentationv2_main is a broken git worktree (.git points at segmentationv2/.git/worktrees/segmentationv2_main which is gone).",
+    "Remote https://github.com/MoYvSu/segmentation.git is public; local branch codex/mainline-cross-head (67360e4) is NOT pushed."
+  ]
+}
