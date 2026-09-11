@@ -21,6 +21,21 @@ Use this shape:
 - limits: known exceptions or counterevidence
 ```
 
+## 20260911-gt-affinity-deployment-readout
+
+- status: observation
+- last_verified: 2026-09-11
+- scope: radius-8新GT、512八方向连接、正常E10a、gated/mean/high=.65及完整主线后处理
+- finding: 对当前方向连接定义，预测更接近正确0/1不保证部署更好。相同五图的GT有效连接
+  精确替换后，匹配715→1、共用主导marker的GT65→789；仅将融合改成top2恢复724匹配。
+  证明理想方向连接与现有均值/阈值组合不相容，不能默认后处理已经通过理想输入检查。
+- evidence: docs/AFFINITY_GT_DEPLOYMENT_ORACLE_20260911.md及两份output汇总。主线五图PNG/JSON
+  与历史逐字节一致；GT目标与训练生成器一致，unknown原预测不变，正常E10a及后处理固定。
+- reuse_hypothesis: 在继续优化连接损失前，把GT直接生成的表示送入实际完整读出，检查最终
+  分区；不要用GT前景连通图Oracle代替此检查。融合改法仍需在真实模型上独立验证。
+- limits: GT参与输入，95.239代理分不是模型成绩。top2仅匹配724/790，尚未排除余下形态处理、
+  网格和unknown影响；本次不证明e110/cross-head退步主要由融合导致。特定方向.50仍非普遍上限。
+
 ## 20260911-cross-head-refinement-readout
 
 - status: observation
@@ -44,7 +59,7 @@ Use this shape:
 - scope: radius-8 新 GT 的 clean60/e110、50% 原尺寸裁剪/e86与 E10a+G4b 的固定部署比较
 - finding: 局部裁剪推理的正面响应不等于裁剪训练能改善整图部署。固定 E10a 与完整主线后处理，
   e110→裁剪e86 的六图 mIoU 全部下降，原六对漏界GT的核心仍共用种子和最终实例；本候选不晋级。
-  新 GT 保留，采样增强不足以解释或解决主线差距。mean/top2实测也不支持把融合视为已证首因。
+  新 GT 保留，采样增强不足以解释或解决主线差距。真实e110的mean/top2实测不支持把融合视为已证首因。
 - evidence: G4b/e110/e86 的有效匹配854/792/771，mIoU .8482/.8408/.8220；跨粒affinity均值
   .0740/.1093/.1281。e110→e86 的>.5极强误连比例2.128%→1.873%，跨界起点B>.65
   89.18%→92.34%，但共用主要预测区域的GT177→210，明显切成多块的GT162→202。
@@ -59,7 +74,8 @@ Use this shape:
   固定旧ROI/GT对，保留各自encoder/归一化；更换读出需给两个模型都做对照。
 - verification_gap: 历史G4b实际split未找到；当前G4b/Direct算法不同不能当作已证历史泄漏。
   e110/e86同26/6名单和loss尺度，但跳过校准改变随机轨迹，无重复种子；验证与测试缩放不同，
-  六图结果不证明所有测试图必退步。理想GT连接经过完整后处理的相容性、初始化等因果尚未隔离。
+  六图结果不证明所有测试图必退步。2026-09-11的理想GT连接完整后处理检验已证实读出失配，
+  见20260911-gt-affinity-deployment-readout；其对真实e110差距的贡献及初始化等因果仍未隔离。
 - limits: 不否定新GT，不以无标签实例数量评价精度，不因代理总分上涨替换官方83.94主线。
   保留损失选优和SSL→双头预热→联合→固定部署验证短链。特定方向直线的.50合成峰值不是
   普遍上限，已退休该强解释，见retired.md的20260910-affinity-mean-ceiling条目。
