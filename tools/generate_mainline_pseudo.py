@@ -45,9 +45,13 @@ def excluded_names(config, cfg):
             | {p.stem for p in raw.glob("*.json")})
 
 
-def select_candidates(raw, excluded, keep_fraction, seed):
+def select_candidates(raw, excluded, keep_fraction, seed, *, excluded_image_dir=None):
     """统一1024尺度的灰度Laplacian方差仅用于粗排清晰度，不代表分割正确率。"""
     rows, excluded_hashes = [], set()
+    if excluded_image_dir is not None:
+        for path in sorted(Path(excluded_image_dir).iterdir()):
+            if path.stem in excluded and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}:
+                excluded_hashes.add(digest(path))
     for path in sorted(raw.iterdir()):
         if path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}:
             continue
@@ -77,6 +81,7 @@ def select_candidates(raw, excluded, keep_fraction, seed):
     random.Random(seed).shuffle(retained)
     return retained, {"eligible_unique_images": len(unique), "clarity_pool_images": len(retained),
                       "clarity_keep_fraction": keep_fraction, "excluded_names": sorted(excluded),
+                      "external_manual_content_checked": excluded_image_dir is not None,
                       "selection": "top clarity fraction, seeded shuffle; no GT or teacher score ranking"}
 
 
@@ -139,6 +144,8 @@ def run(args):
         previous = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
         if previous.get("format") != PSEUDO_FORMAT or previous.get("generation_config") != cfg:
             raise ValueError("resume requires the same pseudo generation config and format")
+        if not previous.get("selection", {}).get("external_manual_content_checked", False):
+            raise ValueError("legacy pseudo pool lacks cross-directory content isolation; preserve it and use a reviewed disjoint subset or new output")
         if previous.get("status") == "complete":
             if previous.get("sample_count") != count:
                 raise ValueError("completed dataset count changed")
@@ -158,7 +165,8 @@ def run(args):
         if set(selection["excluded_names"]) != excluded_names(config, cfg):
             raise ValueError("source exclusions changed while resuming")
     else:
-        candidates, selection = select_candidates(raw, excluded_names(config, cfg), fraction, int(cfg["seed"]))
+        candidates, selection = select_candidates(raw, excluded_names(config, cfg), fraction, int(cfg["seed"]),
+            excluded_image_dir=project_path(config, config["paths"]["raw_data_dir"]))
         if len(candidates) < count:
             raise ValueError(f"only {len(candidates)} eligible source candidates for requested {count}")
         write_json(directory / "selection.json", {**selection, "candidates": candidates})

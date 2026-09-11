@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 import cv2
@@ -20,7 +21,7 @@ PSEUDO_FORMAT = "mainline_pseudo_instances_v1"
 MAX_PSEUDO_IMAGES = 249
 
 
-def read_pseudo_manifest(directory, raw_dir, *, excluded_names, query_capacity):
+def read_pseudo_manifest(directory, raw_dir, *, excluded_names, query_capacity, excluded_image_dir=None):
     directory, raw_dir = Path(directory), Path(raw_dir)
     manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
     if manifest.get("format") != PSEUDO_FORMAT or manifest.get("label_source") != "mainline_pseudo":
@@ -39,6 +40,17 @@ def read_pseudo_manifest(directory, raw_dir, *, excluded_names, query_capacity):
     hashes = [r["source_sha256"] for r in rows]
     if len(set(hashes)) != len(hashes):
         raise ValueError("duplicate source image content in pseudo dataset")
+    if excluded_image_dir is not None:
+        excluded = {Path(name).stem for name in excluded_names}
+        forbidden = set()
+        for folder in (raw_dir, Path(excluded_image_dir)):
+            for path in folder.iterdir():
+                if path.stem in excluded and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}:
+                    with path.open("rb") as stream:
+                        forbidden.add(hashlib.file_digest(stream, "sha256").hexdigest())
+        aliases = [row["stem"] for row in rows if row["source_sha256"] in forbidden]
+        if aliases:
+            raise ValueError(f"pseudo training leaks excluded image content under aliases: {aliases}")
     classes = {}
     for row in rows:
         stem = row["stem"]

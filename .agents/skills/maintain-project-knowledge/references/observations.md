@@ -407,7 +407,7 @@ Use this shape:
 ## 20260910-maskset-ownership-versus-coverage
 
 - status: observation
-- last_verified: 2026-09-10
+- last_verified: 2026-09-11
 - scope: 独立sigmoid掩码、阈值部署与新增跨query归属交叉熵的组合
 - finding: 归属softmax只比较query之间的相对分数，不能单独保证绝对掩码覆盖率；所有logits
   同减20时归属损失不变，但掩码可以全部低于推理阈值。应保留BCE/Dice正负监督与unknown-ignore。
@@ -415,4 +415,26 @@ Use this shape:
   及docs/MASK_SET_TEACHER_PSEUDO_EXPERIMENT_20260910.md；GPU混合来源两阶段小验证通过。
 - reuse_hypothesis: 给掩码集合增加互斥/归属项时，同时检查相对分配与实际sigmoid阈值输出；
   不凭“softmax和为1”宣布覆盖或几何已修复。
-- verification_gap: 249张主线伪标签及归属约束正式A/B尚未完成，不能宣称最终实例分割增益。
+- evidence_update: 249张主线伪标签正式同预算A/B已完成。在排除已见图889后的五图上，归属0.5
+  相对0减少碎片，GT惩罚IoU由.6342降至.6285，原尺寸已知区未分配率由7.60%升至9.97%；512网格原始重叠
+  在六图仅略减，在四张无标签留出图反而更多。见docs/MASK_SET_TEACHER_RESULTS_20260911.md。
+- verification_gap: 单种子结果支持同时检查覆盖的必要性，未证明整体logits平移是空缺增加原因，
+  未验证其他归属权重。2026-09-11同预算续训/EMA对照使未覆盖10.29%→8.91%，但原始候选平均
+  重叠次数1.441→1.469，漏检计零IoU仅.6398→.6479；一致性部分改善覆盖，未解决结构差距。
+  见docs/MASK_SET_CONSISTENCY_RESULTS_20260911.md。保持候选观察，不晋升为通用训练规则。
+
+## 20260911-cross-directory-image-aliases
+
+- status: observation
+- last_verified: 2026-09-11
+- scope: 人工data/raw与赛方data/unlabeled分开组织的实例伪标签与在线一致性数据
+- finding: 两目录的同名图像不保证同内容；人工图又可能以别名存在于无标签目录。只在无标签
+  目录内按排除名称建立内容摘要，仍会漏掉人工图别名，必须读取人工目录的真实排除图像。
+- evidence: 32张人工图在无标签池有不同名称的同内容图；旧249张固定伪标签包含9个别名，
+  其中train_589对应验证图train_889。见docs/MASK_SET_CONSISTENCY_EXPERIMENT_20260911.md及
+  output/20260911_091212_consistency_launch/content_alias_audit.json。生成器和读取器加入跨目录
+  内容检查，相应回归测试通过。
+- reuse_hypothesis: 跨目录隔离同时使用图像名称和实际文件内容，保留别名关系；发现亲本已见过
+  某验证图时，不能仅删除新阶段样本便称该图独立，应从选优与独立评价中显式排除。
+- limits: 文件SHA256发现的是字节相同图像，不保证发现重编码或裁剪副本；本次没有推断这些
+  变体。旧训练和选择历史保留，新阶段两组共同去除9个伪标签别名并改用五图损失选优。

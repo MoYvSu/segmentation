@@ -50,9 +50,17 @@ V6 教师只在高置信无标签像素提供衰减蒸馏。部署配置
 e103损失最优，最终六图几何有改善但仍低于主线。见 `docs/MASK_SET_AMPFIX_RESULTS_20260910.md`。
 后续采用固定主线生成249张伪标签，保持原SSL，人工/伪标签采样1:3；比较
 `train/mask_set_teacher249.yaml` 与 `train/mask_set_teacher249_ownership.yaml`，后者仅增加
-像素归属损失。用户已认可预览；2026-09-10 22:41 核验时，249张伪标签已生成完成，
-第一组训练进行中，第二组等待顺序启动；不启用EMA。该时间点仅为快照。
-入口与状态契约见 `docs/MASK_SET_TEACHER_PSEUDO_EXPERIMENT_20260910.md`。
+像素归属损失。两组已于2026-09-11完成120轮，损失最优为e112/e120；当前配置均不启用EMA。
+原尺寸结果有进步但仍低于主线，归属项改善碎片并增加空缺；其中验证图889的跨目录别名曾进入
+旧伪标签，六图数值须按[结果范围更正](../docs/MASK_SET_TEACHER_RESULTS_20260911.md)解释。入口与状态契约见
+`docs/MASK_SET_TEACHER_PSEUDO_EXPERIMENT_20260910.md`。
+
+当前已完成 `train/mask_set_continue30.yaml` 与 `train/mask_set_consistency30.yaml`：从同一e120
+续训30轮，前者一致性权重0、后者.2，其他训练设置相同。共同使用240张去除人工别名的固定
+伪标签，后者在线使用912张合规无标签图；checkpoint明确排除已见图889，五图损失选优。
+新读取入口会拒绝含跨目录排除别名的旧249张清单。见[运行方案](../docs/MASK_SET_CONSISTENCY_EXPERIMENT_20260911.md)。
+损失最优为e143/e144；五图最终匹配609/615、漏检计零IoU .6398/.6479，EMA收益较小，
+主线仍保持E10a+G4b。见[最终结果](../docs/MASK_SET_CONSISTENCY_RESULTS_20260911.md)。
 
 历史类别纠错候选为 `experiments/affinity_g4b_high065_semantic_dual_e7c_relaxed.yaml`：固定
 V6 前景与 G4b 实例几何，仅用 E7b core 分数覆盖部分 V6 hard vote。阈值由缓存置信度扫参

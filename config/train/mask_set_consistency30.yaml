@@ -1,0 +1,7 @@
+# 唯一相对continue30的训练变化：每4个监督步附加筛选后的EMA实例一致性。
+_base: mask_set_continue30.yaml
+
+mask_set:
+  output_dir: outputs/mask_set_consistency30
+  consistency:
+    weight: 0.2

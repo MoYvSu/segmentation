@@ -6,6 +6,16 @@
 
 ## 当前实验
 
+**当前已完成：** 2026-09-11完成e120的两组30轮短续训及同五图原尺寸评价。
+对照e143/EMA e144匹配609/615，漏检计零IoU .6398/.6479，未覆盖10.29%/8.91%；
+一致性有小幅收益，仍不替换主线。见[最终结果与清理记录](MASK_SET_CONSISTENCY_RESULTS_20260911.md)。
+入口为[仅续训](../config/train/mask_set_continue30.yaml)、[一致性](../config/train/mask_set_consistency30.yaml)
+和[顺序作业](../tools/run_mask_set_consistency_ab.py)。启动前修复跨目录图像别名：两组共同保留240张
+固定伪标签，在线池912张；原验证图889曾以train_589进入旧伪标签，后续五图损失选优与默认评价。
+路径、预检和完整限制见[当前实验说明](MASK_SET_CONSISTENCY_EXPERIMENT_20260911.md)。
+
+## 上一轮伪标签与归属对照
+
 复用同一 SSL LoRA，训练直接输出实例掩码及类别的模型。固定主线生成 249 张伪标签；
 人工与伪标签每轮分别抽样 64、192 次，伪标签损失系数 0.5。两组都从相同 SSL 和随机种子
 开始，各训练 60 轮解码器预热与 60 轮 LoRA 联训，仅第二组加入权重 0.5 的像素归属损失。
@@ -16,12 +26,14 @@
 | 生成伪标签 | [mainline_pseudo_generation249.yaml](../config/train/mainline_pseudo_generation249.yaml) | 固定主线完整部署输出，排除人工划分与无标签留出图 |
 | 仅加入伪标签 | [mask_set_teacher249.yaml](../config/train/mask_set_teacher249.yaml) | 归属损失权重为 0 |
 | 加入归属约束 | [mask_set_teacher249_ownership.yaml](../config/train/mask_set_teacher249_ownership.yaml) | 鼓励有效像素由唯一实例负责，unknown 保持 ignore |
-| 顺序作业 | [run_mask_set_teacher_ab.py](../tools/run_mask_set_teacher_ab.py) | 生成完成后依次训练两组；当前服务器已有作业，不要重复启动 |
-| 完整输出评估 | [evaluate_mask_set.py](../tools/evaluate_mask_set.py) | 使用 checkpoint 固定六图划分，在原尺寸比较最终输出 |
+| 顺序作业 | [run_mask_set_teacher_ab.py](../tools/run_mask_set_teacher_ab.py) | 生成完成后依次训练两组；本次作业已完成，保留用于复现 |
+| 完整输出评估 | [evaluate_mask_set.py](../tools/evaluate_mask_set.py) | 遵守checkpoint划分及显式排除记录，在原尺寸比较最终输出 |
 
-2026-09-10 **22:41 +08:00** 的核验快照：249 张伪标签已完成，第一组完成预热第 47 轮，
-第二组尚未开始。这是带时间的快照；实时状态以服务器作业的 `state.json`、`metrics.csv`
-和完成标记为准。路径、预览、筛选限制及取回方法见
+两组于 2026-09-11 **02:00 +08:00** 全部完成，损失最优为 e112/e120。原尺寸六图匹配数
+735/731，均高于旧监督 e103 的 608，但仍低于主线 854；归属约束减少碎片并增加空缺。
+上述六图包含后来确认已参与伪监督的889，不能全部解释为独立验证；剔除后匹配数为611/600，
+旧监督510、主线715。后续一致性对照已按新隔离方式完成，结果见本文“当前实验”。完整结果与更正见
+[结果与决策](MASK_SET_TEACHER_RESULTS_20260911.md)。路径、预览和筛选限制见
 [主线伪标签实验](MASK_SET_TEACHER_PSEUDO_EXPERIMENT_20260910.md)。
 
 ## 已完成对照与数据依据
@@ -33,6 +45,7 @@
 | 双头原尺寸局部采样 | e86 损失最优，完整部署比较仍不支持晋级 | [训练方案](AFFINITY_CLEAN60_NATIVE_CROP_20260910.md)、[最终比较](AFFINITY_NATIVE_CROP_COMPARISON_20260910.md) |
 | 直接掩码首轮 | e118 最终效果低于主线，发现 BF16 下共享投影无梯度 | [实现](MASK_SET_CLEAN60_EXPERIMENT_20260910.md)、[首轮结果](MASK_SET_RESULTS_20260910.md) |
 | 掩码投影修复 | e103 最终六图几何改善但仍低于主线，后续进入伪标签对照 | [修复重跑](MASK_SET_AMPFIX_RERUN_20260910.md)、[结果与决策](MASK_SET_AMPFIX_RESULTS_20260910.md) |
+| 主线伪标签与归属 | e112/e120 几何明显改善；归属减少碎片，覆盖率下降，尚未晋级 | [正式比较与一致性决策](MASK_SET_TEACHER_RESULTS_20260911.md) |
 | GT 前景 Oracle | 仅诊断几何可达性，不是部署成绩 | [M0 诊断](MUSAM_GT_ORACLE_M0.md) |
 
 ## 文件与版本边界

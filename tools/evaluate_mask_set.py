@@ -38,6 +38,9 @@ def resolve_evaluation_paths(config, payload, image_dir=None, names=None):
     split = payload.get("split")
     if not isinstance(split, dict) or not split.get("val"):
         raise ValueError("checkpoint must carry its fixed train/val split")
+    excluded = {Path(name).stem for name in payload.get("evaluation_excluded_names", [])}
+    if not excluded <= {Path(name).stem for name in split["val"]}:
+        raise ValueError("evaluation exclusions must belong to the saved validation split")
     split_file = config.get("mask_set", {}).get("split_file")
     if split_file:
         configured = json.loads(Path(project_path(config, split_file)).read_text(encoding="utf-8"))
@@ -55,7 +58,7 @@ def resolve_evaluation_paths(config, payload, image_dir=None, names=None):
                 raise ValueError(f"ambiguous image stem {path.stem} in {directory}")
             by_stem[path.stem] = path
     selected = [Path(name).stem for name in names] if names else (
-        list(by_stem) if image_dir is not None else [Path(name).stem for name in split["val"]]
+        list(by_stem) if image_dir is not None else [Path(name).stem for name in split["val"] if Path(name).stem not in excluded]
     )
     if len(set(selected)) != len(selected):
         raise ValueError("duplicate evaluation image names")
@@ -157,6 +160,7 @@ def evaluate_model(model, payload, config, output_dir, device, image_dir=None, n
         "protocol": "Repository competition proxy; same-class instance matching and ferrite mean area. Saved PNGs retain every predicted pixel; remaining GT unknown is masked only for scoring. Both phases are independent instance classes.",
         "checkpoint_epoch": payload.get("epoch"), "checkpoint_phase": payload.get("phase"),
         "checkpoint_split": split, "evaluated_names": [path.stem for path in paths],
+        "evaluation_excluded_names": payload.get("evaluation_excluded_names", []),
         "inference": config["mask_set"].get("inference", {}),
         "aggregate": summarize_instance_results(scores) if scores else None, "images": rows,
     }

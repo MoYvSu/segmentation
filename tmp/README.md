@@ -1,10 +1,10 @@
 # 历史辅助材料
 
-本目录保留实验期间使用过的传输、环境准备、诊断与文档生成材料。正式训练和分析入口见
+本目录保留仍有追溯价值的诊断与文档生成材料。正式训练和分析入口见
 [实验索引](../docs/EXPERIMENT_INDEX.md)。
 
-- 根目录的 `audit_mask_set_remote.py`、`setup_mask_set_remote.py`、`launch_mask_set_remote.py`
-  和 `package_mask_set.py` 属于首轮掩码模型的部署现场，运行前需要核对当时服务器路径。
+- 首轮掩码模型的4个一次性打包、部署和预检脚本已于2026-09-11删除；历史版本可从Git恢复。
+  当前训练使用仓库根目录和`tools/`中的正式入口。
 - `20260910_diagnostic_remote_source/`、`remote_monitor_sync_check_20260907/` 保存当时取回的
   源码或配置，用于版本比较；不作为当前模块导入路径。
 - `pdfs/` 保存赛题摘要与技术报告的生成脚本；`musam_oracle_smoke/` 保存诊断小验证报告。

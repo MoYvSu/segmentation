@@ -92,7 +92,7 @@ def source_info(config):
         excluded = train + val + [n.strip() for n in held if n.strip() and not n.lstrip().startswith("#")]
         manifest, pseudo_classes = read_pseudo_manifest(
             project_path(config, pseudo["dataset_dir"]), project_path(config, pseudo["image_dir"]),
-            excluded_names=excluded, query_capacity=cfg["num_queries"])
+            excluded_names=excluded, query_capacity=cfg["num_queries"], excluded_image_dir=raw)
         classes.update(pseudo_classes)
         provenance["pseudo_target"] = {"format": manifest["format"], "label_source": manifest["label_source"],
             "dataset_dir": pseudo["dataset_dir"], "sample_count": manifest["sample_count"],
@@ -163,7 +163,7 @@ def scalar_items(losses):
             or (torch.is_tensor(value) and value.numel() == 1)}
 
 
-def run_epoch(model, loader, criterion, config, device, class_maps, optimizer=None, scaler=None):
+def run_epoch(model, loader, criterion, config, device, class_maps, optimizer=None, scaler=None, consistency=None):
     training = optimizer is not None
     model.train(training)
     enabled, dtype = amp_settings(config, device)
@@ -172,6 +172,7 @@ def run_epoch(model, loader, criterion, config, device, class_maps, optimizer=No
         int(config["mask_set"].get("validation_seed", 20260910)))
     totals, count = {}, 0
     source_totals = {}
+    consistency_totals = {}
     context = torch.enable_grad if training else torch.inference_mode
     with context():
         for batch in loader:
@@ -190,12 +191,25 @@ def run_epoch(model, loader, criterion, config, device, class_maps, optimizer=No
                 raise FloatingPointError(f"nonfinite loss for {batch['image_name']}")
             if training:
                 scaler.scale(loss).backward()
+                if consistency is not None:
+                    # 先释放监督前向的激活，再累加一致性梯度；仍然只有一次优化器更新。
+                    del outputs
+                    additional, stats = consistency.loss(model)
+                    if additional is not None:
+                        if not torch.isfinite(additional):
+                            raise FloatingPointError("nonfinite instance consistency loss")
+                        scaler.scale(additional).backward()
+                    for key, value in stats.items():
+                        consistency_totals[key] = consistency_totals.get(key, 0.) + value
+                    del additional
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(
                     [p for p in model.parameters() if p.requires_grad],
                     float(config["mask_set"].get("grad_clip", 1.0)), error_if_nonfinite=True)
                 scaler.step(optimizer)
                 scaler.update()
+                if consistency is not None:
+                    consistency.after_step(model)
             batch_size = image.shape[0]
             source = batch["label_source"][0] if "label_source" in batch else "manual"
             stats = source_totals.setdefault(source, {"samples": 0, "loss_sum": 0., "optimized_loss_sum": 0.})
@@ -210,6 +224,11 @@ def run_epoch(model, loader, criterion, config, device, class_maps, optimizer=No
         values[f"{source}_samples"] = stats["samples"]
         values[f"{source}_loss"] = stats["loss_sum"] / max(1, stats["samples"])
         values[f"{source}_optimized_loss"] = stats["optimized_loss_sum"] / max(1, stats["samples"])
+    if consistency_totals:
+        samples = consistency_totals["samples"]
+        for key, value in consistency_totals.items():
+            values[f"consistency_{key}"] = value if key in {"samples", "valid_pixels", "content_pixels"} else value / max(1, count if key == "weight" else samples)
+        values["consistency_valid_fraction"] = consistency_totals["valid_pixels"] / max(1, consistency_totals["content_pixels"])
     return values
 
 

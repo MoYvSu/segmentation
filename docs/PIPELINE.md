@@ -24,15 +24,19 @@ graph-v2 `area150` 因笔直、失真的归并边界被目检淘汰。G7 在固�
 
 ## 当前训练与实验导航
 
-当前配置为 `config/train/mask_set_teacher249.yaml` 与
-`config/train/mask_set_teacher249_ownership.yaml`。两组使用同一 SSL、249 张固定主线伪标签、
-人工/伪标签 1:3 采样及相同 60+60 轮日程，第二组增加像素归属损失；保留独立输出目录和
-原监督验证损失选优。最终评估使用 `tools/evaluate_mask_set.py`。
+当前配置为 `config/train/mask_set_continue30.yaml` 与 `config/train/mask_set_consistency30.yaml`。
+2026-09-11已从原归属组e120完成两组各30轮续训，第二组加入筛选后的EMA实例一致性。
+两组均保留每轮64次人工、192次固定伪标签更新及归属权重.5，只有一致性权重不同。
+损失最优为对照e143、一致性e144；同五图原尺寸评估匹配609→615，漏检计零IoU .6398→.6479，
+未覆盖率10.29%→8.91%，代理总分73.27→73.72。有小幅收益，主线仍明显领先实例几何，暂不
+加长训练或替换主线。见[最终结果](MASK_SET_CONSISTENCY_RESULTS_20260911.md)。
 
-2026-09-10 22:41 核验快照：伪标签生成完成，第一组训练进行中。服务器顺序作业已经启动，
-后续两组训练状态以 `state.json`、各自 `metrics.csv` 和完成标记为准。复现条件、路径和预览见
-[主线伪标签实验](MASK_SET_TEACHER_PSEUDO_EXPERIMENT_20260910.md)；其余短链、GT 与掩码模型
-结果见 [实验索引](EXPERIMENT_INDEX.md)。当前分数不支持候选替换部署主线。
+数据检查发现旧249张伪标签含9张人工图别名，其中train_589对应验证图train_889。新阶段共同
+使用排除别名后的240张子集、912张在线无标签池；按其余五张验证图的原监督损失选优。checkpoint
+记录排除名单，`tools/evaluate_mask_set.py`默认遵守，889只作已见图诊断。剔除889后，上轮
+旧监督/仅伪标签/归属组的匹配数为510/611/600，主线为715，仍不晋级。详见
+[当前实验](MASK_SET_CONSISTENCY_EXPERIMENT_20260911.md)、[上轮结果更正](MASK_SET_TEACHER_RESULTS_20260911.md)
+及[实验索引](EXPERIMENT_INDEX.md)。
 
 ## 历史几何约束
 
