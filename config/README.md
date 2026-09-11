@@ -10,6 +10,8 @@
 读取双方信息的87,113参数修正模块；原模型、数据、损失、采样与后处理固定，各20轮。
 入口 `train_mainline_cross_head.py` 先检查最终输出零兼容，再按五图验证损失选优。
 直接掩码路线已停止继续投入。详见[本轮说明](../docs/MAINLINE_CROSS_HEAD_EXPERIMENT_20260911.md)。
+两组已完成并按损失选中e20，匹配self690/cross700，仍低于主线715；仅语义修正恢复匹配
+但面积误差增大，本版本均不晋级。见[最终结果](../docs/MAINLINE_CROSS_HEAD_RESULTS_20260911.md)。
 
 黑盒确认的 E9 语义实验为 `train/stage2_semantic_e9_highres20.yaml`：以 V6 语义为零漂移锚点，
 冻结 semantic FPN/head、boundary、LoRA 与 G4b affinity，只训练 256→512→1024 的高分辨率

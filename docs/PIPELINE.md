@@ -18,7 +18,7 @@ graph-v2 `area150` 因笔直、失真的归并边界被目检淘汰。G7 在固�
 减少实例并加重欠分割风险，已停止晋级。新 GT `SSL LoRA → semantic/affinity 双头` 与
 原尺寸局部采样已完成对照，尚未恢复主线几何。直接实例掩码路线经伪标签、归属与 EMA
 对照后仍有覆盖率和几何差距，2026-09-11停止继续投入。当前实验回到冻结 E10a + G4b 上的
-等参数 self/cross 小型修正；部署主线不变。详见
+等参数 self/cross 小型修正；该对照已完成，cross略优于self但几何仍低于原主线，不晋级。详见
 [AFFINITY_GRAPH_AB_20260828.md](AFFINITY_GRAPH_AB_20260828.md)；历史 affinity 审计见
 [AFFINITY_DEPLOYMENT_EVALUATION.md](AFFINITY_DEPLOYMENT_EVALUATION.md)，短链实验见
 [DIRECT_SSL_SEMANTIC_AFFINITY.md](DIRECT_SSL_SEMANTIC_AFFINITY.md)。
@@ -27,7 +27,9 @@ graph-v2 `area150` 因笔直、失真的归并边界被目检淘汰。G7 在固�
 
 当前配置为 `config/train/mainline_cross_head_ab.yaml`，入口 `train_mainline_cross_head.py`。
 两组只改变修正模块能否读取另一头的信息，保持原模型冻结、主线后处理不变；各20轮、每轮
-128次人工新GT采样，以五图验证损失选优。见[设计与运行记录](MAINLINE_CROSS_HEAD_EXPERIMENT_20260911.md)。
+128次人工新GT采样，以五图验证损失选优。两组已完成并选中e20，self/cross匹配690/700、
+主线715；仅语义拆分恢复715但面积误差更大，均不晋级。见
+[最终结果](MAINLINE_CROSS_HEAD_RESULTS_20260911.md)与[设计记录](MAINLINE_CROSS_HEAD_EXPERIMENT_20260911.md)。
 
 上一轮配置为 `config/train/mask_set_continue30.yaml` 与 `config/train/mask_set_consistency30.yaml`。
 2026-09-11已从原归属组e120完成两组各30轮续训，第二组加入筛选后的EMA实例一致性。

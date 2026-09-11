@@ -21,6 +21,22 @@ Use this shape:
 - limits: known exceptions or counterevidence
 ```
 
+## 20260911-cross-head-refinement-readout
+
+- status: observation
+- last_verified: 2026-09-11
+- scope: 冻结E10a+G4b、等参数self/cross修正、新GT原任务损失、固定完整部署
+- finding: 信息交流的收益与共同修正训练的收益需要分开。cross相对self多10个有效匹配，
+  但两组均低于原主线；原始语义像素更准也没有自动改善实例投票及铁素体平均面积。
+- evidence: 同五图主线/self/cross匹配715/690/700，漏检计零IoU .76704/.73703/.74844。
+  只关闭affinity修正，两组恢复715匹配，但铁素体数699→726、面积误差35.39%→37.68%。
+  完整权重e20、部署和源文件已核验，见docs/MAINLINE_CROSS_HEAD_RESULTS_20260911.md。
+- reuse_hypothesis: 新增双头交流时保留等预算自身信息对照，并在原部署链中拆分两项输出；
+  不能把所有像素损失改善归因于交流，也不能只看原始语义mIoU便复用候选语义预测。
+- limits: 一个种子、五图及固定旧主线的增量实验，不否定新GT或其他联合训练方法。cross跨界
+  affinity均值略差于self而最终几何略好，均值并非最终分界质量的充分指标。保护负边修正
+  只是后续待验证方向，不是已证方法，也不据此增加AGENTS.md规则。
+
 ## 20260908-clean60-affinity-calibration
 
 - status: observation
