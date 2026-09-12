@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 import logging
+import math
 import os
 import sys
 import tempfile
@@ -77,6 +78,83 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("train_affinity_geometry_g1")
+
+AFFINITY_LOSS_PROTOCOL = "covered_pairs_per_image_fp32_v1"
+
+
+def resolve_selection_metric(cfg, deployment_enabled):
+    metric = cfg.get("selection_metric") or (
+        "deployment_score_total" if deployment_enabled else "oracle_gt_penalized_miou"
+    )
+    if metric not in {
+        "val_affinity_loss", "deployment_score_total", "oracle_gt_penalized_miou"
+    }:
+        raise ValueError(f"Unknown affinity selection_metric: {metric}")
+    if metric == "deployment_score_total" and not deployment_enabled:
+        raise ValueError("deployment_score_total requires deployment validation")
+    return metric
+
+
+def selection_improved(score, best_score, metric):
+    if not math.isfinite(score) or not math.isfinite(best_score):
+        raise ValueError("Checkpoint selection scores must be finite")
+    return score < best_score if metric == "val_affinity_loss" else score > best_score
+
+
+@torch.no_grad()
+def evaluate_affinity_loss(system, dataset, cfg):
+    """固定人工验证集：原始 logits、covered pair、逐图 FP32 损失。"""
+    if system.training:
+        raise ValueError("Affinity loss validation requires system.eval()")
+    if len(dataset) == 0:
+        raise ValueError("Affinity loss validation requires a nonempty dataset")
+    device = next(system.geometry_decoder.parameters()).device
+    loss_cfg = cfg.get("loss", {})
+    parameters = {
+        "negative_weight": float(loss_cfg.get("negative_weight", 1.0)),
+        "hard_negative_weight": float(loss_cfg.get("hard_negative_weight", 0.0)),
+        "hard_negative_gamma": float(loss_cfg.get("hard_negative_gamma", 2.0)),
+        "normalize_edge_weights": bool(loss_cfg.get("normalize_edge_weights", True)),
+    }
+    positive_total = np.zeros(len(DEFAULT_AFFINITY_OFFSETS), dtype=np.int64)
+    negative_total = np.zeros_like(positive_total)
+    rows = []
+    for index in range(len(dataset)):
+        sample = dataset[index]
+        logits = system.geometry_forward(
+            sample["image"].unsqueeze(0).to(device)
+        )["affinity_logits"]
+        if logits.dtype != torch.float32:
+            raise ValueError(f"Validation logits must be FP32, got {logits.dtype}")
+        target, edge_valid = build_affinity_targets_torch(
+            sample["instance_map"].unsqueeze(0).to(device),
+            sample["valid_content"].unsqueeze(0).to(device),
+            uncovered_as_boundary=None,
+        )
+        positive = (edge_valid & (target > 0.5)).sum(dim=(0, 2, 3)).cpu().numpy()
+        negative = (edge_valid & (target <= 0.5)).sum(dim=(0, 2, 3)).cpu().numpy()
+        if int((positive + negative).sum()) == 0:
+            raise ValueError(f"No supervised affinity edges in validation sample {index}")
+        loss, _ = balanced_affinity_loss(
+            logits, target, edge_valid, edge_weight=None, **parameters
+        )
+        value = float(loss)
+        if not math.isfinite(value):
+            raise ValueError(f"Non-finite affinity validation loss in sample {index}")
+        positive_total += positive
+        negative_total += negative
+        rows.append({
+            "image": sample.get("image_name", str(index)), "loss": value,
+            "positive_edges": positive.tolist(), "negative_edges": negative.tolist(),
+        })
+    if np.any(positive_total + negative_total == 0):
+        raise ValueError("At least one affinity channel has no validation supervision")
+    return {
+        "protocol": AFFINITY_LOSS_PROTOCOL, "loss_parameters": parameters,
+        "loss": float(np.mean([row["loss"] for row in rows])), "per_image": rows,
+        "positive_edges": positive_total.tolist(),
+        "negative_edges": negative_total.tolist(),
+    }
 
 
 def validate_semantic_geometry_contract(
@@ -541,13 +619,18 @@ def evaluate_deployment_validation(
 
 def save_checkpoint(
     path, system, config, epoch, best_score, reference_path, reference_sha,
-    init_path, digest, split, selection_metric, best_oracle_score,
+    init_path, digest, split, selection_metric, best_oracle_score, best_epoch=None,
 ):
     payload = {
-        "format": "affinity_geometry_g1_v3",
+        "format": "affinity_geometry_g1_v4",
         "epoch": int(epoch),
         "best_selection_metric": selection_metric,
         "best_selection_score": float(best_score),
+        "best_selection_epoch": int(epoch if best_epoch is None else best_epoch),
+        "best_selection_direction": "min" if selection_metric == "val_affinity_loss" else "max",
+        "validation_protocol_version": (
+            AFFINITY_LOSS_PROTOCOL if selection_metric == "val_affinity_loss" else None
+        ),
         "best_val_gt_penalized_miou": float(best_oracle_score),
         "deployment_promotion_required": selection_metric != "deployment_score_total",
         "affinity_offsets": [list(value) for value in DEFAULT_AFFINITY_OFFSETS],
@@ -600,6 +683,9 @@ def main():
         cfg.get("forced_train_names", ["train_001", "train_002"]),
     )
     split = {"train": train_names, "val": val_names, "seed": seed}
+    expected_val = cfg.get("expected_val_names")
+    if expected_val is not None and set(val_names) != set(expected_val):
+        raise ValueError(f"Validation split changed: {val_names} != {expected_val}")
     logger.info("Split train=%d val=%d val_names=%s", len(train_names), len(val_names), val_names)
     dataset_kwargs = {
         "image_size": int(cfg.get("input_size", 1024)),
@@ -768,6 +854,7 @@ def main():
     graph_thresholds = cfg.get("graph_thresholds")
     oracle_validation_grid = cfg.get("oracle_validation_grid")
     deployment_recipe = deployment_validation_recipe(cfg)
+    selection_metric = resolve_selection_metric(cfg, deployment_recipe["enabled"])
     val_image_paths = [Path(raw_dir) / f"{name}.jpg" for name in val_names]
     system.eval()
     baseline_rows = [
@@ -800,19 +887,28 @@ def main():
             json.dumps(deployment_baseline, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        selection_metric = "deployment_score_total"
+    loss_history = []
+    if selection_metric == "val_affinity_loss":
+        loss_baseline = evaluate_affinity_loss(system, val_dataset, cfg)
+        (output_dir / "loss_baseline.json").write_text(
+            json.dumps(loss_baseline, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        best_score = loss_baseline["loss"]
+        loss_history.append({"epoch": 0, "loss": best_score})
+    elif selection_metric == "deployment_score_total":
         best_score = deployment_baseline["score_total"]
     else:
-        logger.warning(
-            "Deployment validation disabled: best_affinity.pth remains an "
-            "oracle-geometry diagnostic and requires external promotion"
-        )
-        selection_metric = "oracle_gt_penalized_miou"
         best_score = best_oracle_score
+    if not math.isfinite(best_score):
+        raise ValueError("Non-finite epoch-0 checkpoint selection score")
+    best_epoch = 0
+    logger.info("Selection metric=%s direction=%s epoch0=%.8f; final deployment decides promotion",
+                selection_metric, "min" if selection_metric == "val_affinity_loss" else "max",
+                best_score)
     save_checkpoint(
         output_dir / "best_affinity.pth", system, config, 0, best_score,
         reference_path, reference_sha, init_path, digest, split,
-        selection_metric, best_oracle_score,
+        selection_metric, best_oracle_score, best_epoch,
     )
     write_val_monitor(
         system,
@@ -851,6 +947,8 @@ def main():
         "adapter_gate_scale0_abs", "adapter_gate_scale1_abs",
         "adapter_gate_scale2_abs", "adapter_gate_scale3_abs",
     ]
+    if selection_metric == "val_affinity_loss":
+        fields.append("val_affinity_loss")
     writer = csv.DictWriter(metrics_file, fieldnames=fields)
     writer.writeheader()
     logger.info("Baseline val=%s", baseline)
@@ -991,6 +1089,10 @@ def main():
             for index in range(len(val_dataset))
         ]
         val = aggregate_validation(val_rows)
+        loss_validation = None
+        if selection_metric == "val_affinity_loss":
+            loss_validation = evaluate_affinity_loss(system, val_dataset, cfg)
+            loss_history.append({"epoch": epoch, "loss": loss_validation["loss"]})
         deployment = None
         if deployment_recipe["enabled"]:
             deployment = evaluate_deployment_validation(
@@ -1041,6 +1143,9 @@ def main():
             ),
             **adapter_metrics(system),
         }
+        if loss_validation is not None:
+            row["val_affinity_loss"] = loss_validation["loss"]
+            logger.info("epoch=%d val_affinity_loss=%.8f", epoch, loss_validation["loss"])
         writer.writerow(row)
         metrics_file.flush()
         logger.info(
@@ -1073,16 +1178,19 @@ def main():
         best_oracle_score = max(
             best_oracle_score, row["val_gt_penalized_miou"]
         )
-        selection_score = (
-            deployment["score_total"]
-            if deployment is not None else row["val_gt_penalized_miou"]
-        )
-        if selection_score > best_score:
+        if selection_metric == "val_affinity_loss":
+            selection_score = loss_validation["loss"]
+        elif selection_metric == "deployment_score_total":
+            selection_score = deployment["score_total"]
+        else:
+            selection_score = row["val_gt_penalized_miou"]
+        if selection_improved(selection_score, best_score, selection_metric):
             best_score = selection_score
+            best_epoch = epoch
             save_checkpoint(
                 output_dir / "best_affinity.pth", system, config, epoch, best_score,
                 reference_path, reference_sha, init_path, digest, split,
-                selection_metric, best_oracle_score,
+                selection_metric, best_oracle_score, best_epoch,
             )
         if epoch % int(cfg.get("monitor_interval", 5)) == 0 or epoch == epochs:
             semantic_contract_audit(
@@ -1092,7 +1200,7 @@ def main():
             save_checkpoint(
                 output_dir / "latest_affinity.pth", system, config, epoch, best_score,
                 reference_path, reference_sha, init_path, digest, split,
-                selection_metric, best_oracle_score,
+                selection_metric, best_oracle_score, best_epoch,
             )
             write_val_monitor(
                 system,
@@ -1108,6 +1216,15 @@ def main():
                     int(cfg.get("input_size", 1024)), int(cfg.get("output_grid", 512)),
                 )
     metrics_file.close()
+    if loss_history:
+        ranked = sorted(loss_history, key=lambda item: (item["loss"], item["epoch"]))
+        (output_dir / "selection_summary.json").write_text(json.dumps({
+            "metric": selection_metric, "direction": "min",
+            "protocol": AFFINITY_LOSS_PROTOCOL, "best_epoch": best_epoch,
+            "best_loss": best_score, "runner_up": ranked[1] if len(ranked) > 1 else None,
+            "best_runner_up_gap": ranked[1]["loss"] - best_score if len(ranked) > 1 else None,
+            "history": loss_history,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
     logger.info(
         "Affinity G1 complete selection=%s best=%.6f output=%s",
         selection_metric, best_score, output_dir,

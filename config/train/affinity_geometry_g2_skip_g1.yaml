@@ -1,0 +1,6 @@
+_base: affinity_geometry_g2_loss_control.yaml
+
+affinity_geometry_g1:
+  # X：唯一实验变量为从 G0-long 直接初始化，省去独立 G1 阶段。
+  geometry_init_checkpoint: outputs/affinity_geometry_g0_long/latest_affinity.pth
+  output_dir: outputs/20260912_g1_g2_ablation/g2_skip_g1
