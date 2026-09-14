@@ -1,0 +1,8 @@
+# 唯一算法变化：短程四方向的边界概率由均值改为最大两项均值。
+_base: affinity_x_mean_20260914.yaml
+
+affinity_deployment:
+  short_reduction: top2
+
+inference:
+  output_dir: outputs/20260914_top2_g0_ablation/top2_test68

@@ -234,7 +234,31 @@ def load_geometry_checkpoint_state(system, checkpoint):
         )
 
 
+def resolve_geometry_initialization(cfg):
+    """显式区分继承 geometry checkpoint 与 G0 训练前的 V6 FPN 初始化。"""
+    mode = str(cfg.get("geometry_init_mode", "checkpoint"))
+    checkpoint = cfg.get("geometry_init_checkpoint")
+    if mode == "checkpoint":
+        if not checkpoint:
+            raise ValueError("geometry_init_mode=checkpoint requires geometry_init_checkpoint")
+        if cfg.get("init_from_v6_boundary_fpn", False):
+            raise ValueError("checkpoint initialization conflicts with init_from_v6_boundary_fpn")
+    elif mode == "v6_boundary_fpn":
+        if checkpoint:
+            raise ValueError("v6_boundary_fpn initialization requires geometry_init_checkpoint=null")
+        if cfg.get("init_from_v6_boundary_fpn") is False:
+            raise ValueError("v6_boundary_fpn initialization cannot disable boundary FPN copying")
+        if any(cfg.get(key, {}).get("enabled", False) for key in (
+            "feature_adapter", "highres_refiner"
+        )):
+            raise ValueError("v6_boundary_fpn ablation requires the original geometry decoder only")
+    else:
+        raise ValueError(f"Unknown geometry_init_mode: {mode}")
+    return mode
+
+
 def build_system(config, cfg, device):
+    init_mode = resolve_geometry_initialization(cfg)
     reference_path = project_path(config, cfg["reference_checkpoint"])
     reference = build_reference_model(config, device, reference_path)
     decoder = AffinityGeometryDecoder(
@@ -244,9 +268,23 @@ def build_system(config, cfg, device):
         up_channels=int(cfg.get("up_channels", 128)),
         output_grid=int(cfg.get("coarse_output_grid", cfg.get("output_grid", 512))),
     ).to(device)
-    init_path = project_path(config, cfg["geometry_init_checkpoint"])
-    checkpoint = torch.load(init_path, map_location="cpu", weights_only=False)
-    decoder.load_state_dict(checkpoint["geometry_state_dict"], strict=True)
+    init_path = None
+    checkpoint = {}
+    if init_mode == "checkpoint":
+        init_path = project_path(config, cfg["geometry_init_checkpoint"])
+        checkpoint = torch.load(init_path, map_location="cpu", weights_only=False)
+        decoder.load_state_dict(checkpoint["geometry_state_dict"], strict=True)
+        logger.info("Affinity geometry initialized strictly from %s", init_path)
+    else:
+        # 与 G0 首次训练前保持相同的 RNG 消耗顺序：先构造 reference 和完整
+        # 随机 decoder，再复制 FPN；其余层不加载任何 G0/G1/G2 训练权重。
+        decoder.initialize_fpn_from_boundary(reference.decoder.boundary_fpn)
+        logger.info(
+            "Affinity FPN initialized strictly from %s:decoder.boundary_fpn; "
+            "upsample/affinity_head retain their seeded random initialization; "
+            "no geometry checkpoint loaded",
+            reference_path,
+        )
     adapter_cfg = cfg.get("feature_adapter", {})
     geometry_feature_adapter = None
     if bool(adapter_cfg.get("enabled", False)):
@@ -291,6 +329,18 @@ def build_system(config, cfg, device):
         geometry_feature_adapter,
         geometry_highres_refiner,
     ).to(device)
+    system.geometry_initialization = {
+        "version": 1,
+        "mode": init_mode,
+        "source_checkpoint": os.path.abspath(init_path or reference_path),
+        "source_component": (
+            "geometry_state_dict" if init_mode == "checkpoint" else "decoder.boundary_fpn"
+        ),
+        "random_components": (
+            [] if init_mode == "checkpoint" else ["upsample", "affinity_head"]
+        ),
+        "seed": int(cfg.get("seed", 42)),
+    }
     if geometry_highres_refiner is not None and bool(
         highres_cfg.get("train_only", True)
     ):
@@ -637,11 +687,14 @@ def save_checkpoint(
         "geometry_state_dict": system.geometry_decoder.state_dict(),
         "reference_checkpoint": os.path.abspath(reference_path),
         "reference_checkpoint_sha256": reference_sha,
-        "geometry_init_checkpoint": os.path.abspath(init_path),
+        "geometry_init_checkpoint": os.path.abspath(init_path) if init_path else None,
         "semantic_state_digest": digest,
         "split": split,
         "config": config,
     }
+    initialization = getattr(system, "geometry_initialization", None)
+    if initialization is not None:
+        payload["geometry_initialization"] = dict(initialization)
     if system.geometry_feature_adapter is not None:
         payload["geometry_feature_adapter_state_dict"] = (
             system.geometry_feature_adapter.state_dict()

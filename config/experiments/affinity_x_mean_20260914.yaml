@@ -1,0 +1,17 @@
+# X best e16 的固定部署对照；沿用 E10a、gated、high=0.65。
+_base: affinity_g4b_high065_semantic_e10a_cold.yaml
+
+affinity_geometry_g1:
+  geometry_init_checkpoint: outputs/20260912_g1_g2_ablation/g2_skip_g1/best_affinity.pth
+
+affinity_deployment:
+  checkpoint: outputs/20260912_g1_g2_ablation/g2_skip_g1/best_affinity.pth
+  fusion_mode: gated
+  short_reduction: mean
+
+inference:
+  boundary_threshold: 0.65
+  output_dir: outputs/20260914_top2_g0_ablation/mean_test68
+
+post_process:
+  save_visualization: false

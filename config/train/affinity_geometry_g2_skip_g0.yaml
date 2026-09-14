@@ -1,0 +1,8 @@
+_base: affinity_geometry_g2_skip_g1.yaml
+
+affinity_geometry_g1:
+  # Y：相对 X 再同时删除两图 G0/G0-long 暖启动；保留 G2 全部训练配方。
+  # 显式清空继承的 checkpoint，恢复 G0 训练前的 V6 FPN + 随机输出层。
+  geometry_init_mode: v6_boundary_fpn
+  geometry_init_checkpoint: null
+  output_dir: outputs/20260914_top2_g0_ablation/g2_skip_g0
