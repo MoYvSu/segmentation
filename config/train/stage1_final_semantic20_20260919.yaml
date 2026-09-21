@@ -1,0 +1,19 @@
+# -*- coding: utf-8 -*-
+_base: stage2_semantic_gt_aligned20.yaml
+
+decoder:
+  boundary_refine: false
+  center_head: false
+
+semi_supervised:
+  base_checkpoint: outputs/20260919_stage1_final_tasks/export/reference.pth
+  output_dir: outputs/20260919_stage1_final_tasks/semantic
+  # 已训练的语义头继续精修，使用小于冷启动的学习率。
+  learning_rate: 4.0e-5
+  semantic_cold_start_training:
+    reset_student: false
+    distill_weight_start: 0.0
+    distill_weight_end: 0.0
+  monitor:
+    num_images: 0
+    output_dir: outputs/20260919_stage1_final_tasks/semantic/monitor

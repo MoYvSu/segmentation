@@ -1,0 +1,18 @@
+# S-new：补缝GT语义loss-best第20轮，固定L几何及既定top2推理。
+_base: affinity_x_top2_20260914.yaml
+
+affinity_geometry_g1:
+  geometry_init_checkpoint: outputs/20260914_g2_long_oldgt/training/best_affinity.pth
+
+affinity_deployment:
+  checkpoint: outputs/20260914_g2_long_oldgt/training/best_affinity.pth
+
+semantic_challenger:
+  checkpoint: outputs/stage2_semantic_gt_new20_20260916/best_model_stage2.pth
+  replace_reference_semantic: true
+
+inference:
+  output_dir: outputs/20260916_semantic_newgt/S_new_L_top2_test68
+
+post_process:
+  save_visualization: false

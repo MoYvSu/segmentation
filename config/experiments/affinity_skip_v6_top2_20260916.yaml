@@ -1,0 +1,12 @@
+# V：沿用 E10a/top2 的部署协议，使用 joint-v3 参考权重和跳过V6的几何候选。
+_base: affinity_x_top2_20260914.yaml
+
+affinity_geometry_g1:
+  reference_checkpoint: outputs/stage2_joint_v3/best_model_stage2.pth
+  geometry_init_checkpoint: outputs/20260916_g2_skip_v6/training/best_affinity.pth
+
+affinity_deployment:
+  checkpoint: outputs/20260916_g2_skip_v6/training/best_affinity.pth
+
+inference:
+  output_dir: outputs/20260916_g2_skip_v6/deployment

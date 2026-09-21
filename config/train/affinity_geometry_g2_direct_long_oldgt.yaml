@@ -1,0 +1,14 @@
+_base: affinity_geometry_g2_skip_g0.yaml
+
+affinity_geometry_g1:
+  # L：旧GT直接训练；相对Y只改变优化预算和几何头分组学习率。
+  # 继承 V6 boundary FPN，随机上采样/输出层；不加载 G0/G0-long。
+  output_dir: outputs/20260914_g2_long_oldgt/training
+  epochs: 120
+  learning_rate: 1.0e-4
+  fpn_learning_rate: 5.0e-5
+  min_learning_rate: 5.0e-6
+
+  # 延续52次抽取/轮、batch2及原人工/SAM2各50%的概率，共3120次更新。
+  # 按原人工验证loss选best；不按部署代理选轮次，不新增中间图集。
+  monitor_interval: 120

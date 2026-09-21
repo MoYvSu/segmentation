@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 import logging
+import math
 import os
 import sys
 import tempfile
@@ -77,6 +78,122 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("train_affinity_geometry_g1")
+
+AFFINITY_LOSS_PROTOCOL = "covered_pairs_per_image_fp32_v1"
+
+
+def build_manual_geometry_dataset(
+    config, cfg, raw_dir, sample_names, *, training, **dataset_kwargs
+):
+    """新 GT 只替换训练目标；验证始终使用原人工标注，保持 loss 选优口径。"""
+    completed_dir = cfg.get("manual_train_completed_gt_dir") if training else None
+    return OffsetGeometryDataset(
+        raw_dir, sample_names=sample_names,
+        completed_gt_dir=project_path(config, completed_dir) if completed_dir else None,
+        **dataset_kwargs,
+    )
+
+
+def build_geometry_sampler(dataset_parts, sampling_masses, cfg, seed):
+    """显式总抽样预算也适用于纯人工组；未配置时保持旧配方的采样行为。"""
+    sam2_cfg = cfg.get("sam2_geometry", {})
+    sam2_enabled = bool(sam2_cfg.get("enabled", False))
+    epoch_samples = cfg.get("samples_per_epoch")
+    if epoch_samples is None:
+        if not sam2_enabled:
+            return None
+        epoch_samples = sam2_cfg.get("samples_per_epoch", 2 * len(dataset_parts[0]))
+    epoch_samples = int(epoch_samples)
+    if epoch_samples <= 0:
+        raise ValueError("affinity_geometry_g1.samples_per_epoch must be positive")
+    # 保持历史混合采样先生成 float32 权重再转 double 的数值及随机序列。
+    weights = torch.cat(
+        [
+            torch.full((len(part),), mass / len(part))
+            for part, mass in zip(dataset_parts, sampling_masses)
+        ]
+    ).double()
+    return WeightedRandomSampler(
+        weights,
+        num_samples=epoch_samples,
+        replacement=True,
+        generator=torch.Generator().manual_seed(seed),
+    )
+
+
+def resolve_selection_metric(cfg, deployment_enabled):
+    metric = cfg.get("selection_metric") or (
+        "deployment_score_total" if deployment_enabled else "oracle_gt_penalized_miou"
+    )
+    if metric not in {
+        "val_affinity_loss", "deployment_score_total", "oracle_gt_penalized_miou"
+    }:
+        raise ValueError(f"Unknown affinity selection_metric: {metric}")
+    if metric == "deployment_score_total" and not deployment_enabled:
+        raise ValueError("deployment_score_total requires deployment validation")
+    return metric
+
+
+def selection_improved(score, best_score, metric):
+    if not math.isfinite(score) or not math.isfinite(best_score):
+        raise ValueError("Checkpoint selection scores must be finite")
+    return score < best_score if metric == "val_affinity_loss" else score > best_score
+
+
+@torch.no_grad()
+def evaluate_affinity_loss(system, dataset, cfg):
+    """固定人工验证集：原始 logits、covered pair、逐图 FP32 损失。"""
+    if system.training:
+        raise ValueError("Affinity loss validation requires system.eval()")
+    if len(dataset) == 0:
+        raise ValueError("Affinity loss validation requires a nonempty dataset")
+    device = next(system.geometry_decoder.parameters()).device
+    loss_cfg = cfg.get("loss", {})
+    parameters = {
+        "negative_weight": float(loss_cfg.get("negative_weight", 1.0)),
+        "hard_negative_weight": float(loss_cfg.get("hard_negative_weight", 0.0)),
+        "hard_negative_gamma": float(loss_cfg.get("hard_negative_gamma", 2.0)),
+        "normalize_edge_weights": bool(loss_cfg.get("normalize_edge_weights", True)),
+    }
+    positive_total = np.zeros(len(DEFAULT_AFFINITY_OFFSETS), dtype=np.int64)
+    negative_total = np.zeros_like(positive_total)
+    rows = []
+    for index in range(len(dataset)):
+        sample = dataset[index]
+        logits = system.geometry_forward(
+            sample["image"].unsqueeze(0).to(device)
+        )["affinity_logits"]
+        if logits.dtype != torch.float32:
+            raise ValueError(f"Validation logits must be FP32, got {logits.dtype}")
+        target, edge_valid = build_affinity_targets_torch(
+            sample["instance_map"].unsqueeze(0).to(device),
+            sample["valid_content"].unsqueeze(0).to(device),
+            uncovered_as_boundary=None,
+        )
+        positive = (edge_valid & (target > 0.5)).sum(dim=(0, 2, 3)).cpu().numpy()
+        negative = (edge_valid & (target <= 0.5)).sum(dim=(0, 2, 3)).cpu().numpy()
+        if int((positive + negative).sum()) == 0:
+            raise ValueError(f"No supervised affinity edges in validation sample {index}")
+        loss, _ = balanced_affinity_loss(
+            logits, target, edge_valid, edge_weight=None, **parameters
+        )
+        value = float(loss)
+        if not math.isfinite(value):
+            raise ValueError(f"Non-finite affinity validation loss in sample {index}")
+        positive_total += positive
+        negative_total += negative
+        rows.append({
+            "image": sample.get("image_name", str(index)), "loss": value,
+            "positive_edges": positive.tolist(), "negative_edges": negative.tolist(),
+        })
+    if np.any(positive_total + negative_total == 0):
+        raise ValueError("At least one affinity channel has no validation supervision")
+    return {
+        "protocol": AFFINITY_LOSS_PROTOCOL, "loss_parameters": parameters,
+        "loss": float(np.mean([row["loss"] for row in rows])), "per_image": rows,
+        "positive_edges": positive_total.tolist(),
+        "negative_edges": negative_total.tolist(),
+    }
 
 
 def validate_semantic_geometry_contract(
@@ -156,7 +273,31 @@ def load_geometry_checkpoint_state(system, checkpoint):
         )
 
 
+def resolve_geometry_initialization(cfg):
+    """区分 geometry checkpoint 与参考边界 FPN；保留历史 V6 模式名兼容。"""
+    mode = str(cfg.get("geometry_init_mode", "checkpoint"))
+    checkpoint = cfg.get("geometry_init_checkpoint")
+    if mode == "checkpoint":
+        if not checkpoint:
+            raise ValueError("geometry_init_mode=checkpoint requires geometry_init_checkpoint")
+        if cfg.get("init_from_v6_boundary_fpn", False):
+            raise ValueError("checkpoint initialization conflicts with init_from_v6_boundary_fpn")
+    elif mode in {"v6_boundary_fpn", "reference_boundary_fpn"}:
+        if checkpoint:
+            raise ValueError(f"{mode} initialization requires geometry_init_checkpoint=null")
+        if cfg.get("init_from_v6_boundary_fpn") is False:
+            raise ValueError(f"{mode} initialization cannot disable boundary FPN copying")
+        if any(cfg.get(key, {}).get("enabled", False) for key in (
+            "feature_adapter", "highres_refiner"
+        )):
+            raise ValueError(f"{mode} ablation requires the original geometry decoder only")
+    else:
+        raise ValueError(f"Unknown geometry_init_mode: {mode}")
+    return mode
+
+
 def build_system(config, cfg, device):
+    init_mode = resolve_geometry_initialization(cfg)
     reference_path = project_path(config, cfg["reference_checkpoint"])
     reference = build_reference_model(config, device, reference_path)
     decoder = AffinityGeometryDecoder(
@@ -166,9 +307,23 @@ def build_system(config, cfg, device):
         up_channels=int(cfg.get("up_channels", 128)),
         output_grid=int(cfg.get("coarse_output_grid", cfg.get("output_grid", 512))),
     ).to(device)
-    init_path = project_path(config, cfg["geometry_init_checkpoint"])
-    checkpoint = torch.load(init_path, map_location="cpu", weights_only=False)
-    decoder.load_state_dict(checkpoint["geometry_state_dict"], strict=True)
+    init_path = None
+    checkpoint = {}
+    if init_mode == "checkpoint":
+        init_path = project_path(config, cfg["geometry_init_checkpoint"])
+        checkpoint = torch.load(init_path, map_location="cpu", weights_only=False)
+        decoder.load_state_dict(checkpoint["geometry_state_dict"], strict=True)
+        logger.info("Affinity geometry initialized strictly from %s", init_path)
+    else:
+        # 与 G0 首次训练前保持相同的 RNG 消耗顺序：先构造 reference 和完整
+        # 随机 decoder，再复制 FPN；其余层不加载任何 G0/G1/G2 训练权重。
+        decoder.initialize_fpn_from_boundary(reference.decoder.boundary_fpn)
+        logger.info(
+            "Affinity FPN initialized strictly from %s:decoder.boundary_fpn; "
+            "upsample/affinity_head retain their seeded random initialization; "
+            "no geometry checkpoint loaded",
+            reference_path,
+        )
     adapter_cfg = cfg.get("feature_adapter", {})
     geometry_feature_adapter = None
     if bool(adapter_cfg.get("enabled", False)):
@@ -213,6 +368,18 @@ def build_system(config, cfg, device):
         geometry_feature_adapter,
         geometry_highres_refiner,
     ).to(device)
+    system.geometry_initialization = {
+        "version": 1,
+        "mode": init_mode,
+        "source_checkpoint": os.path.abspath(init_path or reference_path),
+        "source_component": (
+            "geometry_state_dict" if init_mode == "checkpoint" else "decoder.boundary_fpn"
+        ),
+        "random_components": (
+            [] if init_mode == "checkpoint" else ["upsample", "affinity_head"]
+        ),
+        "seed": int(cfg.get("seed", 42)),
+    }
     if geometry_highres_refiner is not None and bool(
         highres_cfg.get("train_only", True)
     ):
@@ -236,11 +403,39 @@ def build_optimizer(system, cfg):
         if parameter.requires_grad
     ]
     if decoder_parameters:
-        groups.append({
-            "params": decoder_parameters,
-            "lr": float(cfg.get("learning_rate", 5e-5)),
-            "name": "geometry_decoder",
-        })
+        if cfg.get("fpn_learning_rate") is None:
+            # 旧配置保持整个几何头共用一个学习率。
+            groups.append({
+                "params": decoder_parameters,
+                "lr": float(cfg.get("learning_rate", 5e-5)),
+                "name": "geometry_decoder",
+            })
+        else:
+            fpn_parameters = []
+            output_parameters = []
+            for name, parameter in system.geometry_decoder.named_parameters():
+                if parameter.requires_grad:
+                    target = (
+                        fpn_parameters if name.startswith("geometry_fpn.")
+                        else output_parameters
+                    )
+                    target.append(parameter)
+            if not fpn_parameters or not output_parameters:
+                raise ValueError(
+                    "fpn_learning_rate requires trainable geometry_fpn and output modules"
+                )
+            groups.extend([
+                {
+                    "params": fpn_parameters,
+                    "lr": float(cfg["fpn_learning_rate"]),
+                    "name": "geometry_fpn",
+                },
+                {
+                    "params": output_parameters,
+                    "lr": float(cfg.get("learning_rate", 5e-5)),
+                    "name": "geometry_output",
+                },
+            ])
     adapter_cfg = cfg.get("feature_adapter", {})
     adapter = system.geometry_feature_adapter
     if adapter is not None and any(
@@ -541,24 +736,32 @@ def evaluate_deployment_validation(
 
 def save_checkpoint(
     path, system, config, epoch, best_score, reference_path, reference_sha,
-    init_path, digest, split, selection_metric, best_oracle_score,
+    init_path, digest, split, selection_metric, best_oracle_score, best_epoch=None,
 ):
     payload = {
-        "format": "affinity_geometry_g1_v3",
+        "format": "affinity_geometry_g1_v4",
         "epoch": int(epoch),
         "best_selection_metric": selection_metric,
         "best_selection_score": float(best_score),
+        "best_selection_epoch": int(epoch if best_epoch is None else best_epoch),
+        "best_selection_direction": "min" if selection_metric == "val_affinity_loss" else "max",
+        "validation_protocol_version": (
+            AFFINITY_LOSS_PROTOCOL if selection_metric == "val_affinity_loss" else None
+        ),
         "best_val_gt_penalized_miou": float(best_oracle_score),
         "deployment_promotion_required": selection_metric != "deployment_score_total",
         "affinity_offsets": [list(value) for value in DEFAULT_AFFINITY_OFFSETS],
         "geometry_state_dict": system.geometry_decoder.state_dict(),
         "reference_checkpoint": os.path.abspath(reference_path),
         "reference_checkpoint_sha256": reference_sha,
-        "geometry_init_checkpoint": os.path.abspath(init_path),
+        "geometry_init_checkpoint": os.path.abspath(init_path) if init_path else None,
         "semantic_state_digest": digest,
         "split": split,
         "config": config,
     }
+    initialization = getattr(system, "geometry_initialization", None)
+    if initialization is not None:
+        payload["geometry_initialization"] = dict(initialization)
     if system.geometry_feature_adapter is not None:
         payload["geometry_feature_adapter_state_dict"] = (
             system.geometry_feature_adapter.state_dict()
@@ -600,15 +803,29 @@ def main():
         cfg.get("forced_train_names", ["train_001", "train_002"]),
     )
     split = {"train": train_names, "val": val_names, "seed": seed}
+    expected_val = cfg.get("expected_val_names")
+    if expected_val is not None and set(val_names) != set(expected_val):
+        raise ValueError(f"Validation split changed: {val_names} != {expected_val}")
     logger.info("Split train=%d val=%d val_names=%s", len(train_names), len(val_names), val_names)
     dataset_kwargs = {
         "image_size": int(cfg.get("input_size", 1024)),
         "output_grid": int(cfg.get("output_grid", 512)),
         "cache_in_memory": True,
     }
-    manual_train_base = OffsetGeometryDataset(
-        raw_dir, sample_names=train_names, **dataset_kwargs
+    manual_train_base = build_manual_geometry_dataset(
+        config, cfg, raw_dir, train_names, training=True, **dataset_kwargs
     )
+    if manual_train_base.completed_gt_dir is not None:
+        split["manual_training_targets"] = {
+            "source": "completed_instance_map",
+            "directory": cfg["manual_train_completed_gt_dir"],
+            "unknown": "ignore",
+            "validation_source": "original_labelme",
+        }
+        logger.info(
+            "Manual training targets: completed GT from %s; validation: original LabelMe",
+            manual_train_base.completed_gt_dir,
+        )
     augmentation_cfg = cfg.get("augmentation", {})
     dataset_parts = [manual_train_base]
     augmentation_parts = [augmentation_cfg]
@@ -687,21 +904,8 @@ def main():
         ]
         if crop_base is not None:
             sampling_masses.append(pseudo_fraction * crop_fraction)
-        weights = torch.cat(
-            [
-                torch.full((len(part),), mass / len(part))
-                for part, mass in zip(dataset_parts, sampling_masses)
-            ]
-        ).double()
-        epoch_samples = int(
-            sam2_geometry_cfg.get("samples_per_epoch", 2 * len(manual_train_base))
-        )
-        sampler = WeightedRandomSampler(
-            weights,
-            num_samples=epoch_samples,
-            replacement=True,
-            generator=torch.Generator().manual_seed(seed),
-        )
+        sampler = build_geometry_sampler(dataset_parts, sampling_masses, cfg, seed)
+        epoch_samples = len(sampler)
         split["sam2_geometry"] = {
             "count": len(pseudo_base),
             "pseudo_fraction": pseudo_fraction,
@@ -724,6 +928,17 @@ def main():
             [round(value, 3) for value in sampling_masses],
             epoch_samples,
         )
+    elif cfg.get("samples_per_epoch") is not None:
+        sampler = build_geometry_sampler(dataset_parts, sampling_masses, cfg, seed)
+        split["manual_sampling"] = {
+            "count": len(manual_train_base),
+            "samples_per_epoch": len(sampler),
+            "replacement": True,
+        }
+        logger.info(
+            "Manual-only resampling: manual=%d samples_per_epoch=%d replacement=True",
+            len(manual_train_base), len(sampler),
+        )
     train_parts = [
         AffinityGeometryAugmentedDataset(dataset, augmentation)
         for dataset, augmentation in zip(dataset_parts, augmentation_parts)
@@ -731,7 +946,9 @@ def main():
     train_dataset = (
         train_parts[0] if len(train_parts) == 1 else ConcatDataset(train_parts)
     )
-    val_dataset = OffsetGeometryDataset(raw_dir, sample_names=val_names, **dataset_kwargs)
+    val_dataset = build_manual_geometry_dataset(
+        config, cfg, raw_dir, val_names, training=False, **dataset_kwargs
+    )
     loader_workers = int(cfg.get("num_workers", 0))
     loader = DataLoader(
         train_dataset,
@@ -768,6 +985,7 @@ def main():
     graph_thresholds = cfg.get("graph_thresholds")
     oracle_validation_grid = cfg.get("oracle_validation_grid")
     deployment_recipe = deployment_validation_recipe(cfg)
+    selection_metric = resolve_selection_metric(cfg, deployment_recipe["enabled"])
     val_image_paths = [Path(raw_dir) / f"{name}.jpg" for name in val_names]
     system.eval()
     baseline_rows = [
@@ -800,19 +1018,28 @@ def main():
             json.dumps(deployment_baseline, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        selection_metric = "deployment_score_total"
+    loss_history = []
+    if selection_metric == "val_affinity_loss":
+        loss_baseline = evaluate_affinity_loss(system, val_dataset, cfg)
+        (output_dir / "loss_baseline.json").write_text(
+            json.dumps(loss_baseline, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        best_score = loss_baseline["loss"]
+        loss_history.append({"epoch": 0, "loss": best_score})
+    elif selection_metric == "deployment_score_total":
         best_score = deployment_baseline["score_total"]
     else:
-        logger.warning(
-            "Deployment validation disabled: best_affinity.pth remains an "
-            "oracle-geometry diagnostic and requires external promotion"
-        )
-        selection_metric = "oracle_gt_penalized_miou"
         best_score = best_oracle_score
+    if not math.isfinite(best_score):
+        raise ValueError("Non-finite epoch-0 checkpoint selection score")
+    best_epoch = 0
+    logger.info("Selection metric=%s direction=%s epoch0=%.8f; final deployment decides promotion",
+                selection_metric, "min" if selection_metric == "val_affinity_loss" else "max",
+                best_score)
     save_checkpoint(
         output_dir / "best_affinity.pth", system, config, 0, best_score,
         reference_path, reference_sha, init_path, digest, split,
-        selection_metric, best_oracle_score,
+        selection_metric, best_oracle_score, best_epoch,
     )
     write_val_monitor(
         system,
@@ -828,6 +1055,12 @@ def main():
             int(cfg.get("input_size", 1024)), int(cfg.get("output_grid", 512)),
         )
     optimizer = build_optimizer(system, cfg)
+    if cfg.get("fpn_learning_rate") is not None:
+        for group in optimizer.param_groups:
+            logger.info(
+                "Optimizer group=%s parameters=%d initial_lr=%.8g",
+                group["name"], sum(p.numel() for p in group["params"]), group["lr"],
+            )
     epochs = int(cfg.get("epochs", 20))
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=max(1, epochs), eta_min=float(cfg.get("min_learning_rate", 1e-5))
@@ -837,6 +1070,7 @@ def main():
     metrics_file = open(output_dir / "metrics.csv", "w", newline="", encoding="utf-8")
     fields = [
         "epoch", "train_loss", "train_edge_precision", "train_edge_recall",
+        "attempted_steps", "optimizer_steps", "amp_skipped_steps",
         "val_gt_penalized_miou", "val_instance_miou_valid",
         "val_instance_count_abs_error", "val_split_gt_instance_count",
         "val_merged_pred_instance_count", "val_raw_component_count",
@@ -851,14 +1085,24 @@ def main():
         "adapter_gate_scale0_abs", "adapter_gate_scale1_abs",
         "adapter_gate_scale2_abs", "adapter_gate_scale3_abs",
     ]
+    if selection_metric == "val_affinity_loss":
+        fields.append("val_affinity_loss")
+    # 仅新分组配置增加列，记录该轮实际使用的学习率；保留旧 learning_rate 列含义。
+    record_group_lrs = cfg.get("fpn_learning_rate") is not None
+    if record_group_lrs:
+        fields.extend(f"learning_rate_{group['name']}" for group in optimizer.param_groups)
     writer = csv.DictWriter(metrics_file, fieldnames=fields)
     writer.writeheader()
     logger.info("Baseline val=%s", baseline)
     for epoch in range(1, epochs + 1):
+        epoch_group_lrs = {
+            f"learning_rate_{group['name']}": group["lr"]
+            for group in optimizer.param_groups
+        } if record_group_lrs else {}
         system.train()
         totals = {
             "loss": 0.0, "precision": 0.0, "recall": 0.0,
-            "negative_tail_loss": 0.0, "batches": 0,
+            "negative_tail_loss": 0.0, "batches": 0, "optimizer_steps": 0,
         }
         for batch in loader:
             image = batch["image"].to(device, non_blocking=True)
@@ -970,8 +1214,11 @@ def main():
                 list(system.geometry_trainable_parameters()),
                 float(cfg.get("grad_clip", 1.0)),
             )
+            scale_before = scaler.get_scale()
             scaler.step(optimizer)
             scaler.update()
+            # scale 下降表示本次因非有限梯度跳过更新；禁用 AMP 时 scale 恒为 1。
+            totals["optimizer_steps"] += int(scaler.get_scale() >= scale_before)
             totals["loss"] += float(train_metrics["loss"])
             totals["precision"] += float(train_metrics["precision"])
             totals["recall"] += float(train_metrics["recall"])
@@ -991,6 +1238,10 @@ def main():
             for index in range(len(val_dataset))
         ]
         val = aggregate_validation(val_rows)
+        loss_validation = None
+        if selection_metric == "val_affinity_loss":
+            loss_validation = evaluate_affinity_loss(system, val_dataset, cfg)
+            loss_history.append({"epoch": epoch, "loss": loss_validation["loss"]})
         deployment = None
         if deployment_recipe["enabled"]:
             deployment = evaluate_deployment_validation(
@@ -1033,6 +1284,9 @@ def main():
             "train_loss": totals["loss"] / totals["batches"],
             "train_edge_precision": totals["precision"] / totals["batches"],
             "train_edge_recall": totals["recall"] / totals["batches"],
+            "attempted_steps": totals["batches"],
+            "optimizer_steps": totals["optimizer_steps"],
+            "amp_skipped_steps": totals["batches"] - totals["optimizer_steps"],
             **{f"val_{key}": value for key, value in val.items()},
             **deployment_values,
             "learning_rate": optimizer.param_groups[0]["lr"],
@@ -1040,9 +1294,18 @@ def main():
                 totals["negative_tail_loss"] / totals["batches"]
             ),
             **adapter_metrics(system),
+            **epoch_group_lrs,
         }
+        if loss_validation is not None:
+            row["val_affinity_loss"] = loss_validation["loss"]
+            logger.info("epoch=%d val_affinity_loss=%.8f", epoch, loss_validation["loss"])
         writer.writerow(row)
         metrics_file.flush()
+        logger.info(
+            "epoch=%d attempted_steps=%d optimizer_steps=%d amp_skipped_steps=%d",
+            epoch, row["attempted_steps"], row["optimizer_steps"],
+            row["amp_skipped_steps"],
+        )
         logger.info(
             "epoch=%d train=%.4f oracle_pen=%.4f valid=%.4f count_err=%.1f "
             "split=%.1f merge=%.1f raw=%.1f cap=%.1f edge_p=%.4f edge_r=%.4f",
@@ -1073,16 +1336,19 @@ def main():
         best_oracle_score = max(
             best_oracle_score, row["val_gt_penalized_miou"]
         )
-        selection_score = (
-            deployment["score_total"]
-            if deployment is not None else row["val_gt_penalized_miou"]
-        )
-        if selection_score > best_score:
+        if selection_metric == "val_affinity_loss":
+            selection_score = loss_validation["loss"]
+        elif selection_metric == "deployment_score_total":
+            selection_score = deployment["score_total"]
+        else:
+            selection_score = row["val_gt_penalized_miou"]
+        if selection_improved(selection_score, best_score, selection_metric):
             best_score = selection_score
+            best_epoch = epoch
             save_checkpoint(
                 output_dir / "best_affinity.pth", system, config, epoch, best_score,
                 reference_path, reference_sha, init_path, digest, split,
-                selection_metric, best_oracle_score,
+                selection_metric, best_oracle_score, best_epoch,
             )
         if epoch % int(cfg.get("monitor_interval", 5)) == 0 or epoch == epochs:
             semantic_contract_audit(
@@ -1092,7 +1358,7 @@ def main():
             save_checkpoint(
                 output_dir / "latest_affinity.pth", system, config, epoch, best_score,
                 reference_path, reference_sha, init_path, digest, split,
-                selection_metric, best_oracle_score,
+                selection_metric, best_oracle_score, best_epoch,
             )
             write_val_monitor(
                 system,
@@ -1108,6 +1374,15 @@ def main():
                     int(cfg.get("input_size", 1024)), int(cfg.get("output_grid", 512)),
                 )
     metrics_file.close()
+    if loss_history:
+        ranked = sorted(loss_history, key=lambda item: (item["loss"], item["epoch"]))
+        (output_dir / "selection_summary.json").write_text(json.dumps({
+            "metric": selection_metric, "direction": "min",
+            "protocol": AFFINITY_LOSS_PROTOCOL, "best_epoch": best_epoch,
+            "best_loss": best_score, "runner_up": ranked[1] if len(ranked) > 1 else None,
+            "best_runner_up_gap": ranked[1]["loss"] - best_score if len(ranked) > 1 else None,
+            "history": loss_history,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
     logger.info(
         "Affinity G1 complete selection=%s best=%.6f output=%s",
         selection_metric, best_score, output_dir,

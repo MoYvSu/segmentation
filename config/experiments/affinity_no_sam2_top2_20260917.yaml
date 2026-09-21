@@ -1,0 +1,12 @@
+# -*- coding: utf-8 -*-
+# V-noSAM2：只替换去SAM2、等总预算训练的几何loss-best；保留E10a语义。
+_base: affinity_skip_v6_top2_20260916.yaml
+
+affinity_geometry_g1:
+  geometry_init_checkpoint: outputs/20260917_align_nosam2/geometry_training/best_affinity.pth
+
+affinity_deployment:
+  checkpoint: outputs/20260917_align_nosam2/geometry_training/best_affinity.pth
+
+inference:
+  output_dir: outputs/20260917_align_nosam2/geometry_deployment

@@ -1,0 +1,9 @@
+# -*- coding: utf-8 -*-
+# S-align：只替换为坐标修复后的语义loss-best；L几何和top2推理保持不变。
+_base: affinity_semantic_newgt_l_top2_20260916.yaml
+
+semantic_challenger:
+  checkpoint: outputs/20260917_align_nosam2/semantic_training/best_model_stage2.pth
+
+inference:
+  output_dir: outputs/20260917_align_nosam2/semantic_deployment

@@ -1,0 +1,10 @@
+_base: affinity_geometry_g2_skip_v6.yaml
+
+affinity_geometry_g1:
+  # 对照 V：只取消 SAM2 无类别几何监督，人工旧 GT 有放回重采样补齐预算。
+  # 保留 joint-v3 初始化、26/6 划分、学习率、损失、冻结参数及验证选优口径。
+  # 52 次抽取 / batch 2 × 120 轮 = 3120 次更新；不改变独立训练环节数。
+  samples_per_epoch: 52
+  sam2_geometry:
+    enabled: false
+  output_dir: outputs/20260917_align_nosam2/geometry_training

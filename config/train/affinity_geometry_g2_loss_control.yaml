@@ -1,0 +1,15 @@
+_base: affinity_geometry_g2_sam2.yaml
+
+affinity_geometry_g1:
+  # C：保留 G1，只让 G2 改用预先声明的人工验证损失选优。
+  geometry_init_checkpoint: outputs/affinity_geometry_g1/best_affinity.pth
+  output_dir: outputs/20260912_g1_g2_ablation/g2_loss_control
+  selection_metric: val_affinity_loss
+  expected_val_names: [train_172, train_176, train_349, train_623, train_873, train_888]
+  deployment_validation:
+    enabled: false
+  monitor_interval: 30
+  unlabeled_monitor_count: 0
+  num_workers: 0
+  loss:
+    normalize_edge_weights: true

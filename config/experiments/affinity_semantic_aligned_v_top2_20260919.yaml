@@ -1,0 +1,13 @@
+# -*- coding: utf-8 -*-
+# 统一组合：S-align 语义 e13 + V 几何 e115，沿用既定 top2/high=0.65 推理。
+_base: affinity_skip_v6_top2_20260916.yaml
+
+semantic_challenger:
+  checkpoint: outputs/20260917_align_nosam2/semantic_training/best_model_stage2.pth
+  replace_reference_semantic: true
+
+inference:
+  output_dir: outputs/20260919_unified_alignment/deployment
+
+post_process:
+  save_visualization: false

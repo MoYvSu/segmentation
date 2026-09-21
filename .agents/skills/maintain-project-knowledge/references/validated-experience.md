@@ -1,5 +1,20 @@
 # Validated experience
 
+## 20260914-confidential-artifacts-across-branches
+
+- status: validated
+- last_verified: 2026-09-14
+- scope: 赛题数据与派生产物的Git暂存、历史、跨分支传播
+- finding: 根目录忽略outputs不等于忽略output，分支间忽略规则也不自动同步；退出跟踪只改变最新树，
+  不能清除历史。必须检查完整待推送祖先，并防止内部快照或旧克隆重新带回产物。
+- evidence: 本次远程只读镜像确认两个旧分支仍跟踪348/366个output文件，另有历史标注数组与可视化；
+  用户未提供新的图片外泄链接，不能把担忧写成已确认新外泄。`tests/test_confidential_artifacts_guard.py`
+  五项测试覆盖暂存路径、改名/内嵌图片、干净最新树与污染祖先、内部引用、跨分支安装及既有hook保护。
+- reuse_conditions: 按用户明确的最高级项目保密要求，所有分支及新克隆遵守根AGENTS.md；使用
+  `tools/confidential_artifacts_guard.py`和`docs/CONFIDENTIAL_ARTIFACTS.md`，安全公开脚本与本地产物分开存放。
+- limits: Git hooks不代替内容审阅，不控制浏览器上传或未安装防护的克隆；分支历史清理不等于GitHub缓存/PR
+  或第三方副本全部清除。原始私有镜像、恢复bundle和refs/codex快照不得推送。
+
 This file contains evidence-backed project knowledge with explicit scope and
 limits. Entries here may guide future tasks but are not automatically global
 rules.

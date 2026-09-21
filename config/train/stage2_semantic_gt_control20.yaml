@@ -1,0 +1,38 @@
+# -*- coding: utf-8 -*-
+# 语义新 GT 配对对照：旧监督 / 新 GT 验证，其他设置由新组完整复用。
+_base: stage2_semantic_e10a_cold20.yaml
+
+sam2:
+  input_normalization: legacy_none
+
+data:
+  seed: 42
+  train_ratio: 0.8
+  num_workers: 4
+  semantic_train_completed_gt_dir: ""
+  semantic_val_completed_gt_dir: outputs/experiments/seeded_label_completion_o1/radius_8/derived_maps
+
+train:
+  seed: 42
+  deterministic: true
+  # 冷启动短跑确认默认65536会溢出并跳步；两组共同使用256。
+  amp_init_scale: 256.0
+
+semi_supervised:
+  output_dir: outputs/stage2_semantic_gt_control20_20260916
+  selection_metric: val_loss
+  epochs: 20
+  labeled_steps_per_epoch: 62
+  unlabeled_samples_per_epoch: 248
+  save_checkpoints: false
+  checkpoint_interval: 20
+  diagnostics:
+    save_initial_monitor: false
+  monitor:
+    num_images: 3
+    output_dir: outputs/stage2_semantic_gt_control20_20260916/monitor
+
+# dark_rim 依赖 GT 边界。两组共同关闭，确保换 GT 不同时改变输入外观。
+progressive_aug:
+  op_weights:
+    dark_rim: 0.0
