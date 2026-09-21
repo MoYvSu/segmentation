@@ -61,7 +61,8 @@ def instance_balanced_core_bce(
     if labels.shape != logits.shape:
         raise ValueError(f"instance_map {labels.shape} != logits {logits.shape}")
 
-    foreground = labels > 0
+    foreground = (labels > 0) & (target >= 0)
+    target = target.clamp(0.0, 1.0)
     if not bool(foreground.any()):
         zero = logits.sum() * 0.0
         return zero, {

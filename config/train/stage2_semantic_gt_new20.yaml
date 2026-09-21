@@ -1,0 +1,11 @@
+# -*- coding: utf-8 -*-
+# 相对同配方旧 GT 对照，只更换有标签训练监督及产物路径。
+_base: stage2_semantic_gt_control20.yaml
+
+data:
+  semantic_train_completed_gt_dir: outputs/experiments/seeded_label_completion_o1/radius_8/derived_maps
+
+semi_supervised:
+  output_dir: outputs/stage2_semantic_gt_new20_20260916
+  monitor:
+    output_dir: outputs/stage2_semantic_gt_new20_20260916/monitor

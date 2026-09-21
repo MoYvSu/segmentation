@@ -5,8 +5,9 @@
 为第二阶段半监督 Mean Teacher 提供双流数据加载：
 - 有标签流：复用 BoundaryDataset（图像 + 净化 GT + EDT 权重）
 - 无标签流：弱/强两路分叉增强
-  - img_weak: 仅 letterbox，无增强（教师预测源）
-  - img_strong: 弱图 + 强空间增强（旋转/翻转）+ 外观增强（高斯模糊/亮度对比度）
+  - shared_spatial_augmentation=True 时，两路共享旋转/翻转坐标
+  - img_weak: 无外观增强（教师预测源）；img_strong: 外观增强后的学生输入
+  - 默认保留历史学生单路空间增强，仅供旧配置复现；新实验应显式开启共享坐标
   - patch_mask: 随机 Patch Masking（30% 像素遮挡），强制网络插值缺失晶界
 
 非侵入式设计：不修改 data/dataset.py，仅复用其工具函数。
@@ -29,6 +30,10 @@ from data.dataset import (
     split_train_val_indices,
 )
 from data.native_multiscale import native_multiscale_crop
+from data.semantic_targets import (
+    load_completed_semantic_source,
+    semantic_targets_from_instances,
+)
 from utils.instance_metrics import load_labelme_instances
 
 
@@ -61,6 +66,7 @@ class LabeledDataset(Dataset):
         center_sigma: float = 4.0,
         native_multiscale_config: Optional[dict] = None,
         include_instance_map: bool = False,
+        completed_gt_dir: Optional[str] = None,
     ):
         super().__init__()
         self.data_dir = data_dir
@@ -79,6 +85,9 @@ class LabeledDataset(Dataset):
         self.center_sigma = center_sigma
         self.native_multiscale_config = native_multiscale_config or {}
         self.include_instance_map = bool(include_instance_map)
+        self.completed_gt_dir = completed_gt_dir
+        if completed_gt_dir and self.native_multiscale_config.get("enabled", False):
+            raise ValueError("completed semantic GT requires native_multiscale.enabled=false")
         if self.include_instance_map and self.native_multiscale_config.get(
             "enabled", False
         ):
@@ -100,7 +109,15 @@ class LabeledDataset(Dataset):
         # 与 BoundaryDataset 使用同一划分函数（同 seed / train_ratio）
         selected = split_train_val_indices(len(self.samples), train_ratio, seed, split)
         self.samples = [self.samples[i] for i in selected]
-        self.instance_centers = {
+        # 原数据只决定固定样本集合与划分；开启新 GT 后不再读取旧标签作监督。
+        if self.completed_gt_dir:
+            for img_path, _ in self.samples:
+                stem = os.path.splitext(os.path.basename(img_path))[0]
+                for suffix in ("_gt.npz", "_class.json"):
+                    path = os.path.join(self.completed_gt_dir, stem + suffix)
+                    if not os.path.isfile(path):
+                        raise FileNotFoundError(f"Incomplete semantic GT cohort: {path}")
+        self.instance_centers = {} if self.completed_gt_dir else {
             img_path: labelme_instance_centers(os.path.splitext(img_path)[0] + ".json")
             for img_path, _ in self.samples
         }
@@ -118,26 +135,46 @@ class LabeledDataset(Dataset):
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         h_orig, w_orig = image.shape[:2]
 
-        gt_data = np.load(gt_path)
-        semantic = gt_data["semantic"]
-        boundary_core = gt_data["boundary"]
-        if self.boundary_target_key in gt_data.files:
-            boundary = np.asarray(gt_data[self.boundary_target_key], dtype=np.float32)
-        else:
-            boundary = boundary_core.astype(np.float32)
         instance_map = None
-        if self.include_instance_map:
-            json_path = os.path.splitext(img_path)[0] + ".json"
-            instance_map, _, _ = load_labelme_instances(
-                json_path, image_shape=(h_orig, w_orig)
+        if self.completed_gt_dir:
+            stem = os.path.splitext(os.path.basename(img_path))[0]
+            instance_map, class_lookup = load_completed_semantic_source(
+                os.path.join(self.completed_gt_dir, stem + "_gt.npz"),
+                (h_orig, w_orig),
             )
+        else:
+            with np.load(gt_path, allow_pickle=False) as gt_data:
+                semantic = gt_data["semantic"]
+                boundary_core = gt_data["boundary"]
+                if self.boundary_target_key in gt_data.files:
+                    boundary = np.asarray(gt_data[self.boundary_target_key], dtype=np.float32)
+                else:
+                    boundary = boundary_core.astype(np.float32)
+            if self.include_instance_map:
+                json_path = os.path.splitext(img_path)[0] + ".json"
+                instance_map, _, _ = load_labelme_instances(
+                    json_path, image_shape=(h_orig, w_orig)
+                )
 
         from data.dataset import letterbox_mask, compute_boundary_weight
         native_cfg = self.native_multiscale_config
         use_native_multiscale = bool(self.augment and native_cfg.get("enabled", False))
         sample_meta = {}
         instance_lb = None
-        if use_native_multiscale:
+        if self.completed_gt_dir:
+            image_lb, _, pad_h, pad_w = letterbox(image, self.image_size)
+            instance_lb, _, _, _ = letterbox_mask(instance_map, self.image_size)
+            # 图像仍 reflect；反射出来的标签不作为真实监督。
+            if pad_h:
+                instance_lb[-pad_h:, :] = 0
+            if pad_w:
+                instance_lb[:, -pad_w:] = 0
+            semantic_lb, boundary_lb = semantic_targets_from_instances(
+                instance_lb, class_lookup
+            )
+            boundary_core_lb = boundary_lb
+            center_lb = np.zeros_like(boundary_lb)
+        elif use_native_multiscale:
             (
                 image_lb, semantic_lb, boundary_lb, boundary_core_lb,
                 center_lb, sample_meta,
@@ -285,9 +322,12 @@ class UnlabeledDataset(Dataset):
     无标注数据集：对每张图像生成弱/强两路增强。
 
     输出：
-        img_weak: 仅 letterbox，无增强（教师预测源）
-        img_strong: 弱图 + 强空间增强 + 外观增强
+        img_weak: 教师预测源，无外观增强
+        img_strong: 空间增强 + 外观增强后的学生输入
         patch_mask: [1, H, W] 随机 Patch Masking（1=遮挡, 0=保留）
+
+    shared_spatial_augmentation=True 时两路共享几何坐标，适用于逐像素一致性。
+    False 仅保留历史配置行为：教师不做空间增强，学生单独旋转/翻转。
     """
 
     def __init__(
@@ -301,6 +341,7 @@ class UnlabeledDataset(Dataset):
         enable_appearance_aug: bool = True,
         enable_patch_mask: bool = False,
         boundary_cache_dir: Optional[str] = None,
+        shared_spatial_augmentation: bool = False,
     ):
         super().__init__()
         self.data_dir = data_dir
@@ -311,6 +352,7 @@ class UnlabeledDataset(Dataset):
         self.enable_appearance_aug = enable_appearance_aug
         self.enable_patch_mask = enable_patch_mask
         self.boundary_cache_dir = boundary_cache_dir
+        self.shared_spatial_augmentation = bool(shared_spatial_augmentation)
         self._cache = None
         self._cache_names: List[str] = []
         self._cache_index: Dict[str, int] = {}
@@ -381,11 +423,13 @@ class UnlabeledDataset(Dataset):
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         h_orig, w_orig = image.shape[:2]
 
-        # img_weak: 仅 letterbox
+        # 先完成 letterbox，再采样一次几何变换，保持历史随机数消耗与学生输入不变。
         img_weak, _, _, _ = letterbox(image, self.image_size)
 
-        # img_strong: 空间增强（+ 外观增强，可被渐进式增强替代时禁用）
+        # 修复模式：教师先共享学生的几何坐标，外观增强及遮挡仍只施加给学生。
         img_strong, spatial_params = self._apply_spatial_aug(img_weak)
+        if self.shared_spatial_augmentation:
+            img_weak = img_strong.copy()
         if self.enable_appearance_aug:
             img_strong = self._apply_appearance_aug(img_strong)
 

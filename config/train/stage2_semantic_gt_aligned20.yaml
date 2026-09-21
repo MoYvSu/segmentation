@@ -1,0 +1,10 @@
+# -*- coding: utf-8 -*-
+# S-align：相对 S-new 仅修复教师/学生空间坐标，保留固定教师与全部训练预算。
+# 原 S-new 保留历史行为供对照；后续语义一致性实验应从本配置继承。
+_base: stage2_semantic_gt_new20.yaml
+
+semi_supervised:
+  shared_spatial_augmentation: true
+  output_dir: outputs/20260917_align_nosam2/semantic_training
+  monitor:
+    output_dir: outputs/20260917_align_nosam2/semantic_training/monitor

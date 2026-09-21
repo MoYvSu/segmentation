@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import numpy as np
 import torch
 
@@ -33,6 +34,9 @@ class _System:
         self.reference_model = _Reference()
         self.geometry_feature_adapter = None
         self.geometry_decoder = _Geometry()
+
+    def geometry_forward_from_features(self, image, features):
+        return self.geometry_decoder(features)
 
 
 def test_replace_reference_semantic_uses_challenger_only():

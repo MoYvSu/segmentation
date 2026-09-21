@@ -509,6 +509,16 @@ def build_dataloaders(config, disable_unlabeled_appearance_aug=False,
     include_instance_map = float(
         train_cfg.get("semantic_instance_weight", 0.0)
     ) > 0
+    completed_train = data_cfg.get("semantic_train_completed_gt_dir", "")
+    completed_val = data_cfg.get("semantic_val_completed_gt_dir", "")
+    if completed_train or completed_val:
+        if not semi_cfg.get("freeze", {}).get("boundary_branch", False):
+            raise ValueError("completed semantic GT currently requires frozen boundary branch")
+        if float(train_cfg.get("center_weight", 0.0)) > 0:
+            raise ValueError("completed semantic GT does not provide center-head supervision")
+    labeled_kwargs = {}
+    if completed_train:
+        labeled_kwargs["completed_gt_dir"] = project_path(config, completed_train)
 
     labeled_dataset = LabeledDataset(
         data_dir=data_dir,
@@ -527,9 +537,11 @@ def build_dataloaders(config, disable_unlabeled_appearance_aug=False,
         center_sigma=data_cfg.get("center_sigma", 4.0),
         native_multiscale_config=data_cfg.get("native_multiscale", {}),
         include_instance_map=include_instance_map,
+        **labeled_kwargs,
     )
 
-    val_dataset_cls = LabeledDataset if include_instance_map else BoundaryDataset
+    val_uses_labeled = include_instance_map or bool(completed_val)
+    val_dataset_cls = LabeledDataset if val_uses_labeled else BoundaryDataset
     val_kwargs = dict(
         data_dir=data_dir,
         gt_dir=gt_dir,
@@ -547,6 +559,8 @@ def build_dataloaders(config, disable_unlabeled_appearance_aug=False,
     )
     if include_instance_map:
         val_kwargs["include_instance_map"] = True
+    if completed_val:
+        val_kwargs["completed_gt_dir"] = project_path(config, completed_val)
     val_dataset = val_dataset_cls(**val_kwargs)
 
     if len(labeled_dataset) == 0:
@@ -554,6 +568,8 @@ def build_dataloaders(config, disable_unlabeled_appearance_aug=False,
         sys.exit(1)
 
     if len(val_dataset) == 0:
+        if completed_train or completed_val:
+            raise ValueError("semantic GT comparison requires a nonempty held-out split")
         logger.warning("Validation dataset is empty, using labeled dataset for validation.")
         val_dataset = labeled_dataset
 
@@ -571,6 +587,13 @@ def build_dataloaders(config, disable_unlabeled_appearance_aug=False,
             enable_appearance_aug=not disable_unlabeled_appearance_aug,
             enable_patch_mask=semi_cfg.get("enable_patch_mask", False),
             boundary_cache_dir=boundary_cache_dir,
+            shared_spatial_augmentation=semi_cfg.get("shared_spatial_augmentation", False),
+        )
+        logger.info(
+            "Unlabeled spatial augmentation: %s",
+            "shared teacher/student coordinates"
+            if unlabeled_dataset.shared_spatial_augmentation
+            else "legacy student-only (historical reproduction)",
         )
     else:
         logger.warning(f"Unlabeled dataset is empty: {unlabeled_dir}")
@@ -599,7 +622,7 @@ def build_dataloaders(config, disable_unlabeled_appearance_aug=False,
     val_loader = DataLoader(
         val_dataset, batch_size=bs_labeled, shuffle=False,
         num_workers=num_workers,
-        collate_fn=labeled_collate_fn if include_instance_map else collate_fn,
+        collate_fn=labeled_collate_fn if val_uses_labeled else collate_fn,
         pin_memory=True, worker_init_fn=seed_dataloader_worker,
     )
 
@@ -701,6 +724,7 @@ def train_one_epoch(
     semantic_residual_max_abs = 0.0
     semantic_residual_calls = 0
     n_steps = 0
+    applied_steps = 0
 
     clip_params = list(student_model.decoder.parameters())
     if getattr(student_model, "boundary_adapter", None) is not None:
@@ -937,6 +961,7 @@ def train_one_epoch(
         )
 
         if use_amp:
+            scale_before = scaler.get_scale()
             scaler.scale(total_loss).backward()
             if grad_clip > 0 or diagnostics_enabled:
                 scaler.unscale_(optimizer)
@@ -951,6 +976,7 @@ def train_one_epoch(
                 torch.nn.utils.clip_grad_norm_(clip_params, grad_clip)
             scaler.step(optimizer)
             scaler.update()
+            step_applied = scaler.get_scale() >= scale_before
         else:
             total_loss.backward()
             if diagnostics_enabled:
@@ -963,9 +989,11 @@ def train_one_epoch(
             if grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(clip_params, grad_clip)
             optimizer.step()
+            step_applied = True
+        applied_steps += int(step_applied)
 
         # EMA 更新（冷启动语义头可使用固定 V6 教师，禁止被随机学生污染）
-        if teacher_model is not None and update_teacher:
+        if teacher_model is not None and update_teacher and step_applied:
             update_ema(teacher_model, student_model, ema_decay)
 
         total_loss_sum += total_loss.item()
@@ -1021,7 +1049,9 @@ def train_one_epoch(
         "bnd_pos_frac": total_bnd_pos / n,
         "bnd_gap": total_bnd_gap / n,
         "bnd_pred_rate": total_bnd_rate / n,
-        "optimizer_steps": n_steps,
+        "optimizer_steps": applied_steps,
+        "attempted_steps": n_steps,
+        "amp_skipped_steps": n_steps - applied_steps,
         "refine_grad_norm": total_refine_grad_norm / n,
         "semantic_residual_grad_norm": total_semantic_residual_grad_norm / n,
         "refine_residual_mean_abs": refine_residual_sum_abs / refine_n,
@@ -1083,11 +1113,12 @@ def validate(model, loader, criterion, device):
         bnd_prob = torch.sigmoid(bnd_logits)
         bnd_pred = (bnd_prob > 0.5).long()
         bnd_gt = (targets[:, 1] > 0.5).long()
-        bnd_tp += ((bnd_pred == 1) & (bnd_gt == 1)).sum().item()
-        bnd_fp += ((bnd_pred == 1) & (bnd_gt == 0)).sum().item()
-        bnd_fn += ((bnd_pred == 0) & (bnd_gt == 1)).sum().item()
-        positive = bnd_gt == 1
-        background = ~positive
+        valid = targets[:, 0] >= 0
+        bnd_tp += ((bnd_pred == 1) & (bnd_gt == 1) & valid).sum().item()
+        bnd_fp += ((bnd_pred == 1) & (bnd_gt == 0) & valid).sum().item()
+        bnd_fn += ((bnd_pred == 0) & (bnd_gt == 1) & valid).sum().item()
+        positive = (bnd_gt == 1) & valid
+        background = (bnd_gt == 0) & valid
         bnd_pos_prob_sum += float(bnd_prob[positive].sum())
         bnd_bg_prob_sum += float(bnd_prob[background].sum())
         bnd_pos_count += int(positive.sum())
@@ -1391,11 +1422,17 @@ def main():
         # semantic path.  This teacher remains fixed throughout training.
         fixed_semantic_teacher = build_teacher_model(student_model)
         teacher_is_fixed = True
-        student_model.decoder.reset_semantic_branch()
-        logger.info(
-            "E10 semantic cold start: fixed V6 teacher captured; student "
-            "seg_fpn, seg_branch and high-resolution semantic path reset"
-        )
+        if bool(semantic_cold_start_cfg.get("reset_student", True)):
+            student_model.decoder.reset_semantic_branch()
+            logger.info(
+                "E10 semantic cold start: fixed teacher captured; student "
+                "seg_fpn, seg_branch and high-resolution semantic path reset"
+            )
+        else:
+            logger.info(
+                "Semantic task refinement: preserve loaded semantic modules; "
+                "LoRA and geometry remain frozen"
+            )
 
     if semi_cfg.get("reset_boundary_branch", False):
         student_model.decoder.reset_boundary_branch()
@@ -1841,7 +1878,8 @@ def main():
     )
 
     use_amp = train_cfg.get("amp", False)
-    scaler = GradScaler('cuda', enabled=use_amp)
+    scaler = GradScaler('cuda', enabled=use_amp,
+                        init_scale=float(train_cfg.get("amp_init_scale", 65536.0)))
 
     ema_decay_base = semi_cfg.get("ema_decay", 0.999)
     adaptive_ema = semi_cfg.get("adaptive_ema", False)
@@ -2062,7 +2100,17 @@ def main():
     # 复合评分权重
     sem_w = train_cfg.get("composite_sem_weight", 0.4)
     bnd_w = train_cfg.get("composite_boundary_weight", 0.6)
-    logger.info(f"Best model 保存依据: composite_score = {sem_w:.1f}*mIoU + {bnd_w:.1f}*BndIoU")
+    selection_metric = str(semi_cfg.get("selection_metric", "composite"))
+    if selection_metric not in ("composite", "val_loss"):
+        raise ValueError(f"Unknown Stage-2 selection_metric: {selection_metric}")
+    selection = {
+        "metric": selection_metric,
+        "direction": "min" if selection_metric == "val_loss" else "max",
+        "best_value": float("inf") if selection_metric == "val_loss" else 0.0,
+        "best_epoch_1based": None,
+    }
+    initial_selection = dict(selection)
+    logger.info("Best model 保存依据: %s (%s)", selection_metric, selection["direction"])
 
     start_epoch = 0
     best_composite_score = 0.0
@@ -2102,6 +2150,17 @@ def main():
         best_composite_score = checkpoint.get(
             "best_composite_score", checkpoint.get("best_val_iou", 0.0)
         )
+        saved_selection = checkpoint.get("selection")
+        if saved_selection is not None:
+            if (saved_selection["metric"], saved_selection["direction"]) != (
+                selection["metric"], selection["direction"]
+            ):
+                raise ValueError("Resume checkpoint selection protocol differs from config")
+            selection = dict(saved_selection)
+        elif selection_metric == "val_loss":
+            raise ValueError("val_loss resume requires checkpoint selection metadata")
+        else:
+            selection["best_value"] = best_composite_score
         logger.info(
             f"Resumed from {resume_path} at epoch {start_epoch}, "
             f"best Composite Score: {best_composite_score:.4f}"
@@ -2130,6 +2189,7 @@ def main():
         )
         start_epoch = 0
         best_composite_score = 0.0
+        selection = dict(initial_selection)
         init_epoch = init_checkpoint.get("epoch", "?")
         init_score = init_checkpoint.get(
             "best_composite_score", init_checkpoint.get("best_val_iou", "?")
@@ -2479,6 +2539,8 @@ def main():
             logger.info(
                 "  Refine diagnostics: "
                 f"steps={train_metrics['optimizer_steps']} "
+                f"attempted={train_metrics['attempted_steps']} "
+                f"amp_skipped={train_metrics['amp_skipped_steps']} "
                 f"grad_l2={train_metrics['refine_grad_norm']:.3e} "
                 f"residual_abs={train_metrics['refine_residual_mean_abs']:.3e} "
                 f"residual_std={train_metrics['refine_residual_std']:.3e} "
@@ -2617,6 +2679,8 @@ def main():
             "bnd_gap": train_metrics["bnd_gap"],
             "bnd_pred_rate": train_metrics["bnd_pred_rate"],
             "optimizer_steps": train_metrics["optimizer_steps"],
+            "attempted_steps": train_metrics["attempted_steps"],
+            "amp_skipped_steps": train_metrics["amp_skipped_steps"],
             "refine_grad_norm": train_metrics["refine_grad_norm"],
             "semantic_residual_grad_norm": train_metrics[
                 "semantic_residual_grad_norm"
@@ -2666,18 +2730,28 @@ def main():
             "composite": composite_score,
         })
 
-        if composite_score > best_composite_score:
-            best_composite_score = composite_score
+        best_composite_score = max(best_composite_score, composite_score)
+        selection_value = (
+            val_metrics["loss"] if selection_metric == "val_loss" else composite_score
+        )
+        improved = np.isfinite(selection_value) and (
+            selection_value < selection["best_value"] if selection_metric == "val_loss"
+            else selection_value > selection["best_value"]
+        )
+        if improved:
+            selection["best_value"] = float(selection_value)
+            selection["best_epoch_1based"] = epoch + 1
             best_path = os.path.join(output_dir, "best_model_stage2.pth")
             torch.save(build_checkpoint(
                 model=student_model, config=config, epoch=epoch,
                 lora_state_dict=extract_lora_state_dict(student_model),
                 best_composite_score=best_composite_score,
                 optimizer=optimizer, scheduler=scheduler,
+                selection=selection,
             ), best_path)
             logger.info(
                 f"  New best model saved: {best_path} "
-                f"(composite={best_composite_score:.4f}, "
+                f"({selection_metric}={selection_value:.4f}, "
                 f"mIoU={val_metrics['mean_iou']:.4f}, "
                 f"bndIoU={val_metrics['boundary_iou']:.4f})"
             )
@@ -2690,6 +2764,7 @@ def main():
                 lora_state_dict=extract_lora_state_dict(student_model),
                 best_composite_score=best_composite_score,
                 optimizer=optimizer, scheduler=scheduler,
+                selection=selection,
             ), ckpt_path)
             logger.info(f"  Checkpoint saved: {ckpt_path}")
 
@@ -2702,10 +2777,12 @@ def main():
         model=student_model, config=config, epoch=total_epochs - 1,
         lora_state_dict=extract_lora_state_dict(student_model),
         best_composite_score=best_composite_score,
+        selection=selection,
     ), final_path)
     recorder.copy_checkpoint(final_path, "final_model_stage2.pth")
     logger.info(f"Stage-2 training complete! Final model: {final_path}")
     logger.info(f"Best Composite Score: {best_composite_score:.4f}")
+    logger.info("Best checkpoint selection: %s", selection)
     logger.info(f"Run artifacts: {recorder.run_dir}")
 
 

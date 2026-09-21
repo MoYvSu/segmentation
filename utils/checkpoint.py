@@ -231,6 +231,7 @@ def build_checkpoint(
     *, model: Any, config: Dict[str, Any], epoch: int,
     lora_state_dict: Dict[str, Any], best_composite_score: float,
     optimizer: Any = None, scheduler: Any = None,
+    selection: Dict[str, Any] = None,
 ) -> Dict[str, Any]:
     """Create the common checkpoint payload used by Stage 1 and Stage 2."""
     root = config.get("paths", {}).get("project_root", os.getcwd())
@@ -254,4 +255,6 @@ def build_checkpoint(
         payload["optimizer_state_dict"] = optimizer.state_dict()
     if scheduler is not None:
         payload["scheduler_state_dict"] = scheduler.state_dict()
+    if selection is not None:
+        payload["selection"] = dict(selection)
     return payload
