@@ -1,6 +1,48 @@
 # 配置目录
 
-当前部署基线为 `inference/final_affinity_g4b_high065.yaml`：V6 语义锚点 + G4b 8 通道
+2026-09-21：[复赛交接](../docs/HANDOFF_SEMIFINAL_20260921.md)。本轮未更改测试数据路径或默认推理配置；
+复赛数据目录待下轮核验。以下成绩及68图包均为初赛记录，复赛不得直接沿用固定文件数断言。
+
+2026-09-17：S用户回报官方`0.8393/0.8714/85.535`，为当前总分最佳候选；实际为S语义+L旧GT几何，S+V尚未组合核验。
+V已获用户回报官方`0.8430/0.8499/84.645`，接受省去V6独立边界训练，作为后续简化几何基线。
+L（E10a/top2，官方`0.8416/0.8538/84.770`）保留成绩回退及当前S语义实验的固定参照。
+`train/affinity_geometry_g2_direct_long_newgt.yaml` 继承 L 的120轮配方，只覆盖26张人工训练图的
+补缝 GT，原人工验证loss选优不变；见 [N实验记录](../docs/G2_LONG_NEWGT_20260916.md)。
+N已完成120轮及固定六图部署比较，用户回报黑盒`0.8415/0.8476`（按上下文归属N），折算84.455。
+新GT语义实验已完成，固定L几何的内部代理未获益，但官方总分提高0.765；面积稳定性与GT独立贡献仍待核验，默认推理文件未切换。
+S-align已回报`0.8407/0.8620/85.135`，接受正确对齐作为后续语义研究起点；
+V-noSAM2回报`0.8362/0.8181/82.715`，不接受取消64源图SAM2监督。
+2026-09-19组合入口`experiments/affinity_semantic_aligned_v_top2_20260919.yaml`已完成推理和68图打包：
+S-align e13 + V e115，top2/high0.65等保持不变；用户回报官方`0.8416/0.8569/84.925`。
+该组合成为后续统一研究对照，原S的85.535仍为最高分回退；未自动修改默认部署入口。
+见[统一推理与审计](../docs/UNIFIED_ALIGNMENT_AUDIT_20260919.md)。
+用户随后选择先执行[Stage1最终任务替代](../docs/STAGE1_FINAL_TASKS_20260919.md)：
+`train/stage1_final_tasks_20260919.yaml`联合适配LoRA，接
+`train/stage1_final_geometry120_20260919.yaml`和`train/stage1_final_semantic20_20260919.yaml`。
+串行入口为`tools/run_stage1_final_tasks.py`，正式训练已完成6600次实际更新；按loss选中联合e35、几何e57、语义e14，不引入EMA。
+部署配置为`experiments/stage1_final_tasks_top2_20260919.yaml`；官方回报`0.8448/0.7699/80.735`，
+比统一组合84.925低4.190、比原S低4.800，拒绝晋级。保留该配置供诊断，不修改既有基线。
+
+本轮入口为 `train/stage2_semantic_gt_aligned20.yaml`（仅开启共享空间坐标，20轮/1240次计划更新）与
+`train/affinity_geometry_g2_no_sam2.yaml`（取消SAM2、人工重采样补至52次/轮，120轮/3120次计划更新）。
+两项完整训练、固定部署与用户回报黑盒均已完成；保留语义修复和V/SAM2几何基线，见[实验记录](../docs/ALIGN_NOSAM2_EXPERIMENT_20260917.md)。
+配套 `experiments/affinity_semantic_aligned_l_top2_20260917.yaml` 固定L几何；
+`experiments/affinity_no_sam2_top2_20260917.yaml` 固定E10a语义，不合并两个训练变化。
+
+`train/stage2_semantic_gt_new20.yaml`与`train/stage2_semantic_gt_control20.yaml`为S配对实验：
+两组继承E10a冷启动、冻结共享特征与固定教师，各20轮，实际25训练/7验证，按共同新GT验证loss选优。
+仅训练GT与产物路径不同；共同关闭GT依赖暗边增强、AMP初始scale=256，记录实际更新/跳步。
+两组均完成1240次实际更新，loss-best为新GT20/旧GT7。
+`experiments/affinity_semantic_newgt_l_top2_20260916.yaml`固定新语义第20轮、L best115及top2，
+用于用户授权的68图提交核验；不叠加V几何或改动后处理。
+见[S实验记录](../docs/SEMANTIC_NEWGT_20260916.md)。
+
+`train/affinity_geometry_g2_skip_v6.yaml`为V消融：继承L，使用joint-v3参考权重与
+`reference_boundary_fpn`初始化，旧GT/预算不变。部署对照入口为
+`experiments/affinity_skip_v6_top2_20260916.yaml`；120轮完成，loss-best为115，内部总体接近L且部分指标略好，
+珠光体多余预测略增。V官方总分较L低0.125分，接受以此取舍减少独立阶段；见[V实验记录](../docs/G2_SKIP_V6_20260916.md)。
+
+历史部署基线为 `inference/final_affinity_g4b_high065.yaml`：V6 语义锚点 + G4b 8 通道
 affinity，使用 `high=0.65`、seal2、局部重建与受阻分水岭。训练 checkpoint 只能按固定的
 完整部署路径验证晋级，Oracle GT 前景重建仅作诊断。完整协议见
 `docs/AFFINITY_DEPLOYMENT_EVALUATION.md`；V6/B2 配置仍保留为回退。

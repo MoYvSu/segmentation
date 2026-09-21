@@ -62,3 +62,5 @@ tmp/musam_oracle_smoke/
 *_class.json
 *_class_confidence.json
 .claude/settings*.json
+# 本地赛题PDF保留原位，不纳入版本历史。
+/data/低碳钢金相图像无监督相区分割.pdf
