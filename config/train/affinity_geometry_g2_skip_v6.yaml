@@ -1,0 +1,9 @@
+_base: affinity_geometry_g2_direct_long_oldgt.yaml
+
+affinity_geometry_g1:
+  # V：相对已获黑盒成绩的 L，只跳过 V6 边界阶段。
+  # 从 joint-v3 边界 FPN 初始化；LoRA/语义须先核验与 V6 完全相同。
+  # 保留旧GT、120轮、52次抽取/轮、分组学习率及原验证loss选优。
+  reference_checkpoint: outputs/stage2_joint_v3/best_model_stage2.pth
+  geometry_init_mode: reference_boundary_fpn
+  output_dir: outputs/20260916_g2_skip_v6/training

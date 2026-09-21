@@ -18,6 +18,24 @@ from utils.instance_metrics import load_labelme_instances
 from utils.offset_letterbox import letterbox_instance_geometry
 
 
+def load_completed_instance_map(path: str | Path, image_shape) -> np.ndarray:
+    """读取补缝后的唯一实例目标；零 ID 与剩余 unknown 必须完全一致。"""
+    with np.load(path, allow_pickle=False) as payload:
+        instances = payload["instance_map"]
+        unknown = payload["residual_unknown"]
+    if instances.shape != tuple(image_shape) or unknown.shape != instances.shape:
+        raise ValueError(f"completed GT shape mismatch: {path}")
+    if instances.dtype.kind not in "iu" or np.any(instances < 0):
+        raise ValueError(f"completed GT requires nonnegative integer instance IDs: {path}")
+    if int(instances.max()) > np.iinfo(np.int32).max:
+        raise ValueError(f"completed GT instance IDs exceed int32: {path}")
+    if not np.all((unknown == 0) | (unknown == 1)):
+        raise ValueError(f"completed GT residual_unknown must be binary: {path}")
+    if not np.array_equal(unknown.astype(bool), instances == 0):
+        raise ValueError(f"completed GT unknown mask disagrees with instance IDs: {path}")
+    return instances.astype(np.int32, copy=False)
+
+
 def adaptive_center_heatmap(
     instance_map: np.ndarray,
     sigma_scale: float = 0.12,
@@ -67,8 +85,12 @@ class OffsetGeometryDataset(Dataset):
         center_min_sigma: float = 2.0,
         center_max_sigma: float = 8.0,
         cache_in_memory: bool = False,
+        completed_gt_dir: str | Path | None = None,
     ):
         self.data_dir = Path(data_dir)
+        self.completed_gt_dir = (
+            Path(completed_gt_dir) if completed_gt_dir is not None else None
+        )
         self.image_size = int(image_size)
         self.output_grid = int(output_grid)
         self.center_sigma_scale = float(center_sigma_scale)
@@ -92,6 +114,13 @@ class OffsetGeometryDataset(Dataset):
                 raise FileNotFoundError(f"requested labeled samples missing: {missing}")
         if not self.samples:
             raise ValueError(f"no labeled samples in {self.data_dir}")
+        if self.completed_gt_dir is not None:
+            missing = [
+                path.stem for path in self.samples
+                if not (self.completed_gt_dir / f"{path.stem}_gt.npz").is_file()
+            ]
+            if missing:
+                raise FileNotFoundError(f"requested completed GT missing: {missing}")
         self._cached_samples = None
         if self.cache_in_memory:
             self._cached_samples = [
@@ -113,9 +142,17 @@ class OffsetGeometryDataset(Dataset):
             raise FileNotFoundError(image_path)
         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         image_lb, _, _, _ = letterbox(image_rgb, self.image_size)
-        gt_instances, _, audit = load_labelme_instances(
-            image_path.with_suffix(".json"), image.shape[:2]
-        )
+        if self.completed_gt_dir is None:
+            gt_instances, _, audit = load_labelme_instances(
+                image_path.with_suffix(".json"), image.shape[:2]
+            )
+            uncovered_pixels = int(audit["uncovered_pixels"])
+        else:
+            # 不再拼接旧 LabelMe 的几何目标；所有几何派生量来自同一补缝图。
+            gt_instances = load_completed_instance_map(
+                self.completed_gt_dir / f"{image_path.stem}_gt.npz", image.shape[:2]
+            )
+            uncovered_pixels = int(np.count_nonzero(gt_instances == 0))
         geometry_map, valid_content, metadata = letterbox_instance_geometry(
             gt_instances, input_size=self.image_size, output_grid=self.output_grid
         )
@@ -134,11 +171,11 @@ class OffsetGeometryDataset(Dataset):
             "foreground": torch.from_numpy(foreground).unsqueeze(0),
             "valid_content": torch.from_numpy(valid_content).unsqueeze(0),
             "instance_map": torch.from_numpy(geometry_map.astype(np.int64)),
-            # Human LabelMe polygons may leave interface bands uncovered.
-            "uncovered_boundary_source": torch.tensor(True),
+            # 旧人工缝隙可供历史实验使用；补缝后的 unknown 永不作为负连接。
+            "uncovered_boundary_source": torch.tensor(self.completed_gt_dir is None),
             "image_name": image_path.name,
             "instance_count": int(len(np.unique(geometry_map)) - 1),
-            "uncovered_pixels": int(audit["uncovered_pixels"]),
+            "uncovered_pixels": uncovered_pixels,
             "content_shape": torch.tensor(
                 [metadata.content_height, metadata.content_width], dtype=torch.int32
             ),

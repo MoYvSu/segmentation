@@ -44,17 +44,24 @@ def _geometry_config(**overrides):
     }
 
 
-def test_skip_g0_matches_original_g0_pretraining_initialization_and_provenance(
-    monkeypatch, tmp_path
+@pytest.mark.parametrize("mode,reference_name", [
+    ("v6_boundary_fpn", "v6.pth"),
+    ("reference_boundary_fpn", "joint_v3.pth"),
+])
+def test_boundary_fpn_initialization_preserves_random_layers_and_provenance(
+    monkeypatch, tmp_path, mode, reference_name
 ):
     config = _config(tmp_path)
-    cfg = _geometry_config(geometry_init_mode="v6_boundary_fpn", geometry_init_checkpoint=None)
+    cfg = _geometry_config(
+        reference_checkpoint=reference_name,
+        geometry_init_mode=mode, geometry_init_checkpoint=None,
+    )
     device = torch.device("cpu")
     monkeypatch.setattr(training, "build_reference_model", _reference)
 
     # 按原 G0 main 的构造顺序建立独立参照，包含 reference 的随机数消耗。
     training.set_seed(42)
-    reference = _reference(config, device, "v6.pth")
+    reference = _reference(config, device, reference_name)
     expected = AffinityGeometryDecoder(
         in_channels=reference.encoder.get_stage_channels(), affinity_channels=8,
         fpn_channels=16, up_channels=16, output_grid=16,
@@ -69,6 +76,7 @@ def test_skip_g0_matches_original_g0_pretraining_initialization_and_provenance(
         context.setattr(torch, "load", unexpected_load)
         system, reference_path, init_path, digest = training.build_system(config, cfg, device)
     assert init_path is None
+    assert Path(reference_path).name == reference_name
     assert torch.equal(torch.get_rng_state(), expected_rng)
     assert all(not p.requires_grad for p in system.reference_model.parameters())
     assert all(p.requires_grad for p in system.geometry_decoder.parameters())
@@ -85,7 +93,7 @@ def test_skip_g0_matches_original_g0_pretraining_initialization_and_provenance(
     payload = torch.load(path, map_location="cpu", weights_only=False)
     assert payload["geometry_init_checkpoint"] is None
     assert payload["geometry_initialization"] == {
-        "version": 1, "mode": "v6_boundary_fpn",
+        "version": 1, "mode": mode,
         "source_checkpoint": os.path.abspath(reference_path),
         "source_component": "decoder.boundary_fpn",
         "random_components": ["upsample", "affinity_head"], "seed": 42,
@@ -121,6 +129,10 @@ def test_existing_checkpoint_initialization_remains_default_and_strict(monkeypat
     {"geometry_init_mode": "v6_boundary_fpn", "init_from_v6_boundary_fpn": False},
     {"geometry_init_mode": "v6_boundary_fpn", "feature_adapter": {"enabled": True}},
     {"geometry_init_mode": "v6_boundary_fpn", "highres_refiner": {"enabled": True}},
+    {"geometry_init_mode": "reference_boundary_fpn", "geometry_init_checkpoint": "old.pth"},
+    {"geometry_init_mode": "reference_boundary_fpn", "init_from_v6_boundary_fpn": False},
+    {"geometry_init_mode": "reference_boundary_fpn", "feature_adapter": {"enabled": True}},
+    {"geometry_init_mode": "reference_boundary_fpn", "highres_refiner": {"enabled": True}},
 ])
 def test_ambiguous_initialization_fails_before_loading_reference(cfg):
     # 空 config 不含 paths；若过早构造模型会先抛 KeyError，无法通过此断言。
@@ -142,3 +154,22 @@ def test_skip_g0_config_changes_only_initialization_and_output():
     assert before == after
     assert after["epochs"] == 30
     assert after["selection_metric"] == "val_affinity_loss"
+
+
+def test_skip_v6_config_preserves_l_budget_data_and_optimizer():
+    root = Path(__file__).resolve().parents[1]
+    baseline = load_config(str(root / "config/train/affinity_geometry_g2_direct_long_oldgt.yaml"))
+    candidate = load_config(str(root / "config/train/affinity_geometry_g2_skip_v6.yaml"))
+    expected_changes = {
+        "reference_checkpoint": "outputs/stage2_joint_v3/best_model_stage2.pth",
+        "geometry_init_mode": "reference_boundary_fpn",
+        "output_dir": "outputs/20260916_g2_skip_v6/training",
+    }
+    for key, value in expected_changes.items():
+        assert candidate["affinity_geometry_g1"].pop(key) == value
+        baseline["affinity_geometry_g1"].pop(key)
+    assert candidate == baseline
+    cfg = candidate["affinity_geometry_g1"]
+    assert cfg["epochs"] == 120 and cfg["geometry_init_checkpoint"] is None
+    assert cfg["selection_metric"] == "val_affinity_loss"
+    assert cfg.get("manual_train_completed_gt_dir") is None

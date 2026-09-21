@@ -1,0 +1,6 @@
+_base: affinity_geometry_g2_skip_g1.yaml
+
+affinity_geometry_g1:
+  # Z：相对 X 只删除 G0-long；复用 G0 的400步端点，保留G2全部配方。
+  geometry_init_checkpoint: outputs/affinity_geometry_g0/latest_affinity.pth
+  output_dir: outputs/20260914_top2_g0_ablation/g2_skip_g0_long

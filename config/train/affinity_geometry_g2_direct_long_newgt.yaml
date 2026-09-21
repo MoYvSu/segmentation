@@ -1,0 +1,7 @@
+_base: affinity_geometry_g2_direct_long_oldgt.yaml
+
+affinity_geometry_g1:
+  # N：相对 L 只替换26张人工训练图的几何目标，不接着 L 的 best 续训。
+  # 保留120轮、初始化、学习率、SAM2混采和原人工验证loss选优。
+  output_dir: outputs/20260916_g2_long_newgt/training
+  manual_train_completed_gt_dir: outputs/experiments/seeded_label_completion_o1/radius_8/derived_maps

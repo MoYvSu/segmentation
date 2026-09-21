@@ -82,6 +82,45 @@ logger = logging.getLogger("train_affinity_geometry_g1")
 AFFINITY_LOSS_PROTOCOL = "covered_pairs_per_image_fp32_v1"
 
 
+def build_manual_geometry_dataset(
+    config, cfg, raw_dir, sample_names, *, training, **dataset_kwargs
+):
+    """新 GT 只替换训练目标；验证始终使用原人工标注，保持 loss 选优口径。"""
+    completed_dir = cfg.get("manual_train_completed_gt_dir") if training else None
+    return OffsetGeometryDataset(
+        raw_dir, sample_names=sample_names,
+        completed_gt_dir=project_path(config, completed_dir) if completed_dir else None,
+        **dataset_kwargs,
+    )
+
+
+def build_geometry_sampler(dataset_parts, sampling_masses, cfg, seed):
+    """显式总抽样预算也适用于纯人工组；未配置时保持旧配方的采样行为。"""
+    sam2_cfg = cfg.get("sam2_geometry", {})
+    sam2_enabled = bool(sam2_cfg.get("enabled", False))
+    epoch_samples = cfg.get("samples_per_epoch")
+    if epoch_samples is None:
+        if not sam2_enabled:
+            return None
+        epoch_samples = sam2_cfg.get("samples_per_epoch", 2 * len(dataset_parts[0]))
+    epoch_samples = int(epoch_samples)
+    if epoch_samples <= 0:
+        raise ValueError("affinity_geometry_g1.samples_per_epoch must be positive")
+    # 保持历史混合采样先生成 float32 权重再转 double 的数值及随机序列。
+    weights = torch.cat(
+        [
+            torch.full((len(part),), mass / len(part))
+            for part, mass in zip(dataset_parts, sampling_masses)
+        ]
+    ).double()
+    return WeightedRandomSampler(
+        weights,
+        num_samples=epoch_samples,
+        replacement=True,
+        generator=torch.Generator().manual_seed(seed),
+    )
+
+
 def resolve_selection_metric(cfg, deployment_enabled):
     metric = cfg.get("selection_metric") or (
         "deployment_score_total" if deployment_enabled else "oracle_gt_penalized_miou"
@@ -235,7 +274,7 @@ def load_geometry_checkpoint_state(system, checkpoint):
 
 
 def resolve_geometry_initialization(cfg):
-    """显式区分继承 geometry checkpoint 与 G0 训练前的 V6 FPN 初始化。"""
+    """区分 geometry checkpoint 与参考边界 FPN；保留历史 V6 模式名兼容。"""
     mode = str(cfg.get("geometry_init_mode", "checkpoint"))
     checkpoint = cfg.get("geometry_init_checkpoint")
     if mode == "checkpoint":
@@ -243,15 +282,15 @@ def resolve_geometry_initialization(cfg):
             raise ValueError("geometry_init_mode=checkpoint requires geometry_init_checkpoint")
         if cfg.get("init_from_v6_boundary_fpn", False):
             raise ValueError("checkpoint initialization conflicts with init_from_v6_boundary_fpn")
-    elif mode == "v6_boundary_fpn":
+    elif mode in {"v6_boundary_fpn", "reference_boundary_fpn"}:
         if checkpoint:
-            raise ValueError("v6_boundary_fpn initialization requires geometry_init_checkpoint=null")
+            raise ValueError(f"{mode} initialization requires geometry_init_checkpoint=null")
         if cfg.get("init_from_v6_boundary_fpn") is False:
-            raise ValueError("v6_boundary_fpn initialization cannot disable boundary FPN copying")
+            raise ValueError(f"{mode} initialization cannot disable boundary FPN copying")
         if any(cfg.get(key, {}).get("enabled", False) for key in (
             "feature_adapter", "highres_refiner"
         )):
-            raise ValueError("v6_boundary_fpn ablation requires the original geometry decoder only")
+            raise ValueError(f"{mode} ablation requires the original geometry decoder only")
     else:
         raise ValueError(f"Unknown geometry_init_mode: {mode}")
     return mode
@@ -364,11 +403,39 @@ def build_optimizer(system, cfg):
         if parameter.requires_grad
     ]
     if decoder_parameters:
-        groups.append({
-            "params": decoder_parameters,
-            "lr": float(cfg.get("learning_rate", 5e-5)),
-            "name": "geometry_decoder",
-        })
+        if cfg.get("fpn_learning_rate") is None:
+            # 旧配置保持整个几何头共用一个学习率。
+            groups.append({
+                "params": decoder_parameters,
+                "lr": float(cfg.get("learning_rate", 5e-5)),
+                "name": "geometry_decoder",
+            })
+        else:
+            fpn_parameters = []
+            output_parameters = []
+            for name, parameter in system.geometry_decoder.named_parameters():
+                if parameter.requires_grad:
+                    target = (
+                        fpn_parameters if name.startswith("geometry_fpn.")
+                        else output_parameters
+                    )
+                    target.append(parameter)
+            if not fpn_parameters or not output_parameters:
+                raise ValueError(
+                    "fpn_learning_rate requires trainable geometry_fpn and output modules"
+                )
+            groups.extend([
+                {
+                    "params": fpn_parameters,
+                    "lr": float(cfg["fpn_learning_rate"]),
+                    "name": "geometry_fpn",
+                },
+                {
+                    "params": output_parameters,
+                    "lr": float(cfg.get("learning_rate", 5e-5)),
+                    "name": "geometry_output",
+                },
+            ])
     adapter_cfg = cfg.get("feature_adapter", {})
     adapter = system.geometry_feature_adapter
     if adapter is not None and any(
@@ -745,9 +812,20 @@ def main():
         "output_grid": int(cfg.get("output_grid", 512)),
         "cache_in_memory": True,
     }
-    manual_train_base = OffsetGeometryDataset(
-        raw_dir, sample_names=train_names, **dataset_kwargs
+    manual_train_base = build_manual_geometry_dataset(
+        config, cfg, raw_dir, train_names, training=True, **dataset_kwargs
     )
+    if manual_train_base.completed_gt_dir is not None:
+        split["manual_training_targets"] = {
+            "source": "completed_instance_map",
+            "directory": cfg["manual_train_completed_gt_dir"],
+            "unknown": "ignore",
+            "validation_source": "original_labelme",
+        }
+        logger.info(
+            "Manual training targets: completed GT from %s; validation: original LabelMe",
+            manual_train_base.completed_gt_dir,
+        )
     augmentation_cfg = cfg.get("augmentation", {})
     dataset_parts = [manual_train_base]
     augmentation_parts = [augmentation_cfg]
@@ -826,21 +904,8 @@ def main():
         ]
         if crop_base is not None:
             sampling_masses.append(pseudo_fraction * crop_fraction)
-        weights = torch.cat(
-            [
-                torch.full((len(part),), mass / len(part))
-                for part, mass in zip(dataset_parts, sampling_masses)
-            ]
-        ).double()
-        epoch_samples = int(
-            sam2_geometry_cfg.get("samples_per_epoch", 2 * len(manual_train_base))
-        )
-        sampler = WeightedRandomSampler(
-            weights,
-            num_samples=epoch_samples,
-            replacement=True,
-            generator=torch.Generator().manual_seed(seed),
-        )
+        sampler = build_geometry_sampler(dataset_parts, sampling_masses, cfg, seed)
+        epoch_samples = len(sampler)
         split["sam2_geometry"] = {
             "count": len(pseudo_base),
             "pseudo_fraction": pseudo_fraction,
@@ -863,6 +928,17 @@ def main():
             [round(value, 3) for value in sampling_masses],
             epoch_samples,
         )
+    elif cfg.get("samples_per_epoch") is not None:
+        sampler = build_geometry_sampler(dataset_parts, sampling_masses, cfg, seed)
+        split["manual_sampling"] = {
+            "count": len(manual_train_base),
+            "samples_per_epoch": len(sampler),
+            "replacement": True,
+        }
+        logger.info(
+            "Manual-only resampling: manual=%d samples_per_epoch=%d replacement=True",
+            len(manual_train_base), len(sampler),
+        )
     train_parts = [
         AffinityGeometryAugmentedDataset(dataset, augmentation)
         for dataset, augmentation in zip(dataset_parts, augmentation_parts)
@@ -870,7 +946,9 @@ def main():
     train_dataset = (
         train_parts[0] if len(train_parts) == 1 else ConcatDataset(train_parts)
     )
-    val_dataset = OffsetGeometryDataset(raw_dir, sample_names=val_names, **dataset_kwargs)
+    val_dataset = build_manual_geometry_dataset(
+        config, cfg, raw_dir, val_names, training=False, **dataset_kwargs
+    )
     loader_workers = int(cfg.get("num_workers", 0))
     loader = DataLoader(
         train_dataset,
@@ -977,6 +1055,12 @@ def main():
             int(cfg.get("input_size", 1024)), int(cfg.get("output_grid", 512)),
         )
     optimizer = build_optimizer(system, cfg)
+    if cfg.get("fpn_learning_rate") is not None:
+        for group in optimizer.param_groups:
+            logger.info(
+                "Optimizer group=%s parameters=%d initial_lr=%.8g",
+                group["name"], sum(p.numel() for p in group["params"]), group["lr"],
+            )
     epochs = int(cfg.get("epochs", 20))
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=max(1, epochs), eta_min=float(cfg.get("min_learning_rate", 1e-5))
@@ -986,6 +1070,7 @@ def main():
     metrics_file = open(output_dir / "metrics.csv", "w", newline="", encoding="utf-8")
     fields = [
         "epoch", "train_loss", "train_edge_precision", "train_edge_recall",
+        "attempted_steps", "optimizer_steps", "amp_skipped_steps",
         "val_gt_penalized_miou", "val_instance_miou_valid",
         "val_instance_count_abs_error", "val_split_gt_instance_count",
         "val_merged_pred_instance_count", "val_raw_component_count",
@@ -1002,14 +1087,22 @@ def main():
     ]
     if selection_metric == "val_affinity_loss":
         fields.append("val_affinity_loss")
+    # 仅新分组配置增加列，记录该轮实际使用的学习率；保留旧 learning_rate 列含义。
+    record_group_lrs = cfg.get("fpn_learning_rate") is not None
+    if record_group_lrs:
+        fields.extend(f"learning_rate_{group['name']}" for group in optimizer.param_groups)
     writer = csv.DictWriter(metrics_file, fieldnames=fields)
     writer.writeheader()
     logger.info("Baseline val=%s", baseline)
     for epoch in range(1, epochs + 1):
+        epoch_group_lrs = {
+            f"learning_rate_{group['name']}": group["lr"]
+            for group in optimizer.param_groups
+        } if record_group_lrs else {}
         system.train()
         totals = {
             "loss": 0.0, "precision": 0.0, "recall": 0.0,
-            "negative_tail_loss": 0.0, "batches": 0,
+            "negative_tail_loss": 0.0, "batches": 0, "optimizer_steps": 0,
         }
         for batch in loader:
             image = batch["image"].to(device, non_blocking=True)
@@ -1121,8 +1214,11 @@ def main():
                 list(system.geometry_trainable_parameters()),
                 float(cfg.get("grad_clip", 1.0)),
             )
+            scale_before = scaler.get_scale()
             scaler.step(optimizer)
             scaler.update()
+            # scale 下降表示本次因非有限梯度跳过更新；禁用 AMP 时 scale 恒为 1。
+            totals["optimizer_steps"] += int(scaler.get_scale() >= scale_before)
             totals["loss"] += float(train_metrics["loss"])
             totals["precision"] += float(train_metrics["precision"])
             totals["recall"] += float(train_metrics["recall"])
@@ -1188,6 +1284,9 @@ def main():
             "train_loss": totals["loss"] / totals["batches"],
             "train_edge_precision": totals["precision"] / totals["batches"],
             "train_edge_recall": totals["recall"] / totals["batches"],
+            "attempted_steps": totals["batches"],
+            "optimizer_steps": totals["optimizer_steps"],
+            "amp_skipped_steps": totals["batches"] - totals["optimizer_steps"],
             **{f"val_{key}": value for key, value in val.items()},
             **deployment_values,
             "learning_rate": optimizer.param_groups[0]["lr"],
@@ -1195,12 +1294,18 @@ def main():
                 totals["negative_tail_loss"] / totals["batches"]
             ),
             **adapter_metrics(system),
+            **epoch_group_lrs,
         }
         if loss_validation is not None:
             row["val_affinity_loss"] = loss_validation["loss"]
             logger.info("epoch=%d val_affinity_loss=%.8f", epoch, loss_validation["loss"])
         writer.writerow(row)
         metrics_file.flush()
+        logger.info(
+            "epoch=%d attempted_steps=%d optimizer_steps=%d amp_skipped_steps=%d",
+            epoch, row["attempted_steps"], row["optimizer_steps"],
+            row["amp_skipped_steps"],
+        )
         logger.info(
             "epoch=%d train=%.4f oracle_pen=%.4f valid=%.4f count_err=%.1f "
             "split=%.1f merge=%.1f raw=%.1f cap=%.1f edge_p=%.4f edge_r=%.4f",
