@@ -1,0 +1,39 @@
+# -*- coding: utf-8 -*-
+# 最终任务替代joint-v3；不是仅删除joint-v3的单变量对照。
+_base: direct_ssl_semantic_affinity.yaml
+
+sam2:
+  input_normalization: legacy_none
+
+stage1_final_tasks:
+  checkpoint: outputs/stage1_lora/best_model.pth
+  completed_gt_dir: outputs/experiments/seeded_label_completion_o1/radius_8/derived_maps
+  output_dir: outputs/20260919_stage1_final_tasks
+
+direct_semantic_affinity:
+  head_warmup_epochs: 5
+  joint_epochs: 30
+  manual_samples_per_epoch: 64
+  batch_size: 1
+  num_workers: 0
+  pseudo_affinity_weight: 1.0
+  learning_rates:
+    warmup_semantic: 1.0e-4
+    warmup_affinity: 1.0e-4
+    joint_semantic: 3.0e-5
+    joint_affinity: 5.0e-5
+    joint_lora: 2.0e-6
+  affinity_loss:
+    manual_uncovered_as_boundary: false
+    normalize_edge_weights: true
+  deployment_validation:
+    enabled: false
+    short_reduction: top2
+  loss_selection:
+    enabled: true
+
+lora:
+  init_from: outputs/stage1_lora/best_model.pth
+
+post_process:
+  save_visualization: false
