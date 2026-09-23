@@ -1,6 +1,6 @@
 # 低碳钢金相图像相区分割
 
-> 扩散专用工作区：`codex/diffusion-restoration-20260923`。[D1续训至3200次](docs/RGB_DIFFUSION_SHORT_DECISION_20260923.md)已在三个采样种子下通过固定训练配对工程门槛，结论为值得一次全1000图、60 epoch长测；正式训练尚未启动。首步估计仍优于16步，后续用`rgb_restoration_diffusion_d1_all60_monitored.yaml`同时保留两种过程输出；短测不代表复赛收益。
+> 扩散专用工作区：`codex/diffusion-restoration-20260923`。[D1续训至3200次](docs/RGB_DIFFUSION_SHORT_DECISION_20260923.md)已通过固定训练配对工程门槛；用户随后授权的全1000图、60 epoch长测于2026-09-23 14:33（北京时间）启动，尚未确认完成。使用`rgb_restoration_diffusion_d1_all60_monitored.yaml`，从零训练、同时保存首步和16步过程输出，按用户要求不持续监控。短测不代表复赛收益。
 
 > 2026-09-21：[复赛交接入口](docs/HANDOFF_SEMIFINAL_20260921.md)。用户已把复赛数据放到23411服务器的autodl-fs盘下，准确目录待下轮核验；本轮仅整理工作区，未分析或替换数据。以下分数均属初赛。
 

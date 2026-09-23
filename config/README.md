@@ -3,7 +3,8 @@
 扩散正式候选入口：`train/rgb_restoration_diffusion_d1_all60_monitored.yaml`，全1000图、60 epoch、
 从零训练，固定过程图同时记录首步与16步。`train/rgb_restoration_diffusion_d1_overfit3200.yaml`
 的4图短测已通过工程门槛，见[短测判定](../docs/RGB_DIFFUSION_SHORT_DECISION_20260923.md)；
-正式训练尚未启动。旧`all60.yaml`保留原800次短测预算；延长必须用`--extend-overfit-from`
+正式训练已于2026-09-23 14:33（北京时间）按用户授权启动，进程与路径见短测判定文档的启动记录。
+旧`all60.yaml`保留原800次短测预算；延长必须用`--extend-overfit-from`
 并指定新的输出目录，不能绕过严格配置检查。
 
 2026-09-21：[复赛交接](../docs/HANDOFF_SEMIFINAL_20260921.md)。本轮未更改测试数据路径或默认推理配置；
