@@ -7,7 +7,9 @@
 认为当前16步版本暂不晋级。
 当前[D2低噪声对照](../docs/RGB_DIFFUSION_D2_K003_20260923.md)入口为
 `train/rgb_restoration_diffusion_d2_k003_all60_monitored.yaml`，只改kappa为0.03。
-已发起`--stop-after-epoch 20`首段，保持原60轮学习率日程，20轮/5000更新后退出，不自动续训。
+已按`--stop-after-epoch 20`完成首段，保持原60轮学习率日程，20轮/5000更新后正常退出。
+[D2分析](../docs/RGB_DIFFUSION_D2_ANALYSIS_20260923.md)确认输出近乎原图，暂不晋级或继续。
+下一项增加真实推理起点训练比例仅为建议，尚未创建配置或启动。
 旧`all60.yaml`保留原800次短测预算；延长必须用`--extend-overfit-from`
 并指定新的输出目录，不能绕过严格配置检查。
 
