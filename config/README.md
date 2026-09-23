@@ -21,7 +21,9 @@
 [逐步与空间模糊诊断](../docs/RGB_DIFFUSION_D3_TRAJECTORY_20260923.md)已完成。
 [D4空间增强](../docs/RGB_DIFFUSION_D4_SPATIAL_20260923.md)入口为
 `train/rgb_restoration_diffusion_d4_spatial_all60_monitored.yaml`，通过`--fork-spatial-from`
-从D3 e20完整状态启动，继续到总60轮；原D3从`last.pt`续到60轮已排队作为同预算对照。
+从D3 e20完整状态启动到总60轮；原D3也已续到60轮作为同预算对照，两组均已完成。
+[结果](../docs/RGB_DIFFUSION_D4_ANALYSIS_20260923.md)：空间合成诊断明显改善，均匀模糊小幅退步，
+多步采样问题仍在；D4默认输出短名为`outputs/rgb_restoration_diffusion_d4`。
 原配方续训保持原配置，不能把总轮数改成40；新配方分叉严格限制只有空间模糊变化。
 短链监督仍未实施。
 旧`all60.yaml`保留原800次短测预算；延长必须用`--extend-overfit-from`

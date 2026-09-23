@@ -1,6 +1,6 @@
 # 低碳钢金相图像相区分割
 
-> 扩散专用工作区：`codex/diffusion-restoration-20260923`。[D4空间模糊](docs/RGB_DIFFUSION_D4_SPATIAL_20260923.md)已从D3 e20完整状态启动，代码`6d6be7e`，继续到总60轮；原D3同预算续训已排在其后。启动核验新增812更新、零失败、17张初始过程图，空间增强占模糊样本49.36%。[D3 e20分析](docs/RGB_DIFFUSION_D3_ANALYSIS_20260923.md)与[逐步诊断](docs/RGB_DIFFUSION_D3_TRAJECTORY_20260923.md)显示首步恢复有效，完整16步仍退化；短链监督尚未实施。尚无D3/D4黑盒成绩。v6复赛0.8448/0.8506、总分84.770，低于v4的85.715，v4继续作为已验证修复基准。下游适应问题保留为独立假设。
+> 扩散专用工作区：`codex/diffusion-restoration-20260923`。[D4与D3同预算分析](docs/RGB_DIFFUSION_D4_ANALYSIS_20260923.md)：两组均完成60轮／15000累计更新，零失败。32张训练源图的新空间模糊配对上，D4首步RGB／梯度误差比D3降低19.49%／5.38%，均匀模糊小幅退步；16步仍差于首步，真实图补边未获证明。保留空间增强，下一步建议独立短链监督，尚未实施。短入口为`outputs/rgb_restoration_diffusion_d4/`与`outputs/rgb_restoration_diffusion_d3/`。尚无D3/D4黑盒成绩；v4继续作为已验证修复基准，下游适应问题仍为独立假设。
 
 > 2026-09-21：[复赛交接入口](docs/HANDOFF_SEMIFINAL_20260921.md)。用户已把复赛数据放到23411服务器的autodl-fs盘下，准确目录待下轮核验；本轮仅整理工作区，未分析或替换数据。以下分数均属初赛。
 
