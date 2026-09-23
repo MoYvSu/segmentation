@@ -1,0 +1,7 @@
+# D2单变量：扩散内部噪声kappa从0.1降到0.03，训练/推理一致。
+# 首段使用--stop-after-epoch 20；保持本配置60轮学习率日程，停止后不自动续训。
+_base: rgb_restoration_diffusion_d1_all60_monitored.yaml
+rgb_restoration:
+  output_dir: outputs/rgb_restoration_diffusion_d2_k003_all60_monitored
+  model:
+    kappa: 0.03

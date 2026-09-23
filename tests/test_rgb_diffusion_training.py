@@ -159,6 +159,89 @@ def test_monitor_frequency_does_not_change_training(tiny_config, tmp_path):
     assert torch.equal(first["rng"]["noise_generator"], second["rng"]["noise_generator"])
 
 
+def test_segment_stop_preserves_full_schedule_and_exact_resume(tiny_config, tmp_path):
+    complete, segmented = tmp_path / "complete", tmp_path / "segmented"
+    cfg = tiny_config["rgb_restoration"]
+    cfg["train"].update(epochs=4, save_epochs=[1, 4])
+    cfg["monitor"]["every_epochs"] = 5
+    original = copy.deepcopy(tiny_config)
+    training.train(tiny_config, device=torch.device("cpu"), output_dir=complete)
+    partial = training.train(tiny_config, device=torch.device("cpu"), output_dir=segmented,
+                             stop_after_epoch=2)
+    assert tiny_config == original
+    assert partial["status"] == "segment_completed" and partial["training_complete"] is False
+    assert partial["epoch"] == partial["run_until_epoch"] == 2
+    assert partial["updates"] == partial["segment_target_updates"] == 4
+    assert partial["planned_updates"] == 8
+    metadata = json.loads((segmented / "run_config.json").read_text(encoding="utf-8"))
+    assert metadata["planned_epochs"] == 4 and metadata["planned_updates"] == 8
+    assert metadata["initial_stop_after_epoch"] == 2 and metadata["initial_segment_target_updates"] == 4
+    # 第2轮既不是常规monitor轮次也不是完整预算终点，分段退出仍须保存过程图。
+    assert (segmented / "monitor/epoch_002_update_000004/errors.json").exists()
+    checkpoint = torch.load(segmented / "last.pt", weights_only=True)
+    assert checkpoint["epoch"] == 2 and checkpoint["updates"] == 4
+    assert checkpoint["scheduler"]["T_max"] == 4
+    assert checkpoint["scheduler"]["last_epoch"] == 2
+    expected_lr = (cfg["train"]["learning_rate"] + cfg["train"]["min_learning_rate"]) / 2
+    assert checkpoint["optimizer"]["param_groups"][0]["lr"] == pytest.approx(expected_lr)
+    # 不传stop即可用原配方继续剩余预算，无需更改学习率日程或启动新训练流。
+    resumed = training.train(tiny_config, device=torch.device("cpu"), output_dir=segmented,
+                             resume=segmented / "last.pt")
+    assert resumed["status"] == "completed" and resumed["training_complete"] is True
+    assert resumed["epoch"] == resumed["run_until_epoch"] == 4
+    assert resumed["updates"] == resumed["segment_target_updates"] == resumed["planned_updates"] == 8
+    expected = torch.load(complete / "last.pt", weights_only=True)
+    actual = torch.load(segmented / "last.pt", weights_only=True)
+
+    def assert_identical(left, right):
+        if isinstance(left, torch.Tensor):
+            assert torch.equal(left, right)
+        elif isinstance(left, dict):
+            assert left.keys() == right.keys()
+            for key, value in left.items():
+                assert_identical(value, right[key])
+        elif isinstance(left, (list, tuple)):
+            assert type(left) is type(right) and len(left) == len(right)
+            for value, other in zip(left, right):
+                assert_identical(value, other)
+        else:
+            assert left == right
+
+    for key in ("model", "optimizer", "scheduler", "scaler", "rng", "output_metrics"):
+        assert_identical(expected[key], actual[key])
+
+
+@pytest.mark.parametrize("stop", [0, -1, 3, 1.5, True, "1"])
+def test_segment_stop_rejects_invalid_epoch(tiny_config, tmp_path, stop):
+    with pytest.raises(ValueError):
+        training.train(tiny_config, device=torch.device("cpu"), output_dir=tmp_path / "invalid",
+                       stop_after_epoch=stop)
+
+
+def test_segment_stop_rejects_overfit_and_completed_endpoint(tiny_config, tmp_path):
+    with pytest.raises(ValueError):
+        training.train(tiny_config, device=torch.device("cpu"), output_dir=tmp_path / "overfit",
+                       overfit=True, stop_after_epoch=1)
+    output = tmp_path / "segmented"
+    training.train(tiny_config, device=torch.device("cpu"), output_dir=output, stop_after_epoch=1)
+    saved_bytes = (output / "last.pt").read_bytes()
+    with pytest.raises(ValueError):
+        training.train(tiny_config, device=torch.device("cpu"), output_dir=output,
+                       resume=output / "last.pt", stop_after_epoch=1)
+    assert (output / "last.pt").read_bytes() == saved_bytes
+
+
+def test_d2_recipe_changes_only_noise_coefficient():
+    d1 = load_config("config/train/rgb_restoration_diffusion_d1_all60_monitored.yaml")
+    d2 = load_config("config/train/rgb_restoration_diffusion_d2_k003_all60_monitored.yaml")
+    first, second = d1["rgb_restoration"], d2["rgb_restoration"]
+    assert first["model"]["kappa"] == 0.1 and second["model"]["kappa"] == 0.03
+    assert first["output_dir"] != second["output_dir"]
+    second["model"]["kappa"] = first["model"]["kappa"]
+    second["output_dir"] = first["output_dir"]
+    assert d1 == d2
+
+
 def test_overfit_uses_fixed_batch_and_resumes_from_fixed_pair_checkpoint(tiny_config, tmp_path, monkeypatch):
     complete, interrupted = tmp_path / "overfit", tmp_path / "interrupted_overfit"
     summary = training.train(tiny_config, device=torch.device("cpu"), output_dir=complete, overfit=True)

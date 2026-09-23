@@ -216,12 +216,21 @@ def _append_json(path, row):
         handle.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
 
 
-def train(config, *, device, output_dir=None, resume=None, overfit=False, extend_overfit_from=None):
+def train(config, *, device, output_dir=None, resume=None, overfit=False, extend_overfit_from=None,
+          stop_after_epoch=None):
     cfg = copy.deepcopy(config["rgb_restoration"])
     if cfg.get("split_policy") != "all_train":
         raise ValueError("diffusion experiment requires split_policy=all_train; no held-out validation")
     if cfg["model"].get("architecture") != "pixel_diffusion_nafnet":
         raise ValueError("this trainer requires architecture=pixel_diffusion_nafnet")
+    epochs = int(cfg["train"]["epochs"])
+    if stop_after_epoch is not None:
+        if overfit:
+            raise ValueError("stop_after_epoch is only supported for formal all_train runs")
+        if type(stop_after_epoch) is not int or not 1 <= stop_after_epoch <= epochs:
+            raise ValueError(f"stop_after_epoch must be an integer in [1, {epochs}]")
+    # 分段停止只控制本次循环终点；不缩短学习率日程，不改变后续续训配方。
+    run_until_epoch = epochs if stop_after_epoch is None else stop_after_epoch
     mode = "overfit_engineering" if overfit else "all_train"
     output_dir = Path(output_dir or project_path(config, cfg["output_dir"] + ("_overfit" if overfit else ""))).resolve()
     if extend_overfit_from:
@@ -248,7 +257,6 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
     model = build_rgb_restorer(cfg["model"]).to(device)
     learning_rate = float(fit_cfg.get("learning_rate", 2e-4) if overfit else cfg["train"]["learning_rate"])
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=cfg["train"]["weight_decay"])
-    epochs = int(cfg["train"]["epochs"])
     scheduler = None if overfit else torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=epochs, eta_min=float(cfg["train"]["min_learning_rate"]))
     use_amp = bool(cfg["train"]["amp"]) and device.type == "cuda"
@@ -294,6 +302,7 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
         num_workers=int(cfg["train"]["num_workers"]), pin_memory=device.type == "cuda",
         worker_init_fn=seed_worker, generator=loader_generator)
     planned_updates = int(fit_cfg.get("steps", 800)) if overfit else epochs * len(loader)
+    segment_target_updates = planned_updates if overfit else run_until_epoch * len(loader)
     monitor_every = int(fit_cfg.get("monitor_every", 100) if overfit else monitor_cfg.get("every_epochs", 5))
     if planned_updates < 1 or monitor_every < 1:
         raise ValueError("positive training budget and monitor interval required")
@@ -302,6 +311,8 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
     failed_updates = int(checkpoint.get("failed_updates", 0)) if checkpoint else 0
     if updates >= planned_updates or (not overfit and completed_epoch >= epochs):
         raise ValueError("run already completed its configured update budget")
+    if not overfit and completed_epoch >= run_until_epoch:
+        raise ValueError("stop_after_epoch must exceed the checkpoint's completed epoch")
     if checkpoint:
         restore_rng(checkpoint["rng"], noise_generator, loader_generator, device)
     continuation = checkpoint.get("continuation") if checkpoint else None
@@ -320,19 +331,25 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
         "split_policy": "all_train", "selection_mode": "engineering_gate" if overfit else "final_epoch",
         "intended_checkpoint": "last.pt", "planned_epochs": None if overfit else epochs,
         "planned_updates": planned_updates, "overfit_is_holdout": False, "automatic_formal_training": False,
+        "initial_stop_after_epoch": stop_after_epoch,
+        "initial_segment_target_updates": segment_target_updates,
         "fixed_samples": fixed_manifest, "device": str(device), "torch": str(torch.__version__),
         "amp_dtype": str(amp_dtype) if use_amp else None,
         "continuation": continuation,
     }
     if not resume:
         write_json(output_dir / "run_config.json", metadata)
-    logger.info("mode=%s parameters=%s pool=%s train_sources=%s planned_updates=%s amp=%s",
-                mode, parameters, len(train_set), len(metadata["train_sources"]), planned_updates, metadata["amp_dtype"])
+    logger.info("mode=%s parameters=%s pool=%s train_sources=%s planned_updates=%s segment_target_updates=%s amp=%s",
+                mode, parameters, len(train_set), len(metadata["train_sources"]), planned_updates,
+                segment_target_updates, metadata["amp_dtype"])
     prior_elapsed = float(checkpoint.get("elapsed_seconds", 0)) if checkpoint else 0.0
     started = time.perf_counter()
     report = checkpoint.get("output_metrics") if checkpoint else None
     summary = {"status": "running", "mode": mode, "gate_passed": None, "parameters": parameters,
                "planned_updates": planned_updates, "updates": updates, "total_updates": updates,
+               "planned_epochs": None if overfit else epochs,
+               "run_until_epoch": None if overfit else run_until_epoch,
+               "segment_target_updates": segment_target_updates, "training_complete": False,
                "failed_updates": failed_updates, "selection_mode": metadata["selection_mode"],
                "intended_checkpoint": "last.pt", "validation": None, "best_checkpoint_available": False,
                "automatic_formal_training": False}
@@ -428,9 +445,9 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
                     logger.info("overfit full-sampling update=%s ratios=%s", updates, report["mean"]["ratios"])
             gate = overfit_gate(report, thresholds)
             summary.update(gate=gate, gate_passed=gate["passed"],
-                           status="completed" if gate["passed"] else "failed_gate")
+                           status="completed" if gate["passed"] else "failed_gate", training_complete=True)
         else:
-            for epoch in range(completed_epoch, epochs):
+            for epoch in range(completed_epoch, run_until_epoch):
                 train_set.set_epoch(epoch)
                 loader_generator.manual_seed(seed + epoch)
                 epoch_rows = [take_update(batch, epoch + 1) for batch in loader]
@@ -438,7 +455,7 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
                     raise RuntimeError("empty training epoch")
                 completed_epoch = epoch + 1
                 scheduler.step()
-                if completed_epoch == 1 or completed_epoch % monitor_every == 0 or completed_epoch == epochs:
+                if completed_epoch == 1 or completed_epoch % monitor_every == 0 or completed_epoch == run_until_epoch:
                     report = monitor(model, fixed, output_dir, device=device, epoch=completed_epoch, updates=updates,
                                      monitor_cfg=monitor_cfg, use_amp=use_amp, amp_dtype=amp_dtype)
                 count_samples = sum(row["samples"] for row in epoch_rows)
@@ -454,9 +471,10 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
                 update_summary()
                 logger.info("epoch=%s/%s completed updates=%s loss=%.6f; saved last.pt",
                             completed_epoch, epochs, updates, epoch_metrics["train_loss"])
-            if updates != planned_updates:
-                raise RuntimeError(f"effective update budget incomplete: {updates}/{planned_updates}")
-            summary["status"] = "completed"
+            if updates != segment_target_updates:
+                raise RuntimeError(f"effective segment update budget incomplete: {updates}/{segment_target_updates}")
+            summary.update(status="completed" if completed_epoch == epochs else "segment_completed",
+                           training_complete=completed_epoch == epochs)
         update_summary()
         return summary
     except Exception as exc:
@@ -473,15 +491,18 @@ def main():
     parser.add_argument("--resume", help="same run's last.pt; formal runs resume at a completed epoch")
     parser.add_argument("--extend-overfit-from", help="preserve a parent overfit run and extend its budget in a fresh output directory")
     parser.add_argument("--overfit", action="store_true", help="fixed training pairs only; never starts formal training")
+    parser.add_argument("--stop-after-epoch", type=int,
+                        help="stop a formal run after this cumulative epoch; preserve the full config LR schedule")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     device = torch.device(args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA unavailable; use sam2_env on the GPU server")
     summary = train(load_config(args.config), device=device, output_dir=args.output_dir,
-                    resume=args.resume, overfit=args.overfit, extend_overfit_from=args.extend_overfit_from)
+                    resume=args.resume, overfit=args.overfit, extend_overfit_from=args.extend_overfit_from,
+                    stop_after_epoch=args.stop_after_epoch)
     print(json.dumps(summary, ensure_ascii=False, indent=2, allow_nan=False))
-    if summary["status"] != "completed":
+    if summary["status"] not in ("completed", "segment_completed"):
         raise SystemExit(2)
 
 
