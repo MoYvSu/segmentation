@@ -102,6 +102,11 @@ GPU真实数据单步前向／反向通过：1000训练源图、无留出，loss
 本地对应私有入口：`output/20260923_diffusion_d4_spatial_control/`。
 图像、逐图记录和权重均位于忽略目录，不进入Git；未生成提交包或取得新黑盒结果。
 
+命名更新：当前D4可直接通过短入口`outputs/rgb_restoration_diffusion_d4/`访问，
+原D3对照入口为`outputs/rgb_restoration_diffusion_d3/`。两者指向原目录，未移动运行中的文件。
+D4配置的默认输出目录已改为短名；本次进程仍使用启动时加载的原配置，历史记录不回写。
+后续新运行目录最多四段，具体增强／训练预算写入配置与记录。
+
 - [空间模糊样例](../output/20260923_diffusion_d4_spatial_control/augmentation_00.png)
 - [GPU预检查](../output/20260923_diffusion_d4_spatial_control/preflight.json)
 - [启动记录](../output/20260923_diffusion_d4_spatial_control/launch.json)

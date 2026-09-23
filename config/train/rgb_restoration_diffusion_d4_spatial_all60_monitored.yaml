@@ -2,7 +2,7 @@
 # 从D3 e20显式分叉，保留优化器/随机状态和原60轮学习率日程，继续到e60。
 _base: rgb_restoration_diffusion_d3_terminal50_all60_monitored.yaml
 rgb_restoration:
-  output_dir: outputs/rgb_restoration_diffusion_d4_spatial_all60_monitored
+  output_dir: outputs/rgb_restoration_diffusion_d4
   degradation:
     spatial_blur:
       enabled: true
