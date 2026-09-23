@@ -3,7 +3,8 @@
 扩散正式候选入口：`train/rgb_restoration_diffusion_d1_all60_monitored.yaml`，全1000图、60 epoch、
 从零训练，固定过程图同时记录首步与16步。`train/rgb_restoration_diffusion_d1_overfit3200.yaml`
 的4图短测已通过工程门槛，见[短测判定](../docs/RGB_DIFFUSION_SHORT_DECISION_20260923.md)；
-正式训练已于2026-09-23 14:33（北京时间）按用户授权启动，进程与路径见短测判定文档的启动记录。
+正式60轮/15000更新已完成、零失败；[完整分析](../docs/RGB_DIFFUSION_ALL60_ANALYSIS_20260923.md)
+认为当前16步版本暂不晋级，建议下一项降低扩散噪声，尚未创建或运行新训练。
 旧`all60.yaml`保留原800次短测预算；延长必须用`--extend-overfit-from`
 并指定新的输出目录，不能绕过严格配置检查。
 
