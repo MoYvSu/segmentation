@@ -159,13 +159,43 @@ def test_monitor_frequency_does_not_change_training(tiny_config, tmp_path):
     assert torch.equal(first["rng"]["noise_generator"], second["rng"]["noise_generator"])
 
 
-def test_segment_stop_preserves_full_schedule_and_exact_resume(tiny_config, tmp_path):
+@pytest.mark.parametrize("policy", [None, "terminal_half"])
+def test_segment_stop_preserves_full_schedule_and_exact_resume(tiny_config, tmp_path, monkeypatch, policy):
     complete, segmented = tmp_path / "complete", tmp_path / "segmented"
     cfg = tiny_config["rgb_restoration"]
     cfg["train"].update(epochs=4, save_epochs=[1, 4])
+    # T=2时两种采样本来相同；这里用T=4确保覆盖新分布的实际训练和续训。
+    cfg["model"]["num_steps"] = 4
+    if policy is not None:
+        cfg["train"]["timestep_sampling"] = policy
     cfg["monitor"]["every_epochs"] = 5
+    observed = []
+    original_sampler = training.sample_timesteps
+
+    def capture_timesteps(count, num_steps, *, device, generator, policy="uniform"):
+        sampled = original_sampler(count, num_steps, device=device, generator=generator, policy=policy)
+        observed.append((policy, torch.bincount(sampled, minlength=num_steps + 1)[1:].tolist()))
+        return sampled
+
+    monkeypatch.setattr(training, "sample_timesteps", capture_timesteps)
     original = copy.deepcopy(tiny_config)
-    training.train(tiny_config, device=torch.device("cpu"), output_dir=complete)
+    finished = training.train(tiny_config, device=torch.device("cpu"), output_dir=complete)
+    sampling = {"policy": policy or "uniform", "terminal_probability": 0.5 if policy else 0.25,
+                "num_steps": 4}
+    assert finished["timestep_sampling"] == sampling
+    # 日志保留实际抽样数，不能由期望概率或t_min/t_max反推。
+    rows = [json.loads(line) for line in (complete / "metrics.jsonl").read_text().splitlines()]
+    epochs = [json.loads(line) for line in (complete / "epochs.jsonl").read_text().splitlines()]
+    assert len(rows) == len(observed) == 8 and len(epochs) == 4
+    for row, (actual_policy, histogram) in zip(rows, observed):
+        assert actual_policy == sampling["policy"]
+        assert row["t_histogram"] == histogram
+        assert len(histogram) == 4 and sum(histogram) == row["samples"] == 2
+    for epoch in epochs:
+        update_rows = [row for row in rows if row["epoch"] == epoch["epoch"]]
+        assert epoch["t_histogram"] == [sum(row["t_histogram"][t] for row in update_rows)
+                                         for t in range(4)]
+        assert sum(epoch["t_histogram"]) == 4
     partial = training.train(tiny_config, device=torch.device("cpu"), output_dir=segmented,
                              stop_after_epoch=2)
     assert tiny_config == original
@@ -176,6 +206,7 @@ def test_segment_stop_preserves_full_schedule_and_exact_resume(tiny_config, tmp_
     metadata = json.loads((segmented / "run_config.json").read_text(encoding="utf-8"))
     assert metadata["planned_epochs"] == 4 and metadata["planned_updates"] == 8
     assert metadata["initial_stop_after_epoch"] == 2 and metadata["initial_segment_target_updates"] == 4
+    assert metadata["timestep_sampling"] == partial["timestep_sampling"] == sampling
     # 第2轮既不是常规monitor轮次也不是完整预算终点，分段退出仍须保存过程图。
     assert (segmented / "monitor/epoch_002_update_000004/errors.json").exists()
     checkpoint = torch.load(segmented / "last.pt", weights_only=True)
@@ -209,6 +240,51 @@ def test_segment_stop_preserves_full_schedule_and_exact_resume(tiny_config, tmp_
 
     for key in ("model", "optimizer", "scheduler", "scaler", "rng", "output_metrics"):
         assert_identical(expected[key], actual[key])
+    assert all(actual_policy == sampling["policy"] for actual_policy, _ in observed)
+    resumed_rows = [json.loads(line) for line in (segmented / "metrics.jsonl").read_text().splitlines()]
+    assert [row["t_histogram"] for row in resumed_rows] == [row["t_histogram"] for row in rows]
+
+
+@pytest.mark.parametrize("policy", [None, "uniform"])
+def test_uniform_timestep_sampling_preserves_original_draws_and_rng(policy):
+    expected_generator = torch.Generator().manual_seed(314159)
+    actual_generator = torch.Generator().manual_seed(314159)
+    expected = torch.randint(1, 17, (257,), generator=expected_generator)
+    kwargs = {} if policy is None else {"policy": policy}
+    actual = training.sample_timesteps(257, 16, device=torch.device("cpu"),
+                                       generator=actual_generator, **kwargs)
+    assert torch.equal(actual, expected)
+    assert torch.equal(actual_generator.get_state(), expected_generator.get_state())
+    assert torch.equal(torch.randn(17, generator=actual_generator),
+                       torch.randn(17, generator=expected_generator))
+
+
+def test_terminal_half_sampling_gives_exact_half_mass_to_terminal_state():
+    count, num_steps = 500_000, 16
+    generator = torch.Generator().manual_seed(20260923)
+    actual = training.sample_timesteps(count, num_steps, device=torch.device("cpu"),
+                                       generator=generator, policy="terminal_half")
+    assert actual.dtype == torch.int64 and actual.shape == (count,)
+    counts = torch.bincount(actual, minlength=num_steps + 1)
+    assert counts[0] == 0 and len(counts) == num_steps + 1
+    probabilities = counts[1:].double() / count
+    # 不能用“50%强制终点+50%仍均匀抽1..T”，后者实际终点概率为53.125%。
+    assert float(probabilities[-1]) == pytest.approx(0.5, abs=0.003)
+    assert torch.all(torch.abs(probabilities[:-1] - 0.5 / (num_steps - 1)) < 0.0015)
+
+
+def test_unknown_timestep_sampling_fails_before_model_construction(tiny_config, tmp_path, monkeypatch):
+    with pytest.raises(ValueError, match="timestep|sampling|policy"):
+        training.sample_timesteps(4, 16, device=torch.device("cpu"),
+                                   generator=torch.Generator(), policy="terminal_typo")
+
+    def forbidden_model(*args, **kwargs):
+        raise AssertionError("invalid sampling policy must fail before constructing the model")
+
+    monkeypatch.setattr(training, "build_rgb_restorer", forbidden_model)
+    tiny_config["rgb_restoration"]["train"]["timestep_sampling"] = "terminal_typo"
+    with pytest.raises(ValueError, match="timestep|sampling|policy"):
+        training.train(tiny_config, device=torch.device("cpu"), output_dir=tmp_path / "invalid_policy")
 
 
 @pytest.mark.parametrize("stop", [0, -1, 3, 1.5, True, "1"])
@@ -240,6 +316,17 @@ def test_d2_recipe_changes_only_noise_coefficient():
     second["model"]["kappa"] = first["model"]["kappa"]
     second["output_dir"] = first["output_dir"]
     assert d1 == d2
+
+
+def test_d3_recipe_changes_only_timestep_sampling():
+    d2 = load_config("config/train/rgb_restoration_diffusion_d2_k003_all60_monitored.yaml")
+    d3 = load_config("config/train/rgb_restoration_diffusion_d3_terminal50_all60_monitored.yaml")
+    first, second = d2["rgb_restoration"], d3["rgb_restoration"]
+    assert "timestep_sampling" not in first["train"]
+    assert second["train"].pop("timestep_sampling") == "terminal_half"
+    assert first["output_dir"] != second["output_dir"]
+    second["output_dir"] = first["output_dir"]
+    assert d2 == d3
 
 
 def test_overfit_uses_fixed_batch_and_resumes_from_fixed_pair_checkpoint(tiny_config, tmp_path, monkeypatch):

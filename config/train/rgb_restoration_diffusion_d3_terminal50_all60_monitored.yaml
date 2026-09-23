@@ -1,0 +1,7 @@
+# D3单变量：50%样本取真实推理起点t=16，其余50%均匀取t=1..15。
+# 噪声kappa保持D2的0.03；从零训练，首段--stop-after-epoch 20，沿用60轮学习率日程。
+_base: rgb_restoration_diffusion_d2_k003_all60_monitored.yaml
+rgb_restoration:
+  output_dir: outputs/rgb_restoration_diffusion_d3_terminal50_all60_monitored
+  train:
+    timestep_sampling: terminal_half

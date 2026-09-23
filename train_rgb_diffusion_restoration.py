@@ -216,6 +216,17 @@ def _append_json(path, row):
         handle.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
 
 
+def sample_timesteps(count, num_steps, *, device, generator, policy="uniform"):
+    """每张图独立抽时间步；保留旧抽样路径，起点强化只改变整数映射。"""
+    if policy == "uniform":
+        return torch.randint(1, num_steps + 1, (count,), device=device, generator=generator)
+    if policy == "terminal_half":
+        # 一半整数映射到T，另一半一一对应1..T-1；不是在均匀抽样上再叠加50%。
+        draw = torch.randint(0, 2 * (num_steps - 1), (count,), device=device, generator=generator)
+        return torch.where(draw < num_steps - 1, draw + 1, num_steps)
+    raise ValueError(f"unknown timestep_sampling policy: {policy}")
+
+
 def train(config, *, device, output_dir=None, resume=None, overfit=False, extend_overfit_from=None,
           stop_after_epoch=None):
     cfg = copy.deepcopy(config["rgb_restoration"])
@@ -223,6 +234,9 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
         raise ValueError("diffusion experiment requires split_policy=all_train; no held-out validation")
     if cfg["model"].get("architecture") != "pixel_diffusion_nafnet":
         raise ValueError("this trainer requires architecture=pixel_diffusion_nafnet")
+    timestep_policy = cfg["train"].get("timestep_sampling", "uniform")
+    if timestep_policy not in ("uniform", "terminal_half"):
+        raise ValueError(f"unknown timestep_sampling policy: {timestep_policy}")
     epochs = int(cfg["train"]["epochs"])
     if stop_after_epoch is not None:
         if overfit:
@@ -255,6 +269,8 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
     model = build_rgb_restorer(cfg["model"]).to(device)
+    timestep_sampling = {"policy": timestep_policy, "num_steps": model.num_steps,
+                         "terminal_probability": 0.5 if timestep_policy == "terminal_half" else 1 / model.num_steps}
     learning_rate = float(fit_cfg.get("learning_rate", 2e-4) if overfit else cfg["train"]["learning_rate"])
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=cfg["train"]["weight_decay"])
     scheduler = None if overfit else torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -336,12 +352,14 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
         "fixed_samples": fixed_manifest, "device": str(device), "torch": str(torch.__version__),
         "amp_dtype": str(amp_dtype) if use_amp else None,
         "continuation": continuation,
+        "timestep_sampling": timestep_sampling,
     }
     if not resume:
         write_json(output_dir / "run_config.json", metadata)
     logger.info("mode=%s parameters=%s pool=%s train_sources=%s planned_updates=%s segment_target_updates=%s amp=%s",
                 mode, parameters, len(train_set), len(metadata["train_sources"]), planned_updates,
                 segment_target_updates, metadata["amp_dtype"])
+    logger.info("timestep_sampling=%s", timestep_sampling)
     prior_elapsed = float(checkpoint.get("elapsed_seconds", 0)) if checkpoint else 0.0
     started = time.perf_counter()
     report = checkpoint.get("output_metrics") if checkpoint else None
@@ -353,6 +371,7 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
                "failed_updates": failed_updates, "selection_mode": metadata["selection_mode"],
                "intended_checkpoint": "last.pt", "validation": None, "best_checkpoint_available": False,
                "automatic_formal_training": False}
+    summary["timestep_sampling"] = timestep_sampling
 
     def update_summary():
         summary.update(epoch=completed_epoch, updates=updates, total_updates=updates,
@@ -387,7 +406,8 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
         model.train()
         for attempt in range(4):
             optimizer.zero_grad(set_to_none=True)
-            t_index = torch.randint(1, model.num_steps + 1, (len(inputs),), device=device, generator=noise_generator)
+            t_index = sample_timesteps(len(inputs), model.num_steps, device=device,
+                                       generator=noise_generator, policy=timestep_policy)
             # 扩散状态不得限制为 RGB 范围；有界化只属于最终显示/部署输出。
             xt = model.q_sample(target, inputs, t_index, generator=noise_generator)
             with torch.autocast(device_type=device.type, enabled=use_amp, dtype=amp_dtype):
@@ -419,6 +439,7 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
                    "train_errors": {key: float(value.detach().mean()) for key, value in errors.items()},
                    "learning_rate": optimizer.param_groups[0]["lr"], "grad_norm": float(grad_norm),
                    "t_min": int(t_index.min()), "t_max": int(t_index.max()), "samples": len(inputs),
+                   "t_histogram": torch.bincount(t_index, minlength=model.num_steps + 1)[1:].tolist(),
                    "failed_updates": failed_updates, "seconds": time.perf_counter() - started}
             _append_json(output_dir / "metrics.jsonl", row)
             if updates == 1 or updates % 25 == 0:
@@ -462,6 +483,8 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
                 epoch_metrics = {
                     "epoch": completed_epoch, "updates": len(epoch_rows), "total_updates": updates,
                     "train_samples": count_samples, "failed_updates": failed_updates,
+                    "t_histogram": [sum(row["t_histogram"][step] for row in epoch_rows)
+                                    for step in range(model.num_steps)],
                     "train_loss": sum(row["loss"] * row["samples"] for row in epoch_rows) / count_samples,
                     "train_errors": {key: sum(row["train_errors"][key] * row["samples"] for row in epoch_rows) / count_samples
                                      for key in ERROR_KEYS}, "validation": None, "selection": None,
