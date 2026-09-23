@@ -14,7 +14,12 @@
 `train.timestep_sampling: terminal_half`（t=16占50%，其余15步均分50%）。
 已从零完成`--stop-after-epoch 20`，kappa仍为0.03，原60轮学习率日程与48张过程图完整。
 [D3结果](../docs/RGB_DIFFUSION_D3_ANALYSIS_20260923.md)显示首步恢复有效，完整16步仍增加梯度误差；
-建议同配置从`last.pt`续到60轮，尚未执行。保持原配置，不能把总轮数改成40。
+[逐步与空间模糊诊断](../docs/RGB_DIFFUSION_D3_TRAJECTORY_20260923.md)已完成。
+[D4空间增强](../docs/RGB_DIFFUSION_D4_SPATIAL_20260923.md)入口为
+`train/rgb_restoration_diffusion_d4_spatial_all60_monitored.yaml`，通过`--fork-spatial-from`
+从D3 e20完整状态启动，继续到总60轮；原D3从`last.pt`续到60轮已排队作为同预算对照。
+原配方续训保持原配置，不能把总轮数改成40；新配方分叉严格限制只有空间模糊变化。
+短链监督仍未实施。
 旧`all60.yaml`保留原800次短测预算；延长必须用`--extend-overfit-from`
 并指定新的输出目录，不能绕过严格配置检查。
 

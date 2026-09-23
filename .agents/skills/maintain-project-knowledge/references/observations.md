@@ -18,6 +18,8 @@ scope clarification. It is not a chronological task log.
   D3保持kappa0.03，只将起点训练比例增至50%，同20轮首步RGB/梯度比值恢复到0.607/0.904，
   完整16步却为0.782/1.140。起点监督能改善当前低噪声配方，但不同时证明后续迭代有收益；
   不能把D2的失败单独解释成噪声太弱。
+  完整前缀测量中，两类训练内输入的整图误差均首步最低；合成空间模糊弱区即使最优前缀
+  也可能比输入更差。整图平均改善可以掩盖局部破坏，应同时查看已知合成强弱区域。
 - evidence: `docs/RGB_DIFFUSION_SHORT_DECISION_20260923.md`；同4训练配对、权重/优化器/随机流连续，
   明确区分随机t训练、首步估计、完整采样与官方分割成绩；过程图独立保存。
   后续证据见`docs/RGB_DIFFUSION_ALL60_ANALYSIS_20260923.md`。v6固定合成配对误差低于v4，
@@ -26,6 +28,8 @@ scope clarification. It is not a chronological task log.
   清晰线索后输出接近恒等，支持状态依赖假说，未证明唯一原因。
   `docs/RGB_DIFFUSION_D3_ANALYSIS_20260923.md`：仅起点抽样分布变化，三采样seed与FP32复核一致；
   关闭后续新噪声仍不及首步，迭代退化的归因需同时考虑状态差距。
+  `docs/RGB_DIFFUSION_D3_TRAJECTORY_20260923.md`：三采样seed、全部16个清晰图预测及区域误差；
+  前缀末项与部署forward逐值相同。合成空间探针缺同内容均匀弱糊对照，不归因唯一机制。
 - reuse_hypothesis: 扩散早期判定应同时看训练/采样误差及充分拟合趋势；通过工程门槛后，
   用同checkpoint的首步和完整输出检查多步贡献，保持正式模型晋级按真实部署/黑盒证据。
 - verification_gap: 全量训练仍是单训练seed；定量修复对照仅4个训练配对，真实图目检4张，
