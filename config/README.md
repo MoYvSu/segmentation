@@ -4,7 +4,10 @@
 从零训练，固定过程图同时记录首步与16步。`train/rgb_restoration_diffusion_d1_overfit3200.yaml`
 的4图短测已通过工程门槛，见[短测判定](../docs/RGB_DIFFUSION_SHORT_DECISION_20260923.md)；
 正式60轮/15000更新已完成、零失败；[完整分析](../docs/RGB_DIFFUSION_ALL60_ANALYSIS_20260923.md)
-认为当前16步版本暂不晋级，建议下一项降低扩散噪声，尚未创建或运行新训练。
+认为当前16步版本暂不晋级。
+当前[D2低噪声对照](../docs/RGB_DIFFUSION_D2_K003_20260923.md)入口为
+`train/rgb_restoration_diffusion_d2_k003_all60_monitored.yaml`，只改kappa为0.03。
+已发起`--stop-after-epoch 20`首段，保持原60轮学习率日程，20轮/5000更新后退出，不自动续训。
 旧`all60.yaml`保留原800次短测预算；延长必须用`--extend-overfit-from`
 并指定新的输出目录，不能绕过严格配置检查。
 

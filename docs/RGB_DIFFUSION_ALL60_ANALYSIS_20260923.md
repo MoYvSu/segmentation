@@ -93,7 +93,10 @@ v6在本轮固定合成配对上误差优于v4，真实黑盒却更差，说明�
 单凭面积项下降不能判断过/欠分割，也不能指定细碎纹理为掉分的唯一原因。
 D1本轮没有黑盒分数，没有执行完整100图分割或产生提交包。
 
-## 下一步建议（尚未执行）
+## 下一步建议（分析时尚未执行）
+
+后续状态：[D2低噪声对照](RGB_DIFFUSION_D2_K003_20260923.md)已按用户授权发起前20轮。
+以下保留提出方案时的判断，D1分析产物与权重不变。
 
 1. 保留v4作为已验证回退；v6不晋级，D1当前16步也不直接替换。暂停原配方简单追加epoch。
 2. 扩散下一项只改变噪声系数kappa：0.1→0.03，训练和推理同时匹配。
@@ -109,7 +112,7 @@ D1本轮没有黑盒分数，没有执行完整100图分割或产生提交包。
 服务器根目录：`/root/autodl-tmp/segmentationv2_semifinal_20260921`。
 检查权重为`outputs/rgb_restoration_diffusion_d1_all60_monitored/epoch_060.pt`，
 SHA256：`cc9e6b8ab11db6101bc115b25e2c1a4f68ee52e5ab07a7fede8720e6f0fc9764`。
-原训练权重与默认推理均未改写，未启动新训练；分析期间的GPU工作仅为只读推理。
+原训练权重与默认推理均未改写；本次分析期间未启动新训练，GPU工作仅为只读推理。
 
 - [训练曲线](../output/20260923_diffusion_all60_analysis/training_curves.png)
 - [训练与黑盒汇总JSON](../output/20260923_diffusion_all60_analysis/analysis.json)
