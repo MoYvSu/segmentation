@@ -38,6 +38,8 @@ def fixed_training_samples(config, count):
     cfg["masked_pretraining"] = None
     cfg["training_noise"] = None
     cfg["degradation"]["profile_probabilities"] = [0.0, 1.0, 0.0, 0.0]
+    # 原 monitor 始终保留既有全局模糊配对；空间模糊由独立 monitor 展示。
+    cfg["degradation"].pop("spatial_blur", None)
     dataset, holdout = build_datasets(fixed_config)
     if holdout is not None:
         raise ValueError("fixed training monitor must not create holdout data")
@@ -211,6 +213,32 @@ def _same_overfit_extension_recipe(previous, current):
     return _same_recipe(previous, current)
 
 
+def _spatial_fork_changes(previous, current):
+    """正式配方分叉仅允许新增空间模糊及其独立过程图，不放宽普通 resume。"""
+    previous, current = copy.deepcopy(previous), copy.deepcopy(current)
+    changes = {}
+    previous_output, current_output = previous.pop("output_dir", None), current.pop("output_dir", None)
+    if previous_output != current_output:
+        changes["output_dir"] = {"before": previous_output, "after": current_output}
+    if "spatial_blur" in previous.get("degradation", {}):
+        raise ValueError("spatial fork requires a parent without spatial_blur")
+    spatial = current.get("degradation", {}).pop("spatial_blur", None)
+    if not isinstance(spatial, dict) or spatial.get("enabled") is not True:
+        raise ValueError("spatial fork requires newly enabled degradation.spatial_blur")
+    changes["degradation.spatial_blur"] = {"before": None, "after": spatial}
+    if "spatial_blur" in previous.get("monitor", {}):
+        raise ValueError("spatial fork requires a parent without monitor.spatial_blur")
+    spatial_monitor = current.get("monitor", {}).pop("spatial_blur", None)
+    if spatial_monitor is not None:
+        if not isinstance(spatial_monitor, dict) or spatial_monitor.get("enabled") is not True:
+            raise ValueError("spatial fork monitor must be newly enabled")
+        changes["monitor.spatial_blur"] = {"before": None, "after": spatial_monitor}
+    # 不使用 _same_recipe：此入口连 num_workers 也不能同时改变。
+    if previous != current:
+        raise ValueError("spatial fork config differs outside the spatial_blur allowlist")
+    return changes
+
+
 def _append_json(path, row):
     with Path(path).open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
@@ -228,7 +256,7 @@ def sample_timesteps(count, num_steps, *, device, generator, policy="uniform"):
 
 
 def train(config, *, device, output_dir=None, resume=None, overfit=False, extend_overfit_from=None,
-          stop_after_epoch=None):
+          stop_after_epoch=None, fork_spatial_from=None):
     cfg = copy.deepcopy(config["rgb_restoration"])
     if cfg.get("split_policy") != "all_train":
         raise ValueError("diffusion experiment requires split_policy=all_train; no held-out validation")
@@ -247,6 +275,12 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
     run_until_epoch = epochs if stop_after_epoch is None else stop_after_epoch
     mode = "overfit_engineering" if overfit else "all_train"
     output_dir = Path(output_dir or project_path(config, cfg["output_dir"] + ("_overfit" if overfit else ""))).resolve()
+    if fork_spatial_from:
+        if resume or overfit or extend_overfit_from:
+            raise ValueError("spatial fork requires formal training and cannot use resume, overfit or overfit extension")
+        if (Path(fork_spatial_from).resolve().parent == output_dir
+                or (output_dir.exists() and any(output_dir.iterdir()))):
+            raise ValueError("spatial fork requires a fresh output directory distinct from its parent")
     if extend_overfit_from:
         if not overfit or resume:
             raise ValueError("overfit extension requires --overfit and cannot use --resume")
@@ -281,14 +315,18 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
     noise_generator = torch.Generator(device=device).manual_seed(seed + 271828)
     loader_generator = torch.Generator().manual_seed(seed)
     checkpoint = None
-    checkpoint_path = resume or extend_overfit_from
+    fork_changes = None
+    checkpoint_path = resume or extend_overfit_from or fork_spatial_from
     if checkpoint_path:
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
         if checkpoint.get("format") != model.checkpoint_format or checkpoint.get("mode") != mode:
             raise ValueError("resume requires matching diffusion format and training mode")
-        same_recipe = _same_overfit_extension_recipe if extend_overfit_from else _same_recipe
-        if not same_recipe(checkpoint["experiment_config"], cfg):
-            raise ValueError("resume config differs from checkpoint")
+        if fork_spatial_from:
+            fork_changes = _spatial_fork_changes(checkpoint["experiment_config"], cfg)
+        else:
+            same_recipe = _same_overfit_extension_recipe if extend_overfit_from else _same_recipe
+            if not same_recipe(checkpoint["experiment_config"], cfg):
+                raise ValueError("resume config differs from checkpoint")
         model.load_state_dict(checkpoint["model"], strict=True)
         optimizer.load_state_dict(checkpoint["optimizer"])
         if scheduler is not None:
@@ -301,7 +339,6 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
     if expected_sources is not None and len(train_set) != int(expected_sources):
         raise ValueError(f"expected {expected_sources} training sources, found {len(train_set)}")
     count = int(fit_cfg.get("samples", 4) if overfit else monitor_cfg.get("samples", 4))
-    output_dir.mkdir(parents=True, exist_ok=True)
     if checkpoint_path:
         fixed_dir = Path(checkpoint_path).resolve().parent
         fixed = torch.load(fixed_dir / "fixed_samples.pt", map_location="cpu", weights_only=True)
@@ -310,9 +347,6 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
             raise ValueError("saved fixed sample set differs from run configuration")
     else:
         fixed, fixed_manifest = fixed_training_samples(config, count)
-    if not resume:
-        save_checkpoint(output_dir / "fixed_samples.pt", fixed)
-        write_json(output_dir / "fixed_samples_manifest.json", fixed_manifest)
     loader = None if overfit else DataLoader(
         train_set, batch_size=int(cfg["train"]["batch_size"]), shuffle=True,
         num_workers=int(cfg["train"]["num_workers"]), pin_memory=device.type == "cuda",
@@ -325,10 +359,38 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
     completed_epoch = int(checkpoint["epoch"]) if checkpoint else 0
     updates = int(checkpoint["updates"]) if checkpoint else 0
     failed_updates = int(checkpoint.get("failed_updates", 0)) if checkpoint else 0
+    if fork_spatial_from:
+        parent_metrics, parent_schedule = checkpoint.get("metrics", {}), checkpoint.get("scheduler", {})
+        if (completed_epoch < 1 or updates != completed_epoch * len(loader)
+                or parent_metrics.get("epoch") != completed_epoch
+                or parent_metrics.get("updates") != len(loader)
+                or parent_metrics.get("train_samples") != len(train_set)
+                or parent_schedule.get("last_epoch") != completed_epoch
+                or parent_schedule.get("T_max") != epochs):
+            raise ValueError("spatial fork requires a completed formal epoch with its original LR schedule")
     if updates >= planned_updates or (not overfit and completed_epoch >= epochs):
         raise ValueError("run already completed its configured update budget")
     if not overfit and completed_epoch >= run_until_epoch:
         raise ValueError("stop_after_epoch must exceed the checkpoint's completed epoch")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if not resume:
+        save_checkpoint(output_dir / "fixed_samples.pt", fixed)
+        write_json(output_dir / "fixed_samples_manifest.json", fixed_manifest)
+    spatial_fixed, spatial_manifest, monitor_spatial = None, None, None
+    if monitor_cfg.get("spatial_blur", {}).get("enabled", False):
+        from tools.rgb_spatial_monitor import build_spatial_fixed_samples, monitor_spatial
+        if resume:
+            spatial_fixed = torch.load(output_dir / "spatial_fixed_samples.pt", map_location="cpu", weights_only=True)
+            spatial_manifest = json.loads((output_dir / "spatial_fixed_samples_manifest.json").read_text(encoding="utf-8"))
+        else:
+            spatial_fixed, spatial_manifest = build_spatial_fixed_samples(config, train_set, fixed_manifest)
+        spatial_count = int(monitor_cfg["spatial_blur"].get("samples", count))
+        if (len(spatial_fixed["source"]) != spatial_count
+                or spatial_fixed["source"] != spatial_manifest["sources"]):
+            raise ValueError("saved spatial fixed sample set differs from run configuration")
+        if not resume:
+            save_checkpoint(output_dir / "spatial_fixed_samples.pt", spatial_fixed)
+            write_json(output_dir / "spatial_fixed_samples_manifest.json", spatial_manifest)
     if checkpoint:
         restore_rng(checkpoint["rng"], noise_generator, loader_generator, device)
     continuation = checkpoint.get("continuation") if checkpoint else None
@@ -337,6 +399,16 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
                         "parent_updates": updates,
                         "parent_planned_updates": checkpoint["experiment_config"]["overfit"]["steps"],
                         "preserved": ["model", "optimizer", "scaler", "rng", "fixed_samples"]}
+    if fork_spatial_from:
+        continuation = {"kind": "formal_spatial_blur_fork",
+                        "parent_checkpoint": str(Path(fork_spatial_from).resolve()),
+                        "parent_epoch": completed_epoch, "parent_updates": updates,
+                        "parent_planned_updates": planned_updates,
+                        "parent_elapsed_seconds": float(checkpoint.get("elapsed_seconds", 0)),
+                        "recipe_changes": fork_changes,
+                        "preserved": ["model", "optimizer", "scheduler", "scaler", "rng", "epoch",
+                                      "updates", "elapsed_seconds", "fixed_samples"],
+                        "new_logs_begin_after_epoch": completed_epoch}
     parameters = sum(p.numel() for p in model.parameters())
     metadata = {
         "format": model.checkpoint_format, "experiment_config": cfg, "mode": mode,
@@ -354,6 +426,8 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
         "continuation": continuation,
         "timestep_sampling": timestep_sampling,
     }
+    if spatial_manifest is not None:
+        metadata["spatial_fixed_samples"] = spatial_manifest
     if not resume:
         write_json(output_dir / "run_config.json", metadata)
     logger.info("mode=%s parameters=%s pool=%s train_sources=%s planned_updates=%s segment_target_updates=%s amp=%s",
@@ -372,6 +446,16 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
                "intended_checkpoint": "last.pt", "validation": None, "best_checkpoint_available": False,
                "automatic_formal_training": False}
     summary["timestep_sampling"] = timestep_sampling
+    if continuation is not None:
+        summary["continuation"] = continuation
+
+    def run_monitors(epoch, updates):
+        original_report = monitor(model, fixed, output_dir, device=device, epoch=epoch, updates=updates,
+                                  monitor_cfg=monitor_cfg, use_amp=use_amp, amp_dtype=amp_dtype)
+        if spatial_fixed is not None:
+            monitor_spatial(model, spatial_fixed, output_dir, device=device, epoch=epoch, updates=updates,
+                            monitor_cfg=monitor_cfg, use_amp=use_amp, amp_dtype=amp_dtype)
+        return original_report
 
     def update_summary():
         summary.update(epoch=completed_epoch, updates=updates, total_updates=updates,
@@ -441,26 +525,39 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
                    "t_min": int(t_index.min()), "t_max": int(t_index.max()), "samples": len(inputs),
                    "t_histogram": torch.bincount(t_index, minlength=model.num_steps + 1)[1:].tolist(),
                    "failed_updates": failed_updates, "seconds": time.perf_counter() - started}
+            if "spatial_blur_applied" in batch:
+                blur_mask = torch.tensor([profile in ("blur", "mixed") for profile in batch["profile"]])
+                blur_count = int(blur_mask.sum())
+                sigma_sum = float(batch["base_sigma"][blur_mask].double().sum())
+                row["spatial_blur"] = {
+                    "applied_samples": int(batch["spatial_blur_applied"].sum()),
+                    "blur_samples": blur_count, "base_sigma_sum": sigma_sum,
+                    "base_sigma_mean": sigma_sum / blur_count if blur_count else None,
+                }
             _append_json(output_dir / "metrics.jsonl", row)
             if updates == 1 or updates % 25 == 0:
                 logger.info("epoch=%s update=%s/%s loss=%.6f RGB=%.6f grad=%.6f failed=%s",
                             epoch, updates, planned_updates, row["loss"], row["train_errors"]["rgb_l1"],
                             row["train_errors"]["gradient_l1"], failed_updates)
+                if "spatial_blur" in row:
+                    logger.info("spatial_blur batch=%s; blur_samples includes blur and mixed profiles",
+                                row["spatial_blur"])
             return row
         raise FloatingPointError("four consecutive failed optimizer attempts for the same batch")
 
     try:
         update_summary()
+        if fork_spatial_from:
+            # 新输出先保存可续训的完整父状态；只新增监控，不复制父运行的训练日志。
+            save_training_checkpoint(checkpoint["metrics"])
         if not resume:
-            report = monitor(model, fixed, output_dir, device=device, epoch=completed_epoch, updates=updates,
-                             monitor_cfg=monitor_cfg, use_amp=use_amp, amp_dtype=amp_dtype)
+            report = run_monitors(completed_epoch, updates)
             update_summary()
         if overfit:
             while updates < planned_updates:
                 row = take_update(fixed, 0)
                 if updates % monitor_every == 0 or updates == planned_updates or updates in fit_cfg.get("save_steps", []):
-                    report = monitor(model, fixed, output_dir, device=device, epoch=0, updates=updates,
-                                     monitor_cfg=monitor_cfg, use_amp=use_amp, amp_dtype=amp_dtype)
+                    report = run_monitors(0, updates)
                     save_training_checkpoint(row)
                     update_summary()
                     logger.info("overfit full-sampling update=%s ratios=%s", updates, report["mean"]["ratios"])
@@ -477,8 +574,7 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
                 completed_epoch = epoch + 1
                 scheduler.step()
                 if completed_epoch == 1 or completed_epoch % monitor_every == 0 or completed_epoch == run_until_epoch:
-                    report = monitor(model, fixed, output_dir, device=device, epoch=completed_epoch, updates=updates,
-                                     monitor_cfg=monitor_cfg, use_amp=use_amp, amp_dtype=amp_dtype)
+                    report = run_monitors(completed_epoch, updates)
                 count_samples = sum(row["samples"] for row in epoch_rows)
                 epoch_metrics = {
                     "epoch": completed_epoch, "updates": len(epoch_rows), "total_updates": updates,
@@ -489,6 +585,15 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
                     "train_errors": {key: sum(row["train_errors"][key] * row["samples"] for row in epoch_rows) / count_samples
                                      for key in ERROR_KEYS}, "validation": None, "selection": None,
                 }
+                spatial_rows = [row["spatial_blur"] for row in epoch_rows if "spatial_blur" in row]
+                if spatial_rows:
+                    blur_count = sum(row["blur_samples"] for row in spatial_rows)
+                    sigma_sum = sum(row["base_sigma_sum"] for row in spatial_rows)
+                    epoch_metrics["spatial_blur"] = {
+                        "applied_samples": sum(row["applied_samples"] for row in spatial_rows),
+                        "blur_samples": blur_count, "base_sigma_sum": sigma_sum,
+                        "base_sigma_mean": sigma_sum / blur_count if blur_count else None,
+                    }
                 save_training_checkpoint(epoch_metrics)
                 _append_json(output_dir / "epochs.jsonl", epoch_metrics)
                 update_summary()
@@ -513,6 +618,7 @@ def main():
     parser.add_argument("--output-dir", help="private output directory; defaults to config output_dir")
     parser.add_argument("--resume", help="same run's last.pt; formal runs resume at a completed epoch")
     parser.add_argument("--extend-overfit-from", help="preserve a parent overfit run and extend its budget in a fresh output directory")
+    parser.add_argument("--fork-spatial-from", help="fork a completed formal epoch with only spatial blur newly enabled")
     parser.add_argument("--overfit", action="store_true", help="fixed training pairs only; never starts formal training")
     parser.add_argument("--stop-after-epoch", type=int,
                         help="stop a formal run after this cumulative epoch; preserve the full config LR schedule")
@@ -523,7 +629,7 @@ def main():
         raise RuntimeError("CUDA unavailable; use sam2_env on the GPU server")
     summary = train(load_config(args.config), device=device, output_dir=args.output_dir,
                     resume=args.resume, overfit=args.overfit, extend_overfit_from=args.extend_overfit_from,
-                    stop_after_epoch=args.stop_after_epoch)
+                    stop_after_epoch=args.stop_after_epoch, fork_spatial_from=args.fork_spatial_from)
     print(json.dumps(summary, ensure_ascii=False, indent=2, allow_nan=False))
     if summary["status"] not in ("completed", "segment_completed"):
         raise SystemExit(2)

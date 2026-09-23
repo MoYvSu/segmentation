@@ -12,6 +12,7 @@ from torch.utils.data import Dataset
 
 from data.dataset import letterbox
 from data.mim_dataset import list_images, read_manifest
+from data.rgb_spatial_blur import apply_spatial_blur, validate_spatial_blur_config
 
 
 PROFILES = ("identity", "blur", "illumination", "mixed")
@@ -32,14 +33,32 @@ def prepare_rgb(image: np.ndarray, image_size: int) -> tuple[np.ndarray, np.ndar
     return boxed.astype(np.float32) / 255.0, valid
 
 
-def degrade_rgb(clean: np.ndarray, rng: np.random.Generator, profile: str, cfg: dict) -> np.ndarray:
+def degrade_rgb(clean: np.ndarray, rng: np.random.Generator, profile: str, cfg: dict, *,
+                spatial_rng: np.random.Generator | None = None,
+                spatial_info: dict | None = None) -> np.ndarray:
     """仅改变外观；参考图取自用户确认基本清晰的训练集。"""
     if profile not in PROFILES:
         raise ValueError(f"unknown degradation profile: {profile}")
+    if spatial_info is not None:
+        spatial_info.update(selected=False, base_sigma=0.0, sigma_map=None)
     image = clean.copy()
     if profile in {"blur", "mixed"}:
         sigma = float(rng.uniform(*cfg["blur_sigma"]))
-        image = cv2.GaussianBlur(image, (0, 0), sigmaX=sigma, borderType=cv2.BORDER_REFLECT)
+        spatial_cfg = cfg.get("spatial_blur")
+        use_spatial = bool(spatial_rng is not None and spatial_cfg
+                           and spatial_cfg.get("enabled", False)
+                           and spatial_cfg.get("strength", 1.0) > 0)
+        if use_spatial:
+            validate_spatial_blur_config(spatial_cfg)
+            use_spatial = bool(spatial_rng.random() < spatial_cfg.get("probability", 0.5))
+        sigma_map = None
+        if use_spatial:
+            image, sigma_map = apply_spatial_blur(image, sigma, spatial_cfg, spatial_rng,
+                                                 cfg["blur_sigma"])
+        else:
+            image = cv2.GaussianBlur(image, (0, 0), sigmaX=sigma, borderType=cv2.BORDER_REFLECT)
+        if spatial_info is not None:
+            spatial_info.update(selected=use_spatial, base_sigma=sigma, sigma_map=sigma_map)
         if rng.random() < cfg["resample_probability"]:
             scale = float(rng.uniform(*cfg["resample_scale"]))
             h, w = image.shape[:2]
@@ -139,6 +158,7 @@ class RGBRestorationDataset(Dataset):
         self.split, self.image_size, self.crop_size = split, int(image_size), int(crop_size)
         self.split_policy = split_policy
         self.degradation, self.seed, self.epoch = degradation, int(seed), 0
+        validate_spatial_blur_config(degradation.get("spatial_blur"))
         self.masked_pretraining = masked_pretraining
         self.training_noise = training_noise
         if masked_pretraining:
@@ -200,7 +220,13 @@ class RGBRestorationDataset(Dataset):
         clean, valid = prepare_rgb(read_rgb(self.samples[source_index]), self.image_size)
         vh, vw = int(valid[:, 0].sum()), int(valid[0].sum())
         # 在真实内容上退化，再补齐镜像，避免给填充区学出虚构监督。
-        degraded = degrade_rgb(clean[:vh, :vw], rng, profile, self.degradation)
+        spatial_cfg = self.degradation.get("spatial_blur")
+        spatial_enabled = bool(training and spatial_cfg and spatial_cfg.get("enabled", False))
+        spatial_rng = (np.random.default_rng(np.random.SeedSequence([self.seed, self.epoch, index, 6]))
+                       if spatial_enabled else None)
+        spatial_info = {} if spatial_enabled else None
+        degraded = degrade_rgb(clean[:vh, :vw], rng, profile, self.degradation,
+                               spatial_rng=spatial_rng, spatial_info=spatial_info)
         degraded = cv2.copyMakeBorder(degraded, 0, self.image_size - vh, 0, self.image_size - vw,
                                       cv2.BORDER_REFLECT)
         if training:
@@ -244,6 +270,13 @@ class RGBRestorationDataset(Dataset):
             result["mask_mean"] = mask_mean
         if training and self.training_noise is not None:
             result["noise_sigma"] = noise_sigma
+        if spatial_info is not None:
+            sigma_map = spatial_info["sigma_map"]
+            base_sigma = spatial_info["base_sigma"]
+            # 只返回整幅有效内容的标量；不把大幅σ场放入每个训练batch。
+            result.update(spatial_blur_applied=spatial_info["selected"], base_sigma=base_sigma,
+                          spatial_sigma_min=float(sigma_map.min()) if sigma_map is not None else base_sigma,
+                          spatial_sigma_max=float(sigma_map.max()) if sigma_map is not None else base_sigma)
         return result
 
 
