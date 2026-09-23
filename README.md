@@ -1,6 +1,8 @@
 # 低碳钢金相图像相区分割
 
-> 扩散专用工作区：`codex/diffusion-restoration-20260923`。[D4与D3同预算分析](docs/RGB_DIFFUSION_D4_ANALYSIS_20260923.md)：两组均完成60轮／15000累计更新，零失败。32张训练源图的新空间模糊配对上，D4首步RGB／梯度误差比D3降低19.49%／5.38%，均匀模糊小幅退步；16步仍差于首步，真实图补边未获证明。保留空间增强，下一步建议独立短链监督，尚未实施。短入口为`outputs/rgb_restoration_diffusion_d4/`与`outputs/rgb_restoration_diffusion_d3/`。尚无D3/D4黑盒成绩；v4继续作为已验证修复基准，下游适应问题仍为独立假设。
+> 2026-09-24：用户回报D4 e60首步版复赛`0.8490/0.8532`，折算85.110，比旧v4低0.605，下降集中面积项。[后端适配配对实验](docs/BACKEND_D4_ABLATION_20260924.md)已实现并通过两组GPU短测：同增强、同初始权重，比较冻结D4＋微调LoRA/双头与不带D4的相同微调；各60轮，无代理留出，自动保存过程图并在训练后推理、打包、渲染。短目录`outputs/d4_adapt/`。
+
+> 扩散专用工作区：`codex/diffusion-restoration-20260923`。[D4与D3同预算分析](docs/RGB_DIFFUSION_D4_ANALYSIS_20260923.md)：两组均完成60轮／15000累计更新，零失败。32张训练源图的新空间模糊配对上，D4首步RGB／梯度误差比D3降低19.49%／5.38%，均匀模糊小幅退步；16步仍差于首步，真实图补边未获证明。短链监督暂缓，先执行上方后端适配对照。短入口为`outputs/rgb_restoration_diffusion_d4/`与`outputs/rgb_restoration_diffusion_d3/`。v4继续作为已验证修复基准，下游适应问题仍待实验检验。
 
 > 2026-09-21：[复赛交接入口](docs/HANDOFF_SEMIFINAL_20260921.md)。用户已把复赛数据放到23411服务器的autodl-fs盘下，准确目录待下轮核验；本轮仅整理工作区，未分析或替换数据。以下分数均属初赛。
 

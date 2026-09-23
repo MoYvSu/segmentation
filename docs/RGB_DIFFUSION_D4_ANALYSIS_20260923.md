@@ -1,5 +1,8 @@
 # D4空间模糊完成分析：增强有效，多步退化仍在
 
+2026-09-24更新：用户回报首步版复赛`0.8490/0.8532`，折算85.110，低于旧v4的85.715。
+当前优先执行[后端适配配对实验](BACKEND_D4_ABLATION_20260924.md)，下方短链监督建议暂缓。
+
 2026-09-23。对应[D4启动记录](RGB_DIFFUSION_D4_SPATIAL_20260923.md)。本次核验训练完整性，
 用相同输入进行FP32对照、逐步测量与真实图目检；没有新增训练、分割推理或黑盒提交。
 
@@ -132,7 +135,7 @@ D4所有9个BF16空间过程节点也都以首步平均误差最低，问题贯�
 
 目检未看到明确的新增可靠补边。部分16步结果边缘更软，同时仍带细碎纹理。
 真实图没有清晰答案或测试标签，不能断言弱晶界已正确闭合、没有虚构结构或实例面积必然改善。
-本次没有运行完整分割链，因此不能评价SAM2及后处理对新输入的适应。
+本节重建分析没有运行完整分割链，因此不能评价SAM2及后处理对新输入的适应；后续全量推理见文末记录。
 
 ## 60轮是否足够
 
@@ -177,3 +180,29 @@ D4原固定配对首步RGB比值从e40的0.56717到e50的0.56083，再到e60的0
 - [真实图右侧对比](../output/d4_analysis/test_101_right.png)
 - [训练空间模糊配对](../output/d4_analysis/spatial_fixed_train_000.png)
 - [空间场覆盖诊断](../output/d4_analysis/field_audit.json)
+
+## D4首步全量复赛推理（2026-09-23）
+
+用户确认使用D4 e60首步输出后，已完成100张复赛图推理、打包和下载后独立校验，耗时240.67秒。
+固定服务器既有`config/inference/final_semifinal.yaml`及S-align e13＋V几何e115部署链；
+12份部署源码、3份权重、解析配置及100张输入与baseline溯源一致。
+diffusion工作树的历史默认提交入口未覆盖服务器配置。
+
+- 修复权重：`outputs/rgb_restoration_diffusion_d4/epoch_060.pt`，e60／15000更新，
+  SHA256 `28a7e0c53dda7797c983999791cef5abdd7579be59607f6d03a3709cfdb8acb6`。
+- 输入在1024等比letterbox反射补边后以FP32修复，strength=1，再进入共享encoder。
+  显式取`t=16`的第一次清晰图估计，保持原16步schedule、kappa=0.03；没有改成单步schedule。
+  随机种子为314159加原始文件名排序序号，首图另做一次等价重放检查。
+- 保持legacy_none、gated/top2、high=0.65、low=0.45、seal2、重建8步及probability_mean投票。
+  首张真实图的零强度最终实例与类别完全复现baseline；去重总参数97,027,847。
+- 全部100图／200文件通过原尺寸、真正16位灰度PNG、ID≤65535、类别整数0/1及对应关系、
+  ZIP平铺、CRC和双端文件哈希校验。共8547个预测实例，其中铁素体5360、珠光体3187，最大ID238；
+  数量是输出描述，不代表准确率，也未用于调节参数。
+
+私有短目录：服务器`outputs/d4_submission/`，本地`output/d4_submission/`。
+包为[submission_d4_first.zip](../output/d4_submission/submission_d4_first.zip)，4,454,522 bytes，
+SHA256 `0e4d491d5c18f9a6621d7c497eb9f9d3690198767e1c4a68c0ead8c9cdd4396e`。
+同目录保存`run.py`、`provenance.json`、`submission_manifest.json`、`status.json`、
+`local_validation.json`与4张修复前后缩略图。模型及公共默认推理代码未修改。
+打包当日未由代理上传平台。2026-09-24用户回报D4为0.8490／0.8532，折算85.110；
+比无修复baseline低0.265、比旧v4低0.605。mIoU超过两者，面积项下降；v4仍为总分较高参照。

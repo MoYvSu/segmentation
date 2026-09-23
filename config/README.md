@@ -1,5 +1,9 @@
 # 配置目录
 
+新增`train/backend_d4.yaml`：冻结D4首步与不带D4两组后端微调，均从S-align＋V初始化，
+训练LoRA和两个任务头；同在线退化、全32人工与64既有SAM2源、60轮，无代理或验证选优。
+入口`tools/run_backend_ablation.py`自动串行完成训练、推理和对比渲染，见[实验约定](../docs/BACKEND_D4_ABLATION_20260924.md)。
+
 输出目录命名：新建运行目录最多四段（按下划线分隔，时间戳也计一段），例如
 `rgb_restoration_diffusion_d4` 或 `diffusion_d4_20260923`。增强类型、轮数、monitor等细节
 写入配置和运行记录，不拼入目录名。正在运行的旧长目录可提供短名称入口，不为改名重启训练。

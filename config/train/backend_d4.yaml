@@ -1,0 +1,68 @@
+# -*- coding: utf-8 -*-
+# 同一初始部署和训练配方；两组唯一变量为冻结 D4 首步前端的开关。
+_base: ../experiments/affinity_semantic_aligned_v_top2_20260919.yaml
+
+inference:
+  test_dir: data/quarter_final_test/复赛
+
+backend_adaptation:
+  output_dir: outputs/d4_adapt
+  seed: 20260924
+  epochs: 60
+  manual_repeats: 2
+  expected_manual_sources: 32
+  num_workers: 0
+  learning_rates:
+    semantic: 0.00001
+    affinity: 0.00002
+    lora: 0.000001
+  minimum_lr_ratio: 0.1
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  amp_dtype: bfloat16
+  pseudo_weight: 0.5
+  completed_gt_dir: outputs/experiments/seeded_label_completion_o1/radius_8/derived_maps
+  sam2_geometry:
+    dataset_dir: data/sam2_geometry_g2
+    source_dir: data/unlabeled
+    expected_sources: 64
+    manifest_sha256: 4ed3e2e1fcfd2fa369dd647fc5ce7c869c5bcb7f472e29398ee889b368e40749
+    reuse_authorization_doc: docs/G1_ABLATION_TRAINING_20260912.md
+  restoration:
+    checkpoint: outputs/rgb_restoration_diffusion_d4/epoch_060.pt
+    checkpoint_sha256: 28a7e0c53dda7797c983999791cef5abdd7579be59607f6d03a3709cfdb8acb6
+    degradation_config: config/train/rgb_restoration_diffusion_d4_spatial_all60_monitored.yaml
+    mode: first_x0
+    inference_seed: 314159
+  noise:
+    enabled: true
+    probability: 0.5
+    sigma: [0.0, 0.006]
+  monitor:
+    every_epochs: 5
+    images: [test_101, test_091, test_130, test_089]
+  baseline_prediction_dir: outputs/20260922_semifinal_submission/baseline/deployment
+  d4_prediction_dir: outputs/d4_submission/deployment
+
+# 沿用现有联合任务损失；两组固定相同权重，不单独校准、不按训练 loss 选优。
+direct_semantic_affinity:
+  semantic_loss:
+    dice_weight: 0.30
+    instance_weight: 0.75
+    core_radius: 3
+    core_min_pixels: 12
+    core_boundary_threshold: 0.20
+    class_balance: true
+    ferrite_weight: 1.0
+    hard_gamma: 0.5
+    hard_floor: 0.50
+    pool_weight: 0.50
+    thin_weight: 1.50
+  affinity_loss:
+    negative_weight: 1.5
+    hard_negative_weight: 1.0
+    hard_negative_gamma: 2.0
+    manual_uncovered_as_boundary: false
+    manual_uncovered_boundary_weight: 0.20
+    pseudo_negative_weight: 1.0
+    normalize_edge_weights: true
