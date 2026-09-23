@@ -1,0 +1,14 @@
+# 单独检验局部掩码重建任务；网络、原有损失、验证、初始化及总更新数沿用 v3。
+_base: rgb_restoration_deblur_v3.yaml
+
+rgb_restoration:
+  output_dir: outputs/rgb_restoration_deblur_v4_masked
+  masked_pretraining:
+    # 前6轮在模糊样本上在线削弱局部纹理，后14轮完全恢复 v3 输入；不重置优化器。
+    epochs: 6
+    start_strength: 0.5
+    # 均为1024模型尺度上的像素；512裁块中随机位置，不按梯度筛选强边界。
+    patch_size: [16, 48]
+    coverage: [0.08, 0.16]
+    lowpass_sigma: [6.0, 12.0]
+    blend: [0.65, 0.95]

@@ -1,0 +1,13 @@
+# 与v3长预算组只相差前6轮的局部重建任务；不同时增加局部任务轮数。
+_base: rgb_restoration_deblur_v3_long80.yaml
+
+rgb_restoration:
+  output_dir: outputs/rgb_restoration_deblur_v4_masked_long80
+  masked_pretraining:
+    # 沿用旧v4的6轮；随后74轮普通去模糊。优化器和学习率连续、不重启。
+    epochs: 6
+    start_strength: 0.5
+    patch_size: [16, 48]
+    coverage: [0.08, 0.16]
+    lowpass_sigma: [6.0, 12.0]
+    blend: [0.65, 0.95]
