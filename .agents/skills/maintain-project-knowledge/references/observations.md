@@ -25,7 +25,7 @@ scope clarification. It is not a chronological task log.
   用同checkpoint的首步和完整输出检查多步贡献，保持正式模型晋级按真实部署/黑盒证据。
 - verification_gap: 全量训练仍是单训练seed；定量修复对照仅4个训练配对，真实图目检4张，
   D1/D2无黑盒成绩，D2只到20轮。未证明全量绝对收敛或多步退化的唯一原因；
-  增加推理起点训练比例尚未实验；v6回分缺平台包哈希回执。
+  增加推理起点训练比例的有效性尚待验证；v6回分缺平台包哈希回执。
 - limits: 三个采样种子不是三次独立训练；本条不调整门槛、不允许从过拟合或目检宣称测试补边正确。
 
 ## 20260912-validation-area-ranking-transfer
