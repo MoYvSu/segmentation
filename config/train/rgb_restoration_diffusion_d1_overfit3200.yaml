@@ -1,0 +1,7 @@
+# 仅延长D1短测，保留800次父运行；正式预算仍为60 epoch。
+_base: rgb_restoration_diffusion_d1_all60.yaml
+rgb_restoration:
+  output_dir: outputs/rgb_restoration_diffusion_d1_3200
+  overfit:
+    steps: 3200
+    save_steps: [1600, 3200]

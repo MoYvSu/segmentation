@@ -1,9 +1,10 @@
 # 配置目录
 
-扩散专用入口：`train/rgb_restoration_diffusion_d1_all60.yaml`，全1000图、60 epoch，
-先用`train_rgb_diffusion_restoration.py --overfit`做固定训练配对工程检查。
-当前800次检查未达完整采样门槛；下一组方案见[扩散安排](../docs/RGB_DIFFUSION_ROADMAP_20260923.md)，
-不能修改预算后直接绕过trainer的严格续训检查。
+扩散正式候选入口：`train/rgb_restoration_diffusion_d1_all60_monitored.yaml`，全1000图、60 epoch、
+从零训练，固定过程图同时记录首步与16步。`train/rgb_restoration_diffusion_d1_overfit3200.yaml`
+的4图短测已通过工程门槛，见[短测判定](../docs/RGB_DIFFUSION_SHORT_DECISION_20260923.md)；
+正式训练尚未启动。旧`all60.yaml`保留原800次短测预算；延长必须用`--extend-overfit-from`
+并指定新的输出目录，不能绕过严格配置检查。
 
 2026-09-21：[复赛交接](../docs/HANDOFF_SEMIFINAL_20260921.md)。本轮未更改测试数据路径或默认推理配置；
 复赛数据目录待下轮核验。以下成绩及68图包均为初赛记录，复赛不得直接沿用固定文件数断言。

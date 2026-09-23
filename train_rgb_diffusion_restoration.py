@@ -135,7 +135,7 @@ def monitor(model, fixed, output_dir, *, device, epoch, updates, monitor_cfg, us
     """逐图完整采样；专用随机流不改变训练噪声、DataLoader 或全局随机状态。"""
     previous_training = model.training
     model.eval()
-    predictions = []
+    predictions, first_predictions = [], []
     destination = Path(output_dir) / "monitor" / f"epoch_{epoch:03d}_update_{updates:06d}"
     destination.mkdir(parents=True, exist_ok=True)
     try:
@@ -144,6 +144,12 @@ def monitor(model, fixed, output_dir, *, device, epoch, updates, monitor_cfg, us
             generator = torch.Generator(device=device).manual_seed(int(monitor_cfg.get("sampling_seed", 314159)) + index)
             with torch.autocast(device_type=device.type, enabled=use_amp, dtype=amp_dtype):
                 prediction = model(inputs, generator=generator)
+                if monitor_cfg.get("include_first_step", False):
+                    first_rng = torch.Generator(device=device).manual_seed(int(monitor_cfg.get("sampling_seed", 314159)) + index)
+                    last_t = torch.full((len(inputs),), model.num_steps, device=device, dtype=torch.long)
+                    # eta_T=1，起点只依赖模糊输入与噪声，绝不读取清晰参考。
+                    initial_state = model.q_sample(inputs, inputs, last_t, generator=first_rng)
+                    first_predictions.append(model.denoise(initial_state, inputs, last_t).clamp(0, 1).float().cpu())
             if not torch.isfinite(prediction).all():
                 raise FloatingPointError(f"non-finite full sampling for {source}")
             predictions.append(prediction.detach().float().cpu())
@@ -152,8 +158,17 @@ def monitor(model, fixed, output_dir, *, device, epoch, updates, monitor_cfg, us
                                title=f"Epoch {epoch} | update {updates} | {model.num_steps} sampling steps",
                                size=int(monitor_cfg.get("thumbnail_size", 224)),
                                roi_size=int(monitor_cfg.get("roi_size", 256)))
+            if first_predictions:
+                save_monitor_image(destination / f"{index:02d}_{Path(source).stem}_first.png",
+                                   fixed["input"][index], first_predictions[-1][0], fixed["target"][index],
+                                   title=f"Epoch {epoch} | update {updates} | first x0 estimate",
+                                   size=int(monitor_cfg.get("thumbnail_size", 224)),
+                                   roi_size=int(monitor_cfg.get("roi_size", 256)))
         report = error_report(fixed["input"], torch.cat(predictions), fixed["target"],
                               fixed["valid"], fixed["source"])
+        if first_predictions:
+            report["first_step"] = error_report(fixed["input"], torch.cat(first_predictions), fixed["target"],
+                                                fixed["valid"], fixed["source"])
         report.update(epoch=epoch, updates=updates, sampling_steps=model.num_steps,
                       sampling_seed=int(monitor_cfg.get("sampling_seed", 314159)),
                       amp_dtype=str(amp_dtype) if use_amp else None,
@@ -186,12 +201,22 @@ def _same_recipe(previous, current):
     return previous == current
 
 
+def _same_overfit_extension_recipe(previous, current):
+    previous, current = copy.deepcopy(previous), copy.deepcopy(current)
+    if int(current["overfit"]["steps"]) <= int(previous["overfit"]["steps"]):
+        return False
+    for item in (previous, current):
+        item["overfit"].pop("steps", None)
+        item["overfit"].pop("save_steps", None)
+    return _same_recipe(previous, current)
+
+
 def _append_json(path, row):
     with Path(path).open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
 
 
-def train(config, *, device, output_dir=None, resume=None, overfit=False):
+def train(config, *, device, output_dir=None, resume=None, overfit=False, extend_overfit_from=None):
     cfg = copy.deepcopy(config["rgb_restoration"])
     if cfg.get("split_policy") != "all_train":
         raise ValueError("diffusion experiment requires split_policy=all_train; no held-out validation")
@@ -199,6 +224,11 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False):
         raise ValueError("this trainer requires architecture=pixel_diffusion_nafnet")
     mode = "overfit_engineering" if overfit else "all_train"
     output_dir = Path(output_dir or project_path(config, cfg["output_dir"] + ("_overfit" if overfit else ""))).resolve()
+    if extend_overfit_from:
+        if not overfit or resume:
+            raise ValueError("overfit extension requires --overfit and cannot use --resume")
+        if Path(extend_overfit_from).resolve().parent == output_dir or (output_dir.exists() and any(output_dir.iterdir())):
+            raise ValueError("overfit extension requires a fresh output directory distinct from its parent")
     if (output_dir / "run_config.json").exists() and not resume:
         raise FileExistsError(f"run already exists: {output_dir}; use --resume or a new --output-dir")
     if resume and Path(resume).resolve() != output_dir / "last.pt":
@@ -227,11 +257,13 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False):
     noise_generator = torch.Generator(device=device).manual_seed(seed + 271828)
     loader_generator = torch.Generator().manual_seed(seed)
     checkpoint = None
-    if resume:
-        checkpoint = torch.load(resume, map_location="cpu", weights_only=True)
+    checkpoint_path = resume or extend_overfit_from
+    if checkpoint_path:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
         if checkpoint.get("format") != model.checkpoint_format or checkpoint.get("mode") != mode:
             raise ValueError("resume requires matching diffusion format and training mode")
-        if not _same_recipe(checkpoint["experiment_config"], cfg):
+        same_recipe = _same_overfit_extension_recipe if extend_overfit_from else _same_recipe
+        if not same_recipe(checkpoint["experiment_config"], cfg):
             raise ValueError("resume config differs from checkpoint")
         model.load_state_dict(checkpoint["model"], strict=True)
         optimizer.load_state_dict(checkpoint["optimizer"])
@@ -246,13 +278,15 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False):
         raise ValueError(f"expected {expected_sources} training sources, found {len(train_set)}")
     count = int(fit_cfg.get("samples", 4) if overfit else monitor_cfg.get("samples", 4))
     output_dir.mkdir(parents=True, exist_ok=True)
-    if resume:
-        fixed = torch.load(output_dir / "fixed_samples.pt", map_location="cpu", weights_only=True)
-        fixed_manifest = json.loads((output_dir / "fixed_samples_manifest.json").read_text(encoding="utf-8"))
+    if checkpoint_path:
+        fixed_dir = Path(checkpoint_path).resolve().parent
+        fixed = torch.load(fixed_dir / "fixed_samples.pt", map_location="cpu", weights_only=True)
+        fixed_manifest = json.loads((fixed_dir / "fixed_samples_manifest.json").read_text(encoding="utf-8"))
         if len(fixed["source"]) != count or fixed["source"] != fixed_manifest["sources"]:
             raise ValueError("saved fixed sample set differs from run configuration")
     else:
         fixed, fixed_manifest = fixed_training_samples(config, count)
+    if not resume:
         save_checkpoint(output_dir / "fixed_samples.pt", fixed)
         write_json(output_dir / "fixed_samples_manifest.json", fixed_manifest)
     loader = None if overfit else DataLoader(
@@ -270,6 +304,12 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False):
         raise ValueError("run already completed its configured update budget")
     if checkpoint:
         restore_rng(checkpoint["rng"], noise_generator, loader_generator, device)
+    continuation = checkpoint.get("continuation") if checkpoint else None
+    if extend_overfit_from:
+        continuation = {"parent_checkpoint": str(Path(extend_overfit_from).resolve()),
+                        "parent_updates": updates,
+                        "parent_planned_updates": checkpoint["experiment_config"]["overfit"]["steps"],
+                        "preserved": ["model", "optimizer", "scaler", "rng", "fixed_samples"]}
     parameters = sum(p.numel() for p in model.parameters())
     metadata = {
         "format": model.checkpoint_format, "experiment_config": cfg, "mode": mode,
@@ -282,6 +322,7 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False):
         "planned_updates": planned_updates, "overfit_is_holdout": False, "automatic_formal_training": False,
         "fixed_samples": fixed_manifest, "device": str(device), "torch": str(torch.__version__),
         "amp_dtype": str(amp_dtype) if use_amp else None,
+        "continuation": continuation,
     }
     if not resume:
         write_json(output_dir / "run_config.json", metadata)
@@ -315,8 +356,11 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False):
             "rng": capture_rng(noise_generator, loader_generator, device), "metrics": metrics,
             "output_metrics": report, "elapsed_seconds": prior_elapsed + time.perf_counter() - started,
             "selection_mode": metadata["selection_mode"], "best_loss": None, "best_epoch": 0,
+            "continuation": continuation,
         }
         save_checkpoint(output_dir / "last.pt", payload)
+        if overfit and updates in fit_cfg.get("save_steps", []):
+            save_checkpoint(output_dir / f"update_{updates:06d}.pt", payload)
         if not overfit and completed_epoch in cfg["train"].get("save_epochs", [1, 10, 20, 40, 60]):
             save_checkpoint(output_dir / f"epoch_{completed_epoch:03d}.pt", payload)
 
@@ -370,13 +414,13 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False):
     try:
         update_summary()
         if not resume:
-            report = monitor(model, fixed, output_dir, device=device, epoch=0, updates=0,
+            report = monitor(model, fixed, output_dir, device=device, epoch=completed_epoch, updates=updates,
                              monitor_cfg=monitor_cfg, use_amp=use_amp, amp_dtype=amp_dtype)
             update_summary()
         if overfit:
             while updates < planned_updates:
                 row = take_update(fixed, 0)
-                if updates % monitor_every == 0 or updates == planned_updates:
+                if updates % monitor_every == 0 or updates == planned_updates or updates in fit_cfg.get("save_steps", []):
                     report = monitor(model, fixed, output_dir, device=device, epoch=0, updates=updates,
                                      monitor_cfg=monitor_cfg, use_amp=use_amp, amp_dtype=amp_dtype)
                     save_training_checkpoint(row)
@@ -427,6 +471,7 @@ def main():
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
     parser.add_argument("--output-dir", help="private output directory; defaults to config output_dir")
     parser.add_argument("--resume", help="same run's last.pt; formal runs resume at a completed epoch")
+    parser.add_argument("--extend-overfit-from", help="preserve a parent overfit run and extend its budget in a fresh output directory")
     parser.add_argument("--overfit", action="store_true", help="fixed training pairs only; never starts formal training")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -434,7 +479,7 @@ def main():
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA unavailable; use sam2_env on the GPU server")
     summary = train(load_config(args.config), device=device, output_dir=args.output_dir,
-                    resume=args.resume, overfit=args.overfit)
+                    resume=args.resume, overfit=args.overfit, extend_overfit_from=args.extend_overfit_from)
     print(json.dumps(summary, ensure_ascii=False, indent=2, allow_nan=False))
     if summary["status"] != "completed":
         raise SystemExit(2)

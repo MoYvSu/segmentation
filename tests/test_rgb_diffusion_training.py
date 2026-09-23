@@ -202,3 +202,63 @@ def test_nonfinite_training_fails_and_counts_no_successful_updates(tiny_config, 
         training.train(tiny_config, device=torch.device("cpu"), output_dir=tmp_path / "failed", overfit=True)
     summary = json.loads((tmp_path / "failed" / "summary.json").read_text())
     assert summary["status"] == "failed" and summary["updates"] == 0 and summary["failed_updates"] == 1
+
+
+def test_first_step_monitor_does_not_change_training_or_full_sampling(tiny_config, tmp_path):
+    training.train(tiny_config, device=torch.device("cpu"), output_dir=tmp_path / "full", overfit=True)
+    additional = copy.deepcopy(tiny_config)
+    additional["rgb_restoration"]["monitor"]["include_first_step"] = True
+    training.train(additional, device=torch.device("cpu"), output_dir=tmp_path / "both", overfit=True)
+    expected = torch.load(tmp_path / "full/last.pt", weights_only=True)
+    actual = torch.load(tmp_path / "both/last.pt", weights_only=True)
+    assert all(torch.equal(value, actual["model"][key]) for key, value in expected["model"].items())
+    assert torch.equal(expected["rng"]["noise_generator"], actual["rng"]["noise_generator"])
+    report = copy.deepcopy(actual["output_metrics"])
+    first = report.pop("first_step")
+    assert report == expected["output_metrics"] and first["samples"] == 4
+    assert len(list((tmp_path / "both/monitor/epoch_000_update_000004").glob("*_first.png"))) == 4
+
+
+def test_overfit_extension_preserves_training_stream_and_parent(tiny_config, tmp_path):
+    parent, extended, complete = [tmp_path / name for name in ("parent", "extended", "complete")]
+    short = copy.deepcopy(tiny_config)
+    short["rgb_restoration"]["overfit"]["steps"] = 2
+    training.train(short, device=torch.device("cpu"), output_dir=parent, overfit=True)
+    parent_bytes = (parent / "last.pt").read_bytes()
+    longer = copy.deepcopy(tiny_config)
+    longer["rgb_restoration"]["overfit"]["save_steps"] = [4]
+    training.train(longer, device=torch.device("cpu"), output_dir=extended, overfit=True,
+                   extend_overfit_from=parent / "last.pt")
+    training.train(longer, device=torch.device("cpu"), output_dir=complete, overfit=True)
+    actual = torch.load(extended / "last.pt", weights_only=True)
+    expected = torch.load(complete / "last.pt", weights_only=True)
+    assert all(torch.equal(value, actual["model"][key]) for key, value in expected["model"].items())
+    assert torch.equal(actual["rng"]["noise_generator"], expected["rng"]["noise_generator"])
+    assert actual["output_metrics"] == expected["output_metrics"]
+    assert actual["continuation"]["parent_updates"] == 2
+    assert (extended / "update_000004.pt").exists()
+    assert (extended / "monitor/epoch_000_update_000002/errors.json").exists()
+    assert (parent / "last.pt").read_bytes() == parent_bytes
+    from tools.probe_rgb_diffusion import probe
+    probe(extended / "last.pt", device=torch.device("cpu"), seeds=[314159, 271828],
+          output_dir=tmp_path / "probe")
+    diagnostic = json.loads((tmp_path / "probe/probe.json").read_text())
+    assert diagnostic["updates"] == 4 and len(diagnostic["seeds"]) == 2
+    assert diagnostic["seeds"][0]["full"] == {key: actual["output_metrics"][key]
+                                             for key in ("samples", "mean", "per_source")}
+    for key in ("input", "target", "valid"):
+        assert torch.equal(torch.load(extended / "fixed_samples.pt", weights_only=True)[key],
+                           torch.load(parent / "fixed_samples.pt", weights_only=True)[key])
+    with pytest.raises(ValueError, match="fresh output"):
+        training.train(longer, device=torch.device("cpu"), output_dir=parent, overfit=True,
+                       extend_overfit_from=parent / "last.pt")
+    with pytest.raises(ValueError, match="requires --overfit"):
+        training.train(longer, device=torch.device("cpu"), output_dir=tmp_path / "formal",
+                       extend_overfit_from=parent / "last.pt")
+    for modified in (short, tiny_config):
+        changed = copy.deepcopy(modified)
+        if modified is tiny_config:
+            changed["rgb_restoration"]["model"]["kappa"] = 0.03
+        with pytest.raises(ValueError, match="config differs"):
+            training.train(changed, device=torch.device("cpu"), output_dir=tmp_path / "invalid",
+                           overfit=True, extend_overfit_from=parent / "last.pt")

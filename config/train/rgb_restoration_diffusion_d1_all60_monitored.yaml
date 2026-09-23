@@ -1,0 +1,7 @@
+# 3200次工程短测通过后的正式候选配方：从零、全部1000图、60 epoch。
+# 仅追加首步诊断，不改变优化/随机时间/噪声配方，不自动启动训练。
+_base: rgb_restoration_diffusion_d1_all60.yaml
+rgb_restoration:
+  output_dir: outputs/rgb_restoration_diffusion_d1_all60_monitored
+  monitor:
+    include_first_step: true

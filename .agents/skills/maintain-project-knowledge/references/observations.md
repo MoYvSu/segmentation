@@ -3,6 +3,21 @@
 This file holds potentially reusable findings that still need validation or
 scope clarification. It is not a chronological task log.
 
+## 20260923-diffusion-training-sampling-gap
+
+- status: observation
+- last_verified: 2026-09-23
+- scope: 条件扩散修复的训练内过拟合检查与长测决策
+- finding: 随机时间单次重建误差与实际完整采样误差会不同步；早期多步退化不足以否定可学习性。
+  D1只延长800→3200次，完整采样梯度误差由输入的约1.175倍降到0.637倍，三种子均过原门槛；
+  但末点首步仍好于16步，不能把“扩散模型可拟合”解释为“多步迭代已经优于回归”。
+- evidence: `docs/RGB_DIFFUSION_SHORT_DECISION_20260923.md`；同4训练配对、权重/优化器/随机流连续，
+  明确区分随机t训练、首步估计、完整采样与官方分割成绩；过程图独立保存。
+- reuse_hypothesis: 扩散早期判定应同时看训练/采样误差及充分拟合趋势；通过工程门槛后，
+  用同checkpoint的首步和完整输出检查多步贡献，保持正式模型晋级按真实部署/黑盒证据。
+- verification_gap: 单训练seed、4个已见固定裁块，未证明全量收敛、真实模糊泛化或多步退化的唯一原因。
+- limits: 三个采样种子不是三次独立训练；本条不调整门槛、不允许从过拟合或目检宣称测试补边正确。
+
 ## 20260912-validation-area-ranking-transfer
 
 - status: observation
