@@ -1,0 +1,13 @@
+# D5b：继承D5a参数配方，从随机初始化训练，不加载任何历史权重。
+# 唯一训练变化是独立随机流选择25%批次，监督自身后验状态上的额外两步。
+_base: rgb_diffusion_d5a.yaml
+rgb_restoration:
+  output_dir: outputs/d5b/candidate
+  train:
+    short_chain:
+      enabled: true
+      probability: 0.25
+      extra_steps: 2
+      loss_weight: 0.25
+  monitor:
+    trajectory_steps: [1, 2, 3, 4, 8, 16]

@@ -130,7 +130,7 @@ def monitor_endpoint(model, fixed, output_dir, *, device, epoch, updates, monito
     destination = Path(output_dir)/'endpoint_monitor'/f'epoch_{epoch:03d}_update_{updates:06d}'
     destination.mkdir(parents=True, exist_ok=True)
     records = []
-    wanted = {1, 2, 4, 8, model.num_steps}
+    wanted = set(monitor_cfg.get('trajectory_steps', [1, 2, 4, 8, model.num_steps]))
     try:
         for index, source in enumerate(fixed['source']):
             inputs, target, valid, sigma = [fixed[k][index:index+1].to(device)
@@ -181,7 +181,7 @@ def monitor_real(model, fixed, output_dir, *, device, epoch, updates, monitor_cf
     destination = Path(output_dir)/'real_monitor'/f'epoch_{epoch:03d}_update_{updates:06d}'
     destination.mkdir(parents=True, exist_ok=True)
     records = []
-    wanted = {1, 2, 4, 8, model.num_steps}
+    wanted = set(monitor_cfg.get('trajectory_steps', [1, 2, 4, 8, model.num_steps]))
     try:
         for index, source in enumerate(fixed['source']):
             inputs = fixed['input'][index:index+1].to(device)

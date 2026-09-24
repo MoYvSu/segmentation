@@ -181,13 +181,20 @@ def monitor(model, fixed, output_dir, *, device, epoch, updates, monitor_cfg, us
         model.train(previous_training)
 
 
-def capture_rng(noise_generator, loader_generator, device):
-    return {"noise_generator": noise_generator.get_state(), "loader_generator": loader_generator.get_state(),
-            "torch_cpu": torch.get_rng_state(),
-            "torch_cuda": torch.cuda.get_rng_state_all() if device.type == "cuda" else []}
+def capture_rng(noise_generator, loader_generator, device, short_chain_generator=None):
+    state = {"noise_generator": noise_generator.get_state(), "loader_generator": loader_generator.get_state(),
+             "torch_cpu": torch.get_rng_state(),
+             "torch_cuda": torch.cuda.get_rng_state_all() if device.type == "cuda" else []}
+    if short_chain_generator is not None:
+        state["short_chain_generator"] = short_chain_generator.get_state()
+    return state
 
 
-def restore_rng(state, noise_generator, loader_generator, device):
+def restore_rng(state, noise_generator, loader_generator, device, short_chain_generator=None):
+    if short_chain_generator is not None:
+        if "short_chain_generator" not in state:
+            raise ValueError("enabled short_chain requires its saved short_chain_generator RNG state")
+        short_chain_generator.set_state(state["short_chain_generator"].cpu())
     noise_generator.set_state(state["noise_generator"].cpu())
     loader_generator.set_state(state["loader_generator"].cpu())
     torch.set_rng_state(state["torch_cpu"].cpu())
@@ -290,6 +297,67 @@ def sample_timesteps(count, num_steps, *, device, generator, policy="uniform"):
     raise ValueError(f"unknown timestep_sampling policy: {policy}")
 
 
+def parse_short_chain_config(train_cfg):
+    """短链是独立训练选项；缺省关闭，不改变旧随机流与 checkpoint 格式。"""
+    value = train_cfg.get("short_chain")
+    if value is None:
+        value = {}
+    if not isinstance(value, dict) or set(value) - {"enabled", "probability", "extra_steps", "loss_weight"}:
+        raise ValueError("short_chain requires only enabled, probability, extra_steps and loss_weight")
+    cfg = {"enabled": False, "probability": 0.25, "extra_steps": 2, "loss_weight": 0.25, **value}
+    if type(cfg["enabled"]) is not bool:
+        raise ValueError("short_chain.enabled must be boolean")
+    if type(cfg["extra_steps"]) is not int or cfg["extra_steps"] not in (1, 2):
+        raise ValueError("short_chain.extra_steps must be 1 or 2")
+    for key in ("probability", "loss_weight"):
+        if isinstance(cfg[key], bool) or not isinstance(cfg[key], (int, float)) or not math.isfinite(cfg[key]):
+            raise ValueError(f"short_chain.{key} must be a finite number")
+    if not 0 <= cfg["probability"] <= 1 or cfg["loss_weight"] < 0:
+        raise ValueError("short_chain requires probability in [0,1] and nonnegative loss_weight")
+    return cfg
+
+
+def short_chain_loss(model, state, prediction, condition, target, valid, t_index, loss_cfg, *,
+                     generator, extra_steps, loss_weight, backward, use_amp=False,
+                     amp_dtype=torch.bfloat16):
+    """沿模型自己的后验走短链；逐步反传，跨步断梯度，按有效 step-sample 平均。
+
+    调用方先对主损失反传。backward 接收已加权的当前辅助标量；返回的损失仅供日志。
+    condition 始终是同一退化输入，桥状态和未截断的清晰估计均不 clamp。
+    """
+    eligible = t_index > 1
+    step_samples = int((t_index - 1).clamp(min=0, max=extra_steps).sum())
+    result = {"aux_loss": 0.0, "weighted_aux_loss": 0.0, "samples": int(eligible.sum()),
+              "step_samples": step_samples, "network_calls": 0}
+    if step_samples == 0:
+        return result
+    state, prediction = state.detach().float(), prediction.detach().float()
+    for _ in range(extra_steps):
+        active = t_index > 1
+        if not bool(active.any()):
+            break
+        state, prediction, condition, target, valid, t_index = [
+            value[active] for value in (state, prediction, condition, target, valid, t_index)]
+        # 精确复用部署后验；无梯度且关闭 autocast，避免低精度桥累积误差。
+        with torch.no_grad(), torch.autocast(device_type=state.device.type, enabled=False):
+            mean, variance = model.posterior_mean_variance(state.float(), prediction.float(), t_index)
+            noise = torch.randn(mean.shape, device=mean.device, dtype=torch.float32, generator=generator)
+            state = (mean.float() + variance.float().sqrt() * noise).detach()
+        t_index = t_index - 1
+        with torch.autocast(device_type=state.device.type, enabled=use_amp, dtype=amp_dtype):
+            prediction = model.denoise(state, condition, t_index)
+            step_loss = reconstruction_loss(prediction, target, valid, loss_cfg)
+        if not bool(torch.isfinite(step_loss)):
+            raise FloatingPointError("non-finite short_chain auxiliary loss")
+        contribution = step_loss * (len(t_index) / step_samples)
+        backward(contribution * loss_weight)
+        result["aux_loss"] += float(contribution.detach())
+        result["network_calls"] += 1
+        prediction = prediction.detach()
+    result["weighted_aux_loss"] = result["aux_loss"] * loss_weight
+    return result
+
+
 def train(config, *, device, output_dir=None, resume=None, overfit=False, extend_overfit_from=None,
           stop_after_epoch=None, fork_spatial_from=None):
     cfg = copy.deepcopy(config["rgb_restoration"])
@@ -300,6 +368,7 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
     timestep_policy = cfg["train"].get("timestep_sampling", "uniform")
     if timestep_policy not in ("uniform", "terminal_half"):
         raise ValueError(f"unknown timestep_sampling policy: {timestep_policy}")
+    short_cfg = parse_short_chain_config(cfg["train"])
     epochs = int(cfg["train"]["epochs"])
     if stop_after_epoch is not None:
         if overfit:
@@ -349,6 +418,8 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp and amp_dtype == torch.float16, init_scale=1024)
     noise_generator = torch.Generator(device=device).manual_seed(seed + 271828)
     loader_generator = torch.Generator().manual_seed(seed)
+    short_chain_generator = (torch.Generator(device=device).manual_seed(seed + 1618033)
+                             if short_cfg["enabled"] else None)
     checkpoint = None
     fork_changes = None
     checkpoint_path = resume or extend_overfit_from or fork_spatial_from
@@ -455,7 +526,14 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
             save_checkpoint(output_dir / "real_fixed_samples.pt", real_fixed)
             write_json(output_dir / "real_fixed_samples_manifest.json", real_manifest)
     if checkpoint:
-        restore_rng(checkpoint["rng"], noise_generator, loader_generator, device)
+        restore_rng(checkpoint["rng"], noise_generator, loader_generator, device, short_chain_generator)
+    short_counter_keys = ("selected_batches", "selected_samples", "eligible_samples", "step_samples", "network_calls")
+    short_totals = {key: 0 for key in short_counter_keys}
+    short_totals.update(samples=0, base_loss_sum=0.0, aux_loss_sum=0.0, weighted_aux_loss_sum=0.0)
+    if checkpoint and short_cfg["enabled"]:
+        if "short_chain_totals" not in checkpoint:
+            raise ValueError("enabled short_chain requires saved short_chain_totals")
+        short_totals = copy.deepcopy(checkpoint["short_chain_totals"])
     continuation = checkpoint.get("continuation") if checkpoint else None
     if extend_overfit_from:
         continuation = {"parent_checkpoint": str(Path(extend_overfit_from).resolve()),
@@ -495,6 +573,13 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
         metadata["endpoint_fixed_samples"] = endpoint_manifest
     if real_manifest is not None:
         metadata["real_fixed_samples"] = real_manifest
+    if short_cfg["enabled"]:
+        metadata["short_chain_training"] = {
+            **short_cfg, "rng_seed": seed + 1618033,
+            "aux_normalization": "mean_over_all_valid_step_samples_within_selected_batch",
+            "log_loss_mean": "primary_sample_weighted_mean_including_zero_aux_for_unselected_batches",
+            "bridge": "original_posterior_fp32_detached_unclamped",
+        }
     if not resume:
         write_json(output_dir / "run_config.json", metadata)
     logger.info("mode=%s parameters=%s pool=%s train_sources=%s planned_updates=%s segment_target_updates=%s amp=%s",
@@ -534,6 +619,11 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
         summary.update(epoch=completed_epoch, updates=updates, total_updates=updates,
                        failed_updates=failed_updates, elapsed_seconds=prior_elapsed + time.perf_counter() - started,
                        output_metrics=report)
+        if short_cfg["enabled"]:
+            summary["short_chain"] = {key: short_totals[key] for key in short_counter_keys}
+            for key in ("base_loss", "aux_loss", "weighted_aux_loss"):
+                summary[key] = short_totals[key + "_sum"] / max(short_totals["samples"], 1)
+            summary["train_loss"] = summary["base_loss"] + summary["weighted_aux_loss"]
         if device.type == "cuda":
             summary.update(cuda_peak_allocated_mib=torch.cuda.max_memory_allocated(device) / 2**20,
                            cuda_peak_reserved_mib=torch.cuda.max_memory_reserved(device) / 2**20,
@@ -546,11 +636,13 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
             "experiment_config": cfg, "mode": mode, "epoch": completed_epoch, "updates": updates,
             "failed_updates": failed_updates, "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict() if scheduler else None, "scaler": scaler.state_dict(),
-            "rng": capture_rng(noise_generator, loader_generator, device), "metrics": metrics,
+            "rng": capture_rng(noise_generator, loader_generator, device, short_chain_generator), "metrics": metrics,
             "output_metrics": report, "elapsed_seconds": prior_elapsed + time.perf_counter() - started,
             "selection_mode": metadata["selection_mode"], "best_loss": None, "best_epoch": 0,
             "continuation": continuation,
         }
+        if short_cfg["enabled"]:
+            payload["short_chain_totals"] = copy.deepcopy(short_totals)
         save_checkpoint(output_dir / "last.pt", payload)
         if overfit and updates in fit_cfg.get("save_steps", []):
             save_checkpoint(output_dir / f"update_{updates:06d}.pt", payload)
@@ -562,7 +654,16 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
         nonlocal updates, failed_updates
         inputs, target, valid = [batch[key].to(device, non_blocking=True) for key in ("input", "target", "valid")]
         model.train()
+        retry_rng = (capture_rng(noise_generator, loader_generator, device, short_chain_generator)
+                     if short_cfg["enabled"] else None)
+        retry_python = random.getstate() if short_cfg["enabled"] else None
+        retry_numpy = np.random.get_state() if short_cfg["enabled"] else None
         for attempt in range(4):
+            if attempt and retry_rng is not None:
+                # 仅 scaler 降尺度；同一失败批次重放原时间、主噪声及整条辅助桥随机数。
+                restore_rng(retry_rng, noise_generator, loader_generator, device, short_chain_generator)
+                random.setstate(retry_python)
+                np.random.set_state(retry_numpy)
             optimizer.zero_grad(set_to_none=True)
             t_index = sample_timesteps(len(inputs), model.num_steps, device=device,
                                        generator=noise_generator, policy=timestep_policy)
@@ -575,6 +676,21 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
                 failed_updates += 1
                 raise FloatingPointError(f"non-finite loss at epoch={epoch} update={updates + 1}")
             scaler.scale(loss).backward()
+            if short_cfg["enabled"]:
+                selected = bool(torch.rand((), device=device, generator=short_chain_generator)
+                                < short_cfg["probability"])
+                short_result = {"aux_loss": 0.0, "weighted_aux_loss": 0.0, "samples": 0,
+                                "step_samples": 0, "network_calls": 0}
+                if selected:
+                    try:
+                        short_result = short_chain_loss(
+                            model, xt, prediction, inputs, target, valid, t_index, cfg["loss"],
+                            generator=short_chain_generator, extra_steps=short_cfg["extra_steps"],
+                            loss_weight=short_cfg["loss_weight"], backward=lambda value: scaler.scale(value).backward(),
+                            use_amp=use_amp, amp_dtype=amp_dtype)
+                    except FloatingPointError:
+                        failed_updates += 1
+                        raise
             scaler.unscale_(optimizer)
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float(cfg["train"]["grad_clip"]),
                                                        error_if_nonfinite=False)
@@ -599,6 +715,20 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
                    "t_min": int(t_index.min()), "t_max": int(t_index.max()), "samples": len(inputs),
                    "t_histogram": torch.bincount(t_index, minlength=model.num_steps + 1)[1:].tolist(),
                    "failed_updates": failed_updates, "seconds": time.perf_counter() - started}
+            if short_cfg["enabled"]:
+                row.update(base_loss=float(loss.detach()), aux_loss=short_result["aux_loss"],
+                           weighted_aux_loss=short_result["weighted_aux_loss"])
+                row["loss"] = row["base_loss"] + row["weighted_aux_loss"]
+                row["short_chain"] = {"selected_batches": int(selected),
+                                      "selected_samples": len(inputs) if selected else 0,
+                                      "eligible_samples": short_result["samples"],
+                                      "step_samples": short_result["step_samples"],
+                                      "network_calls": short_result["network_calls"]}
+                short_totals["samples"] += len(inputs)
+                for key in short_counter_keys:
+                    short_totals[key] += row["short_chain"][key]
+                for key in ("base_loss", "aux_loss", "weighted_aux_loss"):
+                    short_totals[key + "_sum"] += row[key] * len(inputs)
             if "source" in batch:
                 row["sources"] = list(batch["source"])
             if "profile" in batch:
@@ -623,6 +753,9 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
                 if "spatial_blur" in row:
                     logger.info("spatial_blur batch=%s; blur_samples includes blur and mixed profiles",
                                 row["spatial_blur"])
+                if short_cfg["enabled"]:
+                    logger.info("short_chain base=%.6f aux=%.6f weighted_aux=%.6f counts=%s",
+                                row["base_loss"], row["aux_loss"], row["weighted_aux_loss"], row["short_chain"])
             return row
         raise FloatingPointError("four consecutive failed optimizer attempts for the same batch")
 
@@ -669,6 +802,11 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
                     "train_errors": {key: sum(row["train_errors"][key] * row["samples"] for row in epoch_rows) / count_samples
                                      for key in ERROR_KEYS}, "validation": None, "selection": None,
                 }
+                if short_cfg["enabled"]:
+                    for key in ("base_loss", "aux_loss", "weighted_aux_loss"):
+                        epoch_metrics[key] = sum(row[key] * row["samples"] for row in epoch_rows) / count_samples
+                    epoch_metrics["short_chain"] = {
+                        key: sum(row["short_chain"][key] for row in epoch_rows) for key in short_counter_keys}
                 spatial_rows = [row["spatial_blur"] for row in epoch_rows if "spatial_blur" in row]
                 crop_rows = [row["crop_blur"] for row in epoch_rows if "crop_blur" in row]
                 if crop_rows:

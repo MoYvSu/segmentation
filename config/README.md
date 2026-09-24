@@ -1,5 +1,10 @@
 # 配置目录
 
+新增`train/rgb_diffusion_d5b.yaml`：继承D5a参数配方，从零训练全1000图、60轮，
+仅增加25%批次的两步短链监督，独立随机流、跨步切梯度、辅助权重0.25；不继承历史权重。
+入口`tools/run_rgb_d5b.py`，短目录`outputs/d5b/`，GPU短测通过后再启动正式训练，
+见[D5b约定](../docs/RGB_DIFFUSION_D5B_20260924.md)。
+
 新增`train/rgb_diffusion_d5a.yaml`和`train/rgb_diffusion_d5a_control.yaml`：
 两组随机初始化、全1000图、60轮，唯一训练差异为强弱端点平滑模糊；不加载D4权重。
 队列入口`tools/run_rgb_d5a.py`，自动保存固定过程图，见[D5a约定](../docs/RGB_DIFFUSION_D5A_20260924.md)。
