@@ -1,5 +1,8 @@
 # D4前端与后端适配配对实验
 
+完成更新：两组60轮／3840更新、0失败，100图推理与两包双端校验完成；
+详见[完成分析](BACKEND_D4_ANALYSIS_20260924.md)。D4训练损失较低，真实结构增益尚待黑盒成对检验。
+
 用户回报D4 e60首步版复赛黑盒为`0.8490 / 0.8532`，50/50折算85.110。
 比旧v4的85.715低0.605；实例mIoU提高0.0025，铁素体面积项降低0.0146。
 比无修复baseline的85.375低0.265。这支持检验后端适配，尚不能确定掉分原因。
@@ -78,7 +81,7 @@ LoRA和双头梯度、实际更新非零，基座和D4全参数摘要不变；�
 私有短测记录在服务器`outputs/d4_adapt_smoke/`、本地`output/d4_setup/`。
 
 正式运行进度见`outputs/d4_adapt/pipeline_status.json`，各组状态为`d4/status.json`和`raw/status.json`；
-图像在`comparison/`，最终包为`submission_d4.zip`与`submission_raw.zip`。正式结果尚待训练完成。
+图像在`comparison/`，最终包为`submission_d4.zip`与`submission_raw.zip`。正式训练及自动收尾均已完成。
 
 正式队列已于服务器时间2026-09-24 07:37:21启动，launcher PID 4058；
 `launch.json`保留准确命令与六份运行代码／配置SHA256。仅检查启动，不持续轮询训练。

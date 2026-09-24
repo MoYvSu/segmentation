@@ -1,9 +1,10 @@
 # 当前管线与产物约定
 
 2026-09-24：D4首步复赛回分0.8490/0.8532，折算85.110，低于旧v4。
-当前执行[冻结D4开关＋后端配对微调](BACKEND_D4_ABLATION_20260924.md)：两组各60轮，
+已完成[冻结D4开关＋后端配对微调](BACKEND_D4_ANALYSIS_20260924.md)：两组各60轮／3840更新、零失败，
 同增强/全人工标注/64图既有SAM2监督，只比较是否经过D4；短链监督暂缓。
-入口`tools/run_backend_ablation.py`，短输出`outputs/d4_adapt/`，自动训练后推理、打包与渲染。
+入口`tools/run_backend_ablation.py`，短输出`outputs/d4_adapt/`；两包全量推理、双端校验与渲染均完成。
+D4训练loss稳定较低但不能证明真实补边，先取得两组黑盒分数，不继续叠加训练。
 
 本工作区用于扩散研究，当前状态与下一组实验以[扩散安排](RGB_DIFFUSION_ROADMAP_20260923.md)
 和[D1全量60轮分析](RGB_DIFFUSION_ALL60_ANALYSIS_20260923.md)为准：1000图/15000次更新已完整完成，
