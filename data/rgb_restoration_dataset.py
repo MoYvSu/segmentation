@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 
 import cv2
@@ -12,7 +13,8 @@ from torch.utils.data import Dataset
 
 from data.dataset import letterbox
 from data.mim_dataset import list_images, read_manifest
-from data.rgb_spatial_blur import apply_spatial_blur, validate_spatial_blur_config
+from data.rgb_spatial_blur import (apply_sigma_map_blur, apply_spatial_blur,
+                                   make_endpoint_sigma_map, validate_spatial_blur_config)
 
 
 PROFILES = ("identity", "blur", "illumination", "mixed")
@@ -35,7 +37,8 @@ def prepare_rgb(image: np.ndarray, image_size: int) -> tuple[np.ndarray, np.ndar
 
 def degrade_rgb(clean: np.ndarray, rng: np.random.Generator, profile: str, cfg: dict, *,
                 spatial_rng: np.random.Generator | None = None,
-                spatial_info: dict | None = None) -> np.ndarray:
+                spatial_info: dict | None = None,
+                sigma_map_override: np.ndarray | None = None) -> np.ndarray:
     """仅改变外观；参考图取自用户确认基本清晰的训练集。"""
     if profile not in PROFILES:
         raise ValueError(f"unknown degradation profile: {profile}")
@@ -53,8 +56,13 @@ def degrade_rgb(clean: np.ndarray, rng: np.random.Generator, profile: str, cfg: 
             use_spatial = bool(spatial_rng.random() < spatial_cfg.get("probability", 0.5))
         sigma_map = None
         if use_spatial:
-            image, sigma_map = apply_spatial_blur(image, sigma, spatial_cfg, spatial_rng,
-                                                 cfg["blur_sigma"])
+            if sigma_map_override is None:
+                image, sigma_map = apply_spatial_blur(image, sigma, spatial_cfg, spatial_rng,
+                                                     cfg["blur_sigma"])
+            else:
+                sigma_map = sigma_map_override
+                image = apply_sigma_map_blur(image, sigma_map, cfg["blur_sigma"],
+                                             spatial_cfg.get("levels", 8))
         else:
             image = cv2.GaussianBlur(image, (0, 0), sigmaX=sigma, borderType=cv2.BORDER_REFLECT)
         if spatial_info is not None:
@@ -225,14 +233,34 @@ class RGBRestorationDataset(Dataset):
         spatial_rng = (np.random.default_rng(np.random.SeedSequence([self.seed, self.epoch, index, 6]))
                        if spatial_enabled else None)
         spatial_info = {} if spatial_enabled else None
+        endpoint_cfg = spatial_cfg.get("endpoint_transition", {}) if spatial_enabled else {}
+        endpoint_enabled = bool(endpoint_cfg.get("enabled", False))
+        # 原D4先决定退化与裁块。只有端点样本重放外观退化，原主/空间随机流不回退。
+        degradation_state = copy.deepcopy(rng.bit_generator.state) if endpoint_enabled else None
         degraded = degrade_rgb(clean[:vh, :vw], rng, profile, self.degradation,
                                spatial_rng=spatial_rng, spatial_info=spatial_info)
+        y = x = 0
+        size = self.crop_size if training else self.image_size
+        if training:
+            y = int(rng.integers(0, max(0, vh - size) + 1))
+            x = int(rng.integers(0, max(0, vw - size) + 1))
+        endpoint_applied = False
+        if endpoint_enabled and spatial_info["selected"]:
+            endpoint_rng = np.random.default_rng(np.random.SeedSequence([self.seed, self.epoch, index, 7]))
+            endpoint_applied = bool(endpoint_rng.random() < endpoint_cfg.get("probability", 0.5))
+            if endpoint_applied:
+                sigma_map = make_endpoint_sigma_map((vh, vw), (y, x, size, size), endpoint_cfg,
+                                                    endpoint_rng, self.degradation["blur_sigma"])
+                replay_rng = np.random.default_rng(0)
+                replay_rng.bit_generator.state = degradation_state
+                replay_spatial_rng = np.random.default_rng(np.random.SeedSequence([
+                    self.seed, self.epoch, index, 6]))
+                degraded = degrade_rgb(clean[:vh, :vw], replay_rng, profile, self.degradation,
+                                       spatial_rng=replay_spatial_rng, spatial_info=spatial_info,
+                                       sigma_map_override=sigma_map)
         degraded = cv2.copyMakeBorder(degraded, 0, self.image_size - vh, 0, self.image_size - vw,
                                       cv2.BORDER_REFLECT)
         if training:
-            size = self.crop_size
-            y = int(rng.integers(0, max(0, vh - size) + 1))
-            x = int(rng.integers(0, max(0, vw - size) + 1))
             clean, degraded, valid = [a[y:y + size, x:x + size] for a in (clean, degraded, valid)]
             turns, flip = int(rng.integers(4)), bool(rng.integers(2))
             arrays = [np.rot90(a, turns) for a in (clean, degraded, valid)]
@@ -277,6 +305,24 @@ class RGBRestorationDataset(Dataset):
             result.update(spatial_blur_applied=spatial_info["selected"], base_sigma=base_sigma,
                           spatial_sigma_min=float(sigma_map.min()) if sigma_map is not None else base_sigma,
                           spatial_sigma_max=float(sigma_map.max()) if sigma_map is not None else base_sigma)
+            # 场按有效整图生成，诊断只统计实际裁块的有效像素；旋转/翻转不改变标量。
+            # 此处是名义σ，未合并后续重采样、局部损伤或噪声的影响。
+            crop_sigma = (sigma_map[y:min(y + size, vh), x:min(x + size, vw)]
+                          if sigma_map is not None else np.asarray([base_sigma]))
+            if base_sigma > 0:
+                weak_fraction = float(np.mean(crop_sigma <= 1.5))
+                strong_fraction = float(np.mean(crop_sigma >= 4.0))
+                mean_square = float(np.mean(crop_sigma.astype(np.float64) ** 2))
+                span = float(np.quantile(crop_sigma, 0.9) - np.quantile(crop_sigma, 0.1))
+            else:
+                weak_fraction = strong_fraction = mean_square = span = 0.0
+            minimum = float(endpoint_cfg.get("min_region_fraction", 0.05))
+            result.update(endpoint_blur_applied=endpoint_applied,
+                          sigma_crop_mean_square=mean_square,
+                          sigma_crop_weak_fraction=weak_fraction,
+                          sigma_crop_strong_fraction=strong_fraction,
+                          sigma_crop_span=span,
+                          sigma_crop_coexist=weak_fraction >= minimum and strong_fraction >= minimum)
         return result
 
 

@@ -27,6 +27,81 @@ def validate_spatial_blur_config(cfg: dict | None) -> None:
     levels = cfg.get("levels", 8)
     if isinstance(levels, bool) or not isinstance(levels, int) or levels < 2:
         raise ValueError("spatial_blur.levels must be an integer >= 2")
+    endpoint = cfg.get("endpoint_transition")
+    if endpoint is not None:
+        validate_endpoint_transition_config(endpoint)
+
+
+def validate_endpoint_transition_config(cfg: dict) -> None:
+    """端点场只在显式启用后生效；弱强端采用固定诊断阈值1.5和4.0。"""
+    prefix = "spatial_blur.endpoint_transition"
+    if not isinstance(cfg, dict) or not isinstance(cfg.get("enabled", False), bool):
+        raise ValueError(f"{prefix} requires a mapping and boolean enabled")
+    if not cfg.get("enabled", False):
+        return
+    probability = cfg.get("probability", 0.5)
+    if not np.isscalar(probability) or not np.isfinite(probability) or not 0 <= probability <= 1:
+        raise ValueError(f"{prefix}.probability must be finite and in [0,1]")
+    for name, default, lower, upper in (
+            ("weak_sigma", [0.6, 1.5], 0.0, 1.5),
+            ("strong_sigma", [4.0, 5.2], 4.0, float("inf")),
+            ("transition_fraction", [0.2, 0.5], 0.0, 1.0)):
+        values = np.asarray(cfg.get(name, default), dtype=np.float64)
+        if (values.shape != (2,) or not np.isfinite(values).all()
+                or not lower <= values[0] <= values[1] <= upper or values[0] <= 0):
+            raise ValueError(f"{prefix}.{name} has invalid bounds")
+    fraction = cfg.get("min_region_fraction", 0.05)
+    if not np.isscalar(fraction) or not np.isfinite(fraction) or not 0 < fraction < 0.5:
+        raise ValueError(f"{prefix}.min_region_fraction must be finite and in (0,0.5)")
+
+
+def make_endpoint_sigma_map(shape: tuple[int, int], crop_box: tuple[int, int, int, int],
+                            cfg: dict, rng: np.random.Generator, sigma_bounds) -> np.ndarray:
+    """在有效整图生成随机方向平滑场，弱强两端锚定实际裁块。
+
+    crop_box为(y,x,height,width)，只使用与有效内容相交的像素。平滑过渡带
+    两侧至少保留min_region_fraction的裁块像素；不再匹配原base_sigma²均值。
+    cfg是endpoint_transition子配置。σ仍是高斯插值的名义参数。
+    """
+    validate_endpoint_transition_config(cfg)
+    if (len(shape) != 2 or any(isinstance(v, bool) or not isinstance(v, (int, np.integer))
+                             or v <= 0 for v in shape)):
+        raise ValueError("endpoint spatial blur requires a nonempty (height, width)")
+    if (len(crop_box) != 4 or any(isinstance(v, bool) or not isinstance(v, (int, np.integer))
+                                for v in crop_box)):
+        raise ValueError("endpoint spatial blur requires an integer crop_box (y,x,h,w)")
+    h, w = map(int, shape)
+    y, x, ch, cw = map(int, crop_box)
+    if y < 0 or x < 0 or ch <= 0 or cw <= 0 or y >= h or x >= w:
+        raise ValueError("endpoint spatial blur requires a crop intersecting valid content")
+    ch, cw = min(ch, h - y), min(cw, w - x)
+    if ch * cw < 2:
+        raise ValueError("endpoint spatial blur requires at least two valid crop pixels")
+    bounds = np.asarray(sigma_bounds, dtype=np.float64)
+    weak_bounds, strong_bounds = cfg.get("weak_sigma", [0.6, 1.5]), cfg.get("strong_sigma", [4.0, 5.2])
+    if (bounds.shape != (2,) or not np.isfinite(bounds).all() or bounds[0] <= 0
+            or not bounds[0] <= weak_bounds[0] <= weak_bounds[1] < strong_bounds[0]
+            <= strong_bounds[1] <= bounds[1]):
+        raise ValueError("endpoint sigma bounds must contain configured weak and strong endpoints")
+    weak, strong = float(rng.uniform(*weak_bounds)), float(rng.uniform(*strong_bounds))
+    angle = float(rng.uniform(0, 2 * np.pi))
+    dy, dx = np.sin(angle), np.cos(angle)
+    # 从实际有效裁块的离散像素确定分位数，避免长宽比或padding破坏端点覆盖。
+    crop_projection = np.arange(ch)[:, None] * dy + np.arange(cw)[None, :] * dx
+    fraction = float(cfg.get("min_region_fraction", 0.05))
+    low, high = np.quantile(crop_projection, [fraction, 1 - fraction])
+    span = float(np.ptp(crop_projection))
+    width = min(float(rng.uniform(*cfg.get("transition_fraction", [0.2, 0.5]))) * span,
+                float(high - low))
+    if width <= 0:
+        raise ValueError("endpoint spatial blur requires a nondegenerate projected crop")
+    start = float(rng.uniform(low, high - width))
+    projection = ((np.arange(h)[:, None] - y) * dy + (np.arange(w)[None, :] - x) * dx)
+    phase = np.clip((projection - start) / width, 0.0, 1.0)
+    # 五次平滑阶跃在两端的一二阶导数均为零，不引入硬切换接缝。
+    blend = phase ** 3 * (phase * (6 * phase - 15) + 10)
+    variance = weak ** 2 + (strong ** 2 - weak ** 2) * blend
+    return np.ascontiguousarray(np.sqrt(np.clip(variance, weak ** 2, strong ** 2)), dtype=np.float32)
 
 
 def make_sigma_map(shape: tuple[int, int], base_sigma: float, cfg: dict,
@@ -80,7 +155,15 @@ def apply_spatial_blur(clean: np.ndarray, base_sigma: float, cfg: dict,
         image = cv2.GaussianBlur(clean, (0, 0), sigmaX=float(base_sigma),
                                  borderType=cv2.BORDER_REFLECT)
         return np.ascontiguousarray(image, dtype=np.float32), sigma_map
-    sigma_levels = np.linspace(*sigma_bounds, cfg.get("levels", 8), dtype=np.float64)
+    return apply_sigma_map_blur(clean, sigma_map, sigma_bounds, cfg.get("levels", 8)), sigma_map
+
+
+def apply_sigma_map_blur(clean: np.ndarray, sigma_map: np.ndarray, sigma_bounds,
+                         levels: int = 8) -> np.ndarray:
+    """沿用D4的σ²分段插值；端点场与旧空间场共享相同高斯级别。"""
+    if clean.ndim != 3 or clean.shape[2] != 3 or sigma_map.shape != clean.shape[:2]:
+        raise ValueError("sigma map must match the H x W extent of the RGB image")
+    sigma_levels = np.linspace(*sigma_bounds, levels, dtype=np.float64)
     variance_levels = sigma_levels ** 2
     variance = sigma_map * sigma_map
     image = np.zeros_like(clean, dtype=np.float32)
@@ -99,4 +182,4 @@ def apply_spatial_blur(clean: np.ndarray, base_sigma: float, cfg: dict,
         blurred = cv2.GaussianBlur(clean, (0, 0), sigmaX=float(sigma), borderType=cv2.BORDER_REFLECT)
         np.multiply(blurred, weight[..., None], out=blurred)
         np.add(image, blurred, out=image)
-    return np.ascontiguousarray(image, dtype=np.float32), sigma_map
+    return np.ascontiguousarray(image, dtype=np.float32)

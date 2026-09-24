@@ -239,6 +239,41 @@ def _spatial_fork_changes(previous, current):
     return changes
 
 
+CROP_STAT_KEYS = ("sigma_crop_mean_square", "sigma_crop_weak_fraction",
+                  "sigma_crop_strong_fraction", "sigma_crop_span", "sigma_crop_coexist")
+
+
+def crop_blur_statistics(batch):
+    """统计真实裁块，不以整图 sigma 或理论概率代替模型看到的覆盖。"""
+    if not all(key in batch for key in ("endpoint_blur_applied", *CROP_STAT_KEYS)):
+        return None
+    groups = {}
+    for index, profile in enumerate(batch["profile"]):
+        group = ("identity" if profile == "identity" else
+                 "endpoint" if bool(batch["endpoint_blur_applied"][index]) else
+                 "oldspatial" if bool(batch["spatial_blur_applied"][index]) else
+                 "uniform" if profile in ("blur", "mixed") else "illumination")
+        row = groups.setdefault(group, {"samples": 0, **{key + "_sum": 0.0 for key in CROP_STAT_KEYS}})
+        row["samples"] += 1
+        for key in CROP_STAT_KEYS:
+            row[key + "_sum"] += float(batch[key][index])
+    return merge_crop_blur_statistics([groups])
+
+
+def merge_crop_blur_statistics(groups_list):
+    merged = {}
+    for groups in groups_list:
+        for name, source in groups.items():
+            target = merged.setdefault(name, {"samples": 0, **{key + "_sum": 0.0 for key in CROP_STAT_KEYS}})
+            target["samples"] += source["samples"]
+            for key in CROP_STAT_KEYS:
+                target[key + "_sum"] += source[key + "_sum"]
+    for target in merged.values():
+        for key in CROP_STAT_KEYS:
+            target[key + "_mean"] = target[key + "_sum"] / target["samples"]
+    return merged
+
+
 def _append_json(path, row):
     with Path(path).open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
@@ -391,6 +426,34 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
         if not resume:
             save_checkpoint(output_dir / "spatial_fixed_samples.pt", spatial_fixed)
             write_json(output_dir / "spatial_fixed_samples_manifest.json", spatial_manifest)
+    endpoint_fixed, endpoint_manifest, monitor_endpoint = None, None, None
+    if monitor_cfg.get("endpoint_blur", {}).get("enabled", False):
+        from tools.rgb_endpoint_monitor import build_endpoint_fixed_samples, monitor_endpoint
+        if resume:
+            endpoint_fixed = torch.load(output_dir / "endpoint_fixed_samples.pt", map_location="cpu", weights_only=True)
+            endpoint_manifest = json.loads((output_dir / "endpoint_fixed_samples_manifest.json").read_text(encoding="utf-8"))
+        else:
+            endpoint_fixed, endpoint_manifest = build_endpoint_fixed_samples(config, train_set, fixed_manifest)
+        if (len(endpoint_fixed["source"]) != int(monitor_cfg["endpoint_blur"].get("samples", count))
+                or endpoint_fixed["source"] != endpoint_manifest["sources"]):
+            raise ValueError("saved endpoint fixed sample set differs from run configuration")
+        if not resume:
+            save_checkpoint(output_dir / "endpoint_fixed_samples.pt", endpoint_fixed)
+            write_json(output_dir / "endpoint_fixed_samples_manifest.json", endpoint_manifest)
+    real_fixed, real_manifest, monitor_real = None, None, None
+    if monitor_cfg.get("real", {}).get("enabled", False):
+        from tools.rgb_endpoint_monitor import build_real_fixed_samples, monitor_real
+        if resume:
+            real_fixed = torch.load(output_dir / "real_fixed_samples.pt", map_location="cpu", weights_only=True)
+            real_manifest = json.loads((output_dir / "real_fixed_samples_manifest.json").read_text(encoding="utf-8"))
+        else:
+            real_fixed, real_manifest = build_real_fixed_samples(config)
+        if (len(real_fixed["source"]) != len(monitor_cfg["real"]["images"])
+                or real_fixed["source"] != real_manifest["sources"]):
+            raise ValueError("saved real fixed sample set differs from run configuration")
+        if not resume:
+            save_checkpoint(output_dir / "real_fixed_samples.pt", real_fixed)
+            write_json(output_dir / "real_fixed_samples_manifest.json", real_manifest)
     if checkpoint:
         restore_rng(checkpoint["rng"], noise_generator, loader_generator, device)
     continuation = checkpoint.get("continuation") if checkpoint else None
@@ -428,6 +491,10 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
     }
     if spatial_manifest is not None:
         metadata["spatial_fixed_samples"] = spatial_manifest
+    if endpoint_manifest is not None:
+        metadata["endpoint_fixed_samples"] = endpoint_manifest
+    if real_manifest is not None:
+        metadata["real_fixed_samples"] = real_manifest
     if not resume:
         write_json(output_dir / "run_config.json", metadata)
     logger.info("mode=%s parameters=%s pool=%s train_sources=%s planned_updates=%s segment_target_updates=%s amp=%s",
@@ -455,6 +522,12 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
         if spatial_fixed is not None:
             monitor_spatial(model, spatial_fixed, output_dir, device=device, epoch=epoch, updates=updates,
                             monitor_cfg=monitor_cfg, use_amp=use_amp, amp_dtype=amp_dtype)
+        if endpoint_fixed is not None:
+            monitor_endpoint(model, endpoint_fixed, output_dir, device=device, epoch=epoch, updates=updates,
+                             monitor_cfg=monitor_cfg, use_amp=use_amp, amp_dtype=amp_dtype)
+        if real_fixed is not None:
+            monitor_real(model, real_fixed, output_dir, device=device, epoch=epoch, updates=updates,
+                         monitor_cfg=monitor_cfg, use_amp=use_amp, amp_dtype=amp_dtype)
         return original_report
 
     def update_summary():
@@ -481,7 +554,8 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
         save_checkpoint(output_dir / "last.pt", payload)
         if overfit and updates in fit_cfg.get("save_steps", []):
             save_checkpoint(output_dir / f"update_{updates:06d}.pt", payload)
-        if not overfit and completed_epoch in cfg["train"].get("save_epochs", [1, 10, 20, 40, 60]):
+        if not overfit and (completed_epoch in cfg["train"].get("save_epochs", [1, 10, 20, 40, 60])
+                            or (completed_epoch == 0 and cfg["train"].get("save_initial_checkpoint", False))):
             save_checkpoint(output_dir / f"epoch_{completed_epoch:03d}.pt", payload)
 
     def take_update(batch, epoch):
@@ -525,6 +599,13 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
                    "t_min": int(t_index.min()), "t_max": int(t_index.max()), "samples": len(inputs),
                    "t_histogram": torch.bincount(t_index, minlength=model.num_steps + 1)[1:].tolist(),
                    "failed_updates": failed_updates, "seconds": time.perf_counter() - started}
+            if "source" in batch:
+                row["sources"] = list(batch["source"])
+            if "profile" in batch:
+                row["profiles"] = list(batch["profile"])
+            crop_statistics = crop_blur_statistics(batch)
+            if crop_statistics is not None:
+                row["crop_blur"] = crop_statistics
             if "spatial_blur_applied" in batch:
                 blur_mask = torch.tensor([profile in ("blur", "mixed") for profile in batch["profile"]])
                 blur_count = int(blur_mask.sum())
@@ -553,6 +634,9 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
         if not resume:
             report = run_monitors(completed_epoch, updates)
             update_summary()
+        if not checkpoint and not overfit and cfg["train"].get("save_initial_checkpoint", False):
+            save_training_checkpoint({"epoch": 0, "updates": 0, "total_updates": 0,
+                                      "train_samples": 0, "initial_scratch_checkpoint": True})
         if overfit:
             while updates < planned_updates:
                 row = take_update(fixed, 0)
@@ -586,6 +670,9 @@ def train(config, *, device, output_dir=None, resume=None, overfit=False, extend
                                      for key in ERROR_KEYS}, "validation": None, "selection": None,
                 }
                 spatial_rows = [row["spatial_blur"] for row in epoch_rows if "spatial_blur" in row]
+                crop_rows = [row["crop_blur"] for row in epoch_rows if "crop_blur" in row]
+                if crop_rows:
+                    epoch_metrics["crop_blur"] = merge_crop_blur_statistics(crop_rows)
                 if spatial_rows:
                     blur_count = sum(row["blur_samples"] for row in spatial_rows)
                     sigma_sum = sum(row["base_sigma_sum"] for row in spatial_rows)
