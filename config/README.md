@@ -2,7 +2,7 @@
 
 新增`train/rgb_diffusion_d5b.yaml`：继承D5a参数配方，从零训练全1000图、60轮，
 仅增加25%批次的两步短链监督，独立随机流、跨步切梯度、辅助权重0.25；不继承历史权重。
-入口`tools/run_rgb_d5b.py`，短目录`outputs/d5b/`，GPU短测通过后再启动正式训练，
+入口`tools/run_rgb_d5b.py`，短目录`outputs/d5b/`；GPU配对短测已通过，正式后台队列已启动，
 见[D5b约定](../docs/RGB_DIFFUSION_D5B_20260924.md)。
 
 新增`train/rgb_diffusion_d5a.yaml`和`train/rgb_diffusion_d5a_control.yaml`：

@@ -1,6 +1,11 @@
 # D5b：从零训练的自身状态短链监督
 
-2026-09-24。用户批准开始D5b。已完成实现、CPU检查、GPU配对短测和历史D5a参照核验，准备启动正式训练。
+2026-09-24。用户批准开始D5b。已完成实现、CPU检查、GPU配对短测和历史D5a参照核验。
+正式后台队列于北京时间16:24:26启动，PID27363，代码版本`4834157`；
+本轮仅确认启动后离开，不持续监控训练。
+训练子进程PID27656。一次启动快照确认255次有效更新、0失败、138次额外短链调用；
+初始化完整状态、四类固定输入及已完成的主采样序列均与D5a参照一致。
+初始过程图25张已落盘，快照保存在`outputs/d5b_setup/startup_check.json`。
 
 ## 目的与固定项
 
@@ -94,3 +99,7 @@ RTX4090／sam2_env的两组短测各16更新、零失败：D5b选中4批／16图
 6份固定数据/网络/空间观察实现及新建随机模型均一致。私有记录在
 `outputs/d5b_preflight/reference_check.json`；本地短测记录与图在`output/d5b_setup/smoke/`。
 D5a候选/对照黑盒包保持原样。
+
+启动记录：`outputs/d5b_setup/launch.json`；后台入口日志`outputs/d5b_setup/formal.log`。
+训练完成后以`outputs/d5b/pipeline_status.json`和`pair_check.json`确认完整性，
+正式e60权重为`outputs/d5b/candidate/epoch_060.pt`，不会自动选取早期“最佳”轮。
