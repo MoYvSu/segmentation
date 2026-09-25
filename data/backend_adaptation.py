@@ -14,7 +14,7 @@ from torch.utils.data import Dataset
 from data.dataset import letterbox
 from data.direct_dual_head_dataset import _spatial_transform
 from data.rgb_restoration_dataset import PROFILES, _add_achromatic_noise, degrade_rgb, read_rgb
-from data.rgb_spatial_blur import validate_spatial_blur_config
+from data.rgb_spatial_blur import make_endpoint_sigma_map, validate_spatial_blur_config
 from data.semantic_targets import load_completed_semantic_source, semantic_targets_from_instances
 from utils.offset_letterbox import letterbox_instance_geometry
 
@@ -154,11 +154,34 @@ class PairedDegradationDataset(Dataset):
             raise ValueError("invalid base input_content_shape")
         rng = self._rng(source_index, repeat_index, 0)
         profile = str(rng.choice(PROFILES, p=self.probabilities)) if self.augment else "identity"
+        spatial_cfg = self.degradation.get("spatial_blur") or {}
+        endpoint_cfg = spatial_cfg.get("endpoint_transition") or {}
+        endpoint_enabled = bool(spatial_cfg.get("enabled", False)
+                                and endpoint_cfg.get("enabled", False))
+        degradation_state = deepcopy(rng.bit_generator.state) if endpoint_enabled else None
         info = {}
         degraded = degrade_rgb(
             image[:height, :width], rng, profile, self.degradation,
             spatial_rng=self._rng(source_index, repeat_index, 6), spatial_info=info,
         )
+        endpoint_applied = False
+        if endpoint_enabled and info["selected"]:
+            endpoint_rng = self._rng(source_index, repeat_index, 7)
+            endpoint_applied = bool(endpoint_rng.random() < endpoint_cfg.get("probability", 0.5))
+            if endpoint_applied:
+                # 与修复器共用独立端点流；这里不裁块，两端锚定完整有效内容。
+                sigma_map = make_endpoint_sigma_map(
+                    (height, width), (0, 0, height, width), endpoint_cfg,
+                    endpoint_rng, self.degradation["blur_sigma"],
+                )
+                replay_rng = np.random.default_rng(0)
+                replay_rng.bit_generator.state = degradation_state
+                # 重放相同的基础 sigma/重采样；不得移动噪声、几何或后续样本随机流。
+                degraded = degrade_rgb(
+                    image[:height, :width], replay_rng, profile, self.degradation,
+                    spatial_rng=self._rng(source_index, repeat_index, 6), spatial_info=info,
+                    sigma_map_override=sigma_map,
+                )
         noise_sigma = 0.0
         if self.augment and profile == "blur" and self.noise.get("enabled", True):
             noise_rng = self._rng(source_index, repeat_index, 3)
@@ -183,7 +206,8 @@ class PairedDegradationDataset(Dataset):
             for key in ("input_content_shape", "content_shape"):
                 sample[key] = sample[key].flip(0)
         sample.update(
-            profile=profile, is_spatial=bool(info["selected"]), noise_sigma=noise_sigma,
+            profile=profile, is_spatial=bool(info["selected"]),
+            endpoint_applied=endpoint_applied, noise_sigma=noise_sigma,
             base_sigma=float(info["base_sigma"]), draw_index=index, source_index=source_index,
             horizontal_flip=hflip, vertical_flip=vflip, rotation_k=turns,
         )

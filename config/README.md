@@ -1,5 +1,10 @@
 # 配置目录
 
+新增`train/semantic_d5a.yaml`：固定D5a首步与SAM2/LoRA/affinity，只训练语义头。
+A现有完整头适配（3e-5），B随机简化FPN＋分类层（1e-4）、无直接RGB残差；
+全32新GT，60轮、3840更新／组，不留代理，包含D5a端点模糊与配对噪声。
+入口`tools/run_semantic_d5a.py`，短目录`outputs/semantic_d5a/`，见[实验约定](../docs/SEMANTIC_D5A_20260925.md)。
+
 新增`train/rgb_diffusion_d5b.yaml`：继承D5a参数配方，从零训练全1000图、60轮，
 仅增加25%批次的两步短链监督，独立随机流、跨步切梯度、辅助权重0.25；不继承历史权重。
 入口`tools/run_rgb_d5b.py`，短目录`outputs/d5b/`；已完成60轮／15000更新、零失败，
