@@ -64,12 +64,16 @@ scope clarification. It is not a chronological task log.
 ## 20260919-instance-count-shift-includes-class-voting
 
 - status: observation
-- last_verified: 2026-09-19
+- last_verified: 2026-09-25
 - scope: 铁素体计数/平均面积变化的语义与几何归因
 - finding: 铁素体像素总量接近而实例数减少，不足以将变化全归为合并；小实例改判为珠光体也会显著改变均面积分母，却只改变少量像素。
 - evidence: `docs/STAGE1_FINAL_TASKS_20260919.md`回分后诊断。旧新68图按形状IoU≥0.5对应4966对，F→P 308、P→F 17，净类别计数差−291；未对应部分净F差−278，总F差−569。F→P旧预测面积中位1575像素，F→F为14950.5像素，前者仅占旧F总像素0.90%。
+  `docs/SEMANTIC_CROSS_20260925.md`补充100图最终PNG逐字节固定、仅交换分类JSON的用户黑盒回分：
+  raw和D5a两种划分改用D5a分类，mIoU分别+0.0021/+0.0024，面积项却−0.0207/−0.0119。
+  因此边界完全不变时也可发生面积项退化，且不要求mIoU同步变差；应分开报告两项，
+  不能把“分类对面积不利”写成“语义全面退化”。
 - reuse_hypothesis: 面积退化时同时检查类别组成与预测划分；以各自encoder/LoRA独立前向的输出交换进一步定位，不把旧头直接挂到新共享特征。
-- verification_gap: 无测试GT，无法判定改判正确性；预测间对应仅为计数分解，不能按−291/−278给语义/几何作因果分摊，也不能量化官方面积损失来源。
+- verification_gap: 无测试GT，无法判定具体改判正确性；旧替代实验的预测对应仅为计数分解，不能按−291/−278给语义/几何作因果分摊。新交叉可量化固定PNG后的分类来源影响，但PNG生成已含上游语义作用，不能推成纯affinity因果效果或LoRA失配的唯一原因；回分来自用户，暂无逐图官方分数与重复实验。
 - limits: 不据此恢复错误类别、强制铁素体数量或用黑盒分数反推目标平均面积；一次替代配方失败不证明旧joint-v3不可替代。
 
 ## 20260914-stage-count-is-not-training-budget
