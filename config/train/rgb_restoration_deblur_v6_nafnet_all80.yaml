@@ -1,0 +1,23 @@
+# NAFNet小型修复器：持续局部重建配方，全部赛方训练原图参与，不再留出代理集。
+_base: rgb_restoration_deblur_v5_local80.yaml
+
+rgb_restoration:
+  output_dir: outputs/rgb_restoration_deblur_v6_nafnet_all80
+  # 不读取holdout_manifest，不运行验证/代理选优；最终采用第80轮last.pt。
+  split_policy: all_train
+  holdout_manifest: null
+  selection: null
+  model:
+    architecture: nafnet
+    width: 32
+    encoder_blocks: [1, 2, 4]
+    middle_blocks: 4
+    decoder_blocks: [2, 2, 1]
+    max_residual: 0.5
+  diagnostics:
+    local_damage: null
+    noise: null
+  train:
+    # 全部1000张，batch4，每轮250次更新，80轮共20000次。
+    epochs: 80
+    save_epochs: [6, 20, 40, 60, 80]

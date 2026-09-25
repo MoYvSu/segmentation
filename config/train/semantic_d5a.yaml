@@ -1,0 +1,53 @@
+# -*- coding: utf-8 -*-
+# 两条实际方案：既有完整语义头适配，与随机初始化简化语义头。
+# D5a / SAM2 / LoRA / affinity 固定；不按训练损失挑选 checkpoint。
+_base: ../experiments/affinity_semantic_aligned_v_top2_20260919.yaml
+
+inference:
+  test_dir: data/quarter_final_test/复赛
+
+semantic_adaptation:
+  output_dir: outputs/semantic_d5a
+  seed: 20260925
+  epochs: 60
+  manual_repeats: 2
+  expected_manual_sources: 32
+  num_workers: 0
+  learning_rates:
+    full: 0.00003
+    simple: 0.0001
+  warmup_epochs: 2
+  minimum_lr_ratio: 0.1
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  amp_dtype: bfloat16
+  completed_gt_dir: outputs/experiments/seeded_label_completion_o1/radius_8/derived_maps
+  restoration:
+    checkpoint: outputs/d5a/candidate/epoch_060.pt
+    checkpoint_sha256: 048954795dc634f82fecf96d5e02bb2f2505afe5eb76298dff5a1b0713b3c80a
+    degradation_config: config/train/rgb_diffusion_d5a.yaml
+    mode: first_x0
+    inference_seed: 314159
+  noise:
+    enabled: true
+    probability: 0.5
+    sigma: [0.0, 0.006]
+  monitor:
+    every_epochs: 5
+    images: [test_101, test_091, test_130, test_089]
+  baseline_prediction_dir: outputs/20260922_semifinal_submission/baseline/deployment
+  d5a_prediction_dir: outputs/d5a_candidate/deployment
+
+direct_semantic_affinity:
+  semantic_loss:
+    dice_weight: 0.30
+    instance_weight: 0.75
+    core_radius: 3
+    core_min_pixels: 12
+    core_boundary_threshold: 0.20
+    class_balance: true
+    ferrite_weight: 1.0
+    hard_gamma: 0.5
+    hard_floor: 0.50
+    pool_weight: 0.50
+    thin_weight: 1.50

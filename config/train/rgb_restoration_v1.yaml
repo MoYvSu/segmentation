@@ -1,0 +1,36 @@
+# 独立修复第一步：合成退化 -> 原始训练图；不加载 SAM2 / 分割 checkpoint。
+paths:
+  project_root: auto
+
+rgb_restoration:
+  data_dir: data/unlabeled
+  holdout_manifest: config/monitor/unlabeled_holdout_v1.txt
+  output_dir: outputs/rgb_restoration_v1
+  seed: 42
+  image_size: 1024
+  crop_size: 512
+  model:
+    width: 24
+    max_residual: 0.5
+  degradation:
+    # 顺序：原样、模糊、照明、混合。温和通用范围，尚未经增益实验选择。
+    profile_probabilities: [0.20, 0.30, 0.25, 0.25]
+    blur_sigma: [0.4, 1.6]
+    resample_probability: 0.5
+    resample_scale: [0.65, 1.0]
+    gamma: [0.8, 1.25]
+    exposure: [0.8, 1.15]
+    channel_gain: [0.95, 1.05]
+    illumination_strength: 0.15
+  loss:
+    rgb_weight: 1.0
+    gradient_weight: 0.2
+  train:
+    epochs: 20
+    batch_size: 4
+    num_workers: 4
+    learning_rate: 0.0002
+    min_learning_rate: 0.000002
+    weight_decay: 0.0001
+    grad_clip: 1.0
+    amp: true

@@ -1,0 +1,13 @@
+# 去模糊单变量对照：网络、损失、源图划分、seed 与 4880 次更新预算不变。
+_base: rgb_restoration_v1.yaml
+
+rgb_restoration:
+  output_dir: outputs/rgb_restoration_deblur_v2
+  degradation:
+    # 原样 20%，纯模糊 80%；本轮不学习照明反演，也不增加其他模糊核。
+    profile_probabilities: [0.20, 0.80, 0.0, 0.0]
+  selection:
+    profile: blur
+    # 预先约定的诊断门槛：清晰图平均每通道变化不超过一个8位灰度级。
+    max_identity_l1: 0.00392156862745098
+    require_input_improvement: true

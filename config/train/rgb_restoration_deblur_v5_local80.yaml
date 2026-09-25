@@ -1,0 +1,12 @@
+# 独立对照C：相对v4_long80只延续局部重建任务；不同时加噪或改损失。
+_base: rgb_restoration_deblur_v4_masked_long80.yaml
+
+rgb_restoration:
+  output_dir: outputs/rgb_restoration_deblur_v5_local80
+  masked_pretraining:
+    # 前6轮沿用旧curriculum；之后在blur样本中以25%概率保留局部任务。
+    # 总体期望20%原样、60%普通模糊、20%局部受损模糊。
+    continuation_probability: 0.25
+  diagnostics:
+    noise:
+      sigmas: [0.001, 0.003, 0.006]

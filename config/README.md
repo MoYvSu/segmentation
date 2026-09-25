@@ -1,5 +1,66 @@
 # 配置目录
 
+2026-09-25：扩散修复与配套后端／语义对照配置已随研究分支归入`main`。
+本次合并保留既有推理入口和权重选择；下列实验配置、黑盒结果及采用结论继续有效。
+
+新增`train/semantic_d5a.yaml`：固定D5a首步与SAM2/LoRA/affinity，只训练语义头。
+A现有完整头适配（3e-5），B随机简化FPN＋分类层（1e-4）、无直接RGB残差；
+全32新GT，60轮、3840更新／组，不留代理，包含D5a端点模糊与配对噪声。
+入口`tools/run_semantic_d5a.py`，短目录`outputs/semantic_d5a/`，见[实验约定](../docs/SEMANTIC_D5A_20260925.md)。
+已完成60轮／3840更新、零失败及全量打包，两组预测较接近；
+[完成分析与亮度探针](../docs/SEMANTIC_D5A_ANALYSIS_20260925.md)确认部分实例对亮度敏感，
+现已回分full `0.8473/0.8461`（84.670）、simple `0.8471/0.8437`（84.540），
+差0.130分；两组面积项下降、总分低于原D5a与baseline，不晋级。未改默认模型或启用亮度校正。
+后续[全32有标签光照诊断](../docs/LABELLED_LIGHT_20260925.md)未发现明显的实例分类脆弱性：
+全局±0.10零新增错误、A/B局部调光每条件最多新增1错；这是训练内GT区域诊断，
+不能排除测试工况上的光照作用。本轮未新增启用光照增强的训练配置。
+
+新增`train/rgb_diffusion_d5b.yaml`：继承D5a参数配方，从零训练全1000图、60轮，
+仅增加25%批次的两步短链监督，独立随机流、跨步切梯度、辅助权重0.25；不继承历史权重。
+入口`tools/run_rgb_d5b.py`，短目录`outputs/d5b/`；已完成60轮／15000更新、零失败，
+见[D5b分析](../docs/RGB_DIFFUSION_D5B_ANALYSIS_20260925.md)：第2/3步相对D5a改善，但自身首步仍最好，
+首步未改善，不晋级。保留[D5b约定](../docs/RGB_DIFFUSION_D5B_20260924.md)。
+
+新增`train/rgb_diffusion_d5a.yaml`和`train/rgb_diffusion_d5a_control.yaml`：
+两组随机初始化、全1000图、60轮，唯一训练差异为强弱端点平滑模糊；不加载D4权重。
+队列入口`tools/run_rgb_d5a.py`，自动保存固定过程图，见[D5a约定](../docs/RGB_DIFFUSION_D5A_20260924.md)。
+两组已完成60轮／15000更新、零失败及配对检查；[完成分析](../docs/RGB_DIFFUSION_D5A_ANALYSIS_20260924.md)
+已回分control 0.8511／0.8486（84.985）、D5a 0.8469／0.8560（85.145）。
+端点配方净+0.160分，仍未超过baseline或旧v4；不更改默认部署配置。
+
+新增`train/backend_d4.yaml`：冻结D4首步与不带D4两组后端微调，均从S-align＋V初始化，
+训练LoRA和两个任务头；同在线退化、全32人工与64既有SAM2源、60轮，无代理或验证选优。
+入口`tools/run_backend_ablation.py`自动串行完成训练、推理和对比渲染，见[实验约定](../docs/BACKEND_D4_ABLATION_20260924.md)。
+
+输出目录命名：新建运行目录最多四段（按下划线分隔，时间戳也计一段），例如
+`rgb_restoration_diffusion_d4` 或 `diffusion_d4_20260923`。增强类型、轮数、monitor等细节
+写入配置和运行记录，不拼入目录名。正在运行的旧长目录可提供短名称入口，不为改名重启训练。
+
+扩散正式候选入口：`train/rgb_restoration_diffusion_d1_all60_monitored.yaml`，全1000图、60 epoch、
+从零训练，固定过程图同时记录首步与16步。`train/rgb_restoration_diffusion_d1_overfit3200.yaml`
+的4图短测已通过工程门槛，见[短测判定](../docs/RGB_DIFFUSION_SHORT_DECISION_20260923.md)；
+正式60轮/15000更新已完成、零失败；[完整分析](../docs/RGB_DIFFUSION_ALL60_ANALYSIS_20260923.md)
+认为当前16步版本暂不晋级。
+当前[D2低噪声对照](../docs/RGB_DIFFUSION_D2_K003_20260923.md)入口为
+`train/rgb_restoration_diffusion_d2_k003_all60_monitored.yaml`，只改kappa为0.03。
+已按`--stop-after-epoch 20`完成首段，保持原60轮学习率日程，20轮/5000更新后正常退出。
+[D2分析](../docs/RGB_DIFFUSION_D2_ANALYSIS_20260923.md)确认输出近乎原图，暂不晋级或继续。
+[D3起点强化](../docs/RGB_DIFFUSION_D3_TERMINAL50_20260923.md)入口为
+`train/rgb_restoration_diffusion_d3_terminal50_all60_monitored.yaml`，仅新增
+`train.timestep_sampling: terminal_half`（t=16占50%，其余15步均分50%）。
+已从零完成`--stop-after-epoch 20`，kappa仍为0.03，原60轮学习率日程与48张过程图完整。
+[D3结果](../docs/RGB_DIFFUSION_D3_ANALYSIS_20260923.md)显示首步恢复有效，完整16步仍增加梯度误差；
+[逐步与空间模糊诊断](../docs/RGB_DIFFUSION_D3_TRAJECTORY_20260923.md)已完成。
+[D4空间增强](../docs/RGB_DIFFUSION_D4_SPATIAL_20260923.md)入口为
+`train/rgb_restoration_diffusion_d4_spatial_all60_monitored.yaml`，通过`--fork-spatial-from`
+从D3 e20完整状态启动到总60轮；原D3也已续到60轮作为同预算对照，两组均已完成。
+[结果](../docs/RGB_DIFFUSION_D4_ANALYSIS_20260923.md)：空间合成诊断明显改善，均匀模糊小幅退步，
+多步采样问题仍在；D4默认输出短名为`outputs/rgb_restoration_diffusion_d4`。
+原配方续训保持原配置，不能把总轮数改成40；新配方分叉严格限制只有空间模糊变化。
+短链监督仍未实施。
+旧`all60.yaml`保留原800次短测预算；延长必须用`--extend-overfit-from`
+并指定新的输出目录，不能绕过严格配置检查。
+
 2026-09-21：[复赛交接](../docs/HANDOFF_SEMIFINAL_20260921.md)。本轮未更改测试数据路径或默认推理配置；
 复赛数据目录待下轮核验。以下成绩及68图包均为初赛记录，复赛不得直接沿用固定文件数断言。
 

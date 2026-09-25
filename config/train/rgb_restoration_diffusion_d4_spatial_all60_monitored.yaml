@@ -1,0 +1,17 @@
+# D4唯一训练配方变化：原blur样本的一半使用整图平滑空间模糊。
+# 从D3 e20显式分叉，保留优化器/随机状态和原60轮学习率日程，继续到e60。
+_base: rgb_restoration_diffusion_d3_terminal50_all60_monitored.yaml
+rgb_restoration:
+  output_dir: outputs/rgb_restoration_diffusion_d4
+  degradation:
+    spatial_blur:
+      enabled: true
+      probability: 0.5
+      grid_size: [3, 5]
+      strength: 1.0
+      levels: 8
+  monitor:
+    spatial_blur:
+      enabled: true
+      samples: 4
+      base_sigma: 3.0

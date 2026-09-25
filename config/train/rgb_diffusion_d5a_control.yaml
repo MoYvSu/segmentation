@@ -1,0 +1,19 @@
+# D5a 对照：seed42 完全从零训练60轮，空间模糊从第1轮启用。
+# 不读取 D4 权重，原优化器/局部掩码 warmup/学习率日程保持不变。
+_base: rgb_restoration_diffusion_d4_spatial_all60_monitored.yaml
+rgb_restoration:
+  output_dir: outputs/d5a/control
+  train:
+    save_initial_checkpoint: true
+  monitor:
+    endpoint_blur:
+      enabled: true
+      samples: 4
+      weak_sigma: [0.6, 1.5]
+      strong_sigma: [4.0, 5.2]
+      transition_fraction: [0.2, 0.5]
+      min_region_fraction: 0.05
+    real:
+      enabled: true
+      data_dir: data/quarter_final_test/复赛
+      images: [test_101, test_091, test_130, test_089]

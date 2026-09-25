@@ -1,0 +1,14 @@
+# 独立对照B：相对v4_long80只增加模糊训练输入的温和灰度噪声。
+_base: rgb_restoration_deblur_v4_masked_long80.yaml
+
+rgb_restoration:
+  output_dir: outputs/rgb_restoration_deblur_v5_noise80
+  training_noise:
+    # 在80%的模糊样本内以50%概率加噪：总体约40%；原样样本保持。
+    # [0,1]强度，三通道共用；不是从测试集估计的噪声分布。
+    probability: 0.5
+    sigma: [0.0, 0.006]
+  diagnostics:
+    # 固定保留图中心裁块，额外诊断而非选优；纯模糊验证保持原口径。
+    noise:
+      sigmas: [0.001, 0.003, 0.006]

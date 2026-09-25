@@ -1,0 +1,9 @@
+# 去模糊强度单变量对照：沿用v2的网络、损失、源图划分、seed与4880次更新。
+_base: rgb_restoration_deblur_v2.yaml
+
+rgb_restoration:
+  output_dir: outputs/rgb_restoration_deblur_v3
+  degradation:
+    # 在1024模型尺度均匀采样；扩大强度覆盖，不增加新的模糊核或噪声。
+    # 当前配方验证输入也随此范围变化，结果需与v2在相同新输入上配对比较。
+    blur_sigma: [0.4, 5.2]

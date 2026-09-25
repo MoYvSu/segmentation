@@ -1,0 +1,78 @@
+# 像素域条件残差扩散D1：先4图短周期过拟合，工程门槛通过后才运行全量60轮。
+# 新模型配置独立定义，避免从回归修复器继承不适用的max_residual/tanh参数。
+paths:
+  project_root: auto
+
+rgb_restoration:
+  data_dir: data/unlabeled
+  expected_train_sources: 1000
+  output_dir: outputs/rgb_restoration_diffusion_d1_all60
+  split_policy: all_train
+  holdout_manifest: null
+  selection: null
+  seed: 42
+  image_size: 1024
+  crop_size: 512
+  model:
+    architecture: pixel_diffusion_nafnet
+    width: 32
+    encoder_blocks: [1, 2, 4]
+    middle_blocks: 4
+    decoder_blocks: [2, 2, 1]
+    time_dim: 128
+    num_steps: 16
+    # [0,1]像素域的初始工程设置，不照搬压缩域ResShift的噪声尺度。
+    kappa: 0.1
+    eta_start: 0.001
+    schedule_power: 0.3
+  degradation:
+    # 正式训练沿用v6退化配方；扩散内部噪声并非额外传感器噪声增强。
+    profile_probabilities: [0.20, 0.80, 0.0, 0.0]
+    blur_sigma: [0.4, 5.2]
+    resample_probability: 0.5
+    resample_scale: [0.65, 1.0]
+    gamma: [0.8, 1.25]
+    exposure: [0.8, 1.15]
+    channel_gain: [0.95, 1.05]
+    illumination_strength: 0.15
+  masked_pretraining:
+    epochs: 6
+    start_strength: 0.5
+    patch_size: [16, 48]
+    coverage: [0.08, 0.16]
+    lowpass_sigma: [6.0, 12.0]
+    blend: [0.65, 0.95]
+    continuation_probability: 0.25
+  training_noise: null
+  loss:
+    # 监督随机时间条件下的x0估计；这是项目改造，不是原版ResShift的MSE目标。
+    rgb_weight: 1.0
+    gradient_weight: 0.2
+  train:
+    # 用户指定60 epoch，全部1000张、batch4对应15000次更新。
+    epochs: 60
+    save_epochs: [1, 10, 20, 40, 60]
+    batch_size: 4
+    num_workers: 4
+    learning_rate: 0.0002
+    min_learning_rate: 0.000002
+    weight_decay: 0.0001
+    grad_clip: 1.0
+    amp: true
+  monitor:
+    samples: 4
+    every_epochs: 5
+    sampling_seed: 314159
+    thumbnail_size: 224
+    roi_size: 256
+  overfit:
+    # 只用于训练/完整采样通路自检：同4图固定纯模糊对，全部参与优化。
+    # 无局部掩码；每次仍重采样扩散时间和噪声，不使用测试图或分割标签。
+    samples: 4
+    steps: 800
+    monitor_every: 100
+    learning_rate: 0.0002
+    gate:
+      rgb_l1: 0.8
+      gradient_l1: 0.95
+      mse: 0.8
