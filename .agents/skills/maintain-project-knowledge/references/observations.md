@@ -76,6 +76,23 @@ scope clarification. It is not a chronological task log.
 - verification_gap: 无测试GT，无法判定具体改判正确性；旧替代实验的预测对应仅为计数分解，不能按−291/−278给语义/几何作因果分摊。新交叉可量化固定PNG后的分类来源影响，但PNG生成已含上游语义作用，不能推成纯affinity因果效果或LoRA失配的唯一原因；回分来自用户，暂无逐图官方分数与重复实验。
 - limits: 不据此恢复错误类别、强制铁素体数量或用黑盒分数反推目标平均面积；一次替代配方失败不证明旧joint-v3不可替代。
 
+## 20260925-brightness-change-versus-sensitivity
+
+- status: observation
+- last_verified: 2026-09-25
+- scope: 前端修复与后端语义模型的外观归因
+- finding: 前端前后平均亮度差小，不能推出后端对亮度变化不敏感；需固定修复结果和最终实例，
+  直接扰动送入分类模型的亮度，并先复现零扰动输出。亮度触发少数类别翻转也不能证明它解释
+  高置信大区域的共同失败，或翻转即纠错。
+- evidence: `docs/D5A_APPEARANCE_20260925.md`记录修复前后平均L*差约−0.196；
+  `docs/SEMANTIC_D5A_ANALYSIS_20260925.md`完成4图／330固定实例／3头／9条件，12组零偏移
+  全部复现。正RGB偏移没有截断仍触发翻转，上部两大浅色区域全部条件保持高概率原判定。
+- reuse_hypothesis: 将“前端实际改变了什么”“后端对什么敏感”“改变是否提高任务准确率”
+  分开检验，避免由平均外观差或少量翻转直接指定增强方向。
+- verification_gap: 无测试GT，只检验数字全局偏移和gamma；不等价于空间不均匀照明恢复，
+  未证明亮度增强训练有效。负偏移出现截断、gamma改变局部对比，不能视为完全单变量的物理照明。
+- limits: 不根据测试图分类翻转选择逐图亮度值，不将诊断预测制作成训练标签。
+
 ## 20260914-stage-count-is-not-training-budget
 
 - status: observation
