@@ -1,0 +1,18 @@
+# -*- coding: utf-8 -*-
+# 固定最高分control e20；只恢复细化前已有分隔，关闭附加log-IQR过滤。
+_base: ../train/affinity_connectivity.yaml
+
+inference:
+  marker_partition_restore:
+    enabled: true
+    min_core_area: 50
+    area_filter_enabled: false
+
+affinity_preserve:
+  output_dir: outputs/affinity_preserve
+  checkpoint: outputs/affinity_connectivity/control/final.pt
+  checkpoint_sha256: e9fd8eb36dc40c538a5b090e9ab059e8358dc0ef2565a95d1efc924c0d93140b
+  control_deployment: outputs/affinity_connectivity/control/deployment
+  trace_dir: outputs/affinity_trace
+  expected_test_images: 100
+  render_seed: 20260928

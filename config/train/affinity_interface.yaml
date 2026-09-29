@@ -1,0 +1,10 @@
+# -*- coding: utf-8 -*-
+# 仅换附加监督选位；共同训练协议及原部署保持，复用已完成control。
+_base: affinity_connectivity.yaml
+backend_adaptation:
+  output_dir: outputs/affinity_interface
+affinity_interface:
+  enabled: true
+  band_radius: 4
+  reused_control: outputs/affinity_connectivity/control
+  control_sha256: e9fd8eb36dc40c538a5b090e9ab059e8358dc0ef2565a95d1efc924c0d93140b

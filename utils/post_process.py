@@ -268,6 +268,67 @@ def _merge_region_map_to_cap(
     return merged, merge_edges
 
 
+def _restored_marker_watershed(image, markers, marker_boundary, bridge_width,
+                               min_core_area, area_iqr_multiplier, audit, *, filter_area=True):
+    """恢复既有分隔；可独立关闭附加面积过滤，以隔离种子恢复的作用。"""
+    from utils.marker_restoration import restore_marker_partitions
+
+    if filter_area and (not np.isfinite(area_iqr_multiplier) or area_iqr_multiplier < 0):
+        raise ValueError('area IQR multiplier must be finite and nonnegative')
+    original = markers
+    current, details = restore_marker_partitions(
+        original, marker_boundary, bridge_width, min_core_area=min_core_area)
+    # 仅使用当前实际分割的面积分布；首次估计后冻结，禁止循环中抬高门槛。
+    threshold = None
+    filtered = []
+    passes = 0
+    first_stats = None
+    initial_marker_count = int(np.count_nonzero(np.unique(current) > 0))
+    while True:
+        result = cv2.watershed(image, current.copy()) if np.any(current) else np.zeros_like(current)
+        passes += 1
+        positive = result[result > 0]
+        areas = np.bincount(positive, minlength=int(current.max()) + 1)
+        if first_stats is None:
+            observed = areas[1:][areas[1:] > 0].astype(np.float64)
+            if not filter_area:
+                q25 = q75 = threshold = None
+            elif len(observed):
+                q25, q75 = np.quantile(np.log(observed), [.25, .75])
+                # 面积为整数，向下取整也避免exp(log(整数))的浮点尾差误删等大区域。
+                threshold = int(np.floor(np.exp(q25 - area_iqr_multiplier * (q75 - q25))))
+            else:
+                q25 = q75 = threshold = 0.0
+            first_stats = dict(region_count=int(np.count_nonzero(areas[1:])),
+                small_50_199=int(np.count_nonzero((areas[1:] >= 50) & (areas[1:] < 200))),
+                log_area_q25=None if q25 is None else float(q25),
+                log_area_q75=None if q75 is None else float(q75))
+        if not filter_area:
+            break
+        ids = np.unique(current)
+        ids = ids[ids > 0]
+        small = ids[(areas[ids] < threshold) | (areas[ids] == 0)]
+        if not len(small):
+            break
+        filtered.extend(dict(marker_id=int(iid), area=int(areas[iid]), pass_index=passes) for iid in small)
+        current[np.isin(current, small)] = 0
+        # 只删除种子，不增加或恢复种子；每次迭代严格减少待保留编号。
+        if passes > initial_marker_count:
+            raise RuntimeError('Marker area pruning failed to reduce the seed set')
+    if audit is not None:
+        audit.update(details)
+        audit.update(area_filter_enabled=bool(filter_area),
+            area_filter_method='per_image_log_iqr' if filter_area else 'disabled',
+            area_iqr_multiplier=float(area_iqr_multiplier) if filter_area else None,
+            area_threshold_native=threshold, threshold_estimated_once=bool(filter_area),
+            watershed_passes=passes,
+            area_filter_scope='all_instances' if filter_area else 'none',
+            initial_watershed=first_stats, filtered_regions=filtered,
+            filtered_region_count=len(filtered),
+            final_marker_count=int(np.count_nonzero(np.unique(current) > 0)))
+    return result
+
+
 def boundary_watershed_separation(
     semantic_mask: np.ndarray,
     boundary_mask: np.ndarray,
@@ -290,6 +351,8 @@ def boundary_watershed_separation(
     semantic_vote_options: Optional[Dict] = None,
     semantic_lab_prior: Optional[Dict] = None,
     semantic_vote_audit: Optional[Dict] = None,
+    marker_partition_restore: Optional[Dict] = None,
+    marker_restoration_audit: Optional[Dict] = None,
 ) -> Tuple[np.ndarray, Dict[int, int]]:
     """
     基于边界预测的受阻分水岭实例分割。
@@ -365,7 +428,20 @@ def boundary_watershed_separation(
     overlay[skeleton_belt > 0] = [255, 255, 255]
     img_for_ws = cv2.addWeighted(img_for_ws, 0.7, overlay, 0.3, 0)
 
-    ws_result = cv2.watershed(img_for_ws, markers.copy())
+    restore_options = marker_partition_restore or {}
+    if restore_options.get('enabled', False):
+        if center_count:
+            raise ValueError('Marker partition restoration requires connected-core seeds, not center seeds')
+        ws_result = _restored_marker_watershed(
+            img_for_ws, markers,
+            boundary_mask if marker_boundary_mask is None else marker_boundary_mask,
+            bridge_width if marker_bridge_width is None else marker_bridge_width,
+            int(restore_options.get('min_core_area', min_area)),
+            float(restore_options.get('area_iqr_multiplier', 1.5)),
+            marker_restoration_audit,
+            filter_area=bool(restore_options.get('area_filter_enabled', True)))
+    else:
+        ws_result = cv2.watershed(img_for_ws, markers.copy())
     ws_result[ws_result < 0] = 0
 
     # Step 6: 面积过滤；类别在上限拓扑合并后重新投票。
@@ -586,6 +662,7 @@ def post_process_prediction_boundary(
     semantic_challenger_logits: Optional[torch.Tensor] = None,
     original_image_rgb: Optional[np.ndarray] = None,
     save_visualization: bool = True,
+    marker_partition_restore: Optional[Dict] = None,
 ) -> Tuple[Dict[str, str], np.ndarray, Dict[int, int]]:
     """
     边界预测版后处理管线。
@@ -653,6 +730,7 @@ def post_process_prediction_boundary(
             max_steps=int(marker_boundary_reconstruction_steps),
         )
     semantic_vote_audit = {}
+    marker_audit = {}
     inst_map, class_map = boundary_watershed_separation(
         semantic_mask,
         boundary_mask,
@@ -673,6 +751,8 @@ def post_process_prediction_boundary(
         semantic_vote_options=semantic_vote_options,
         semantic_lab_prior=semantic_lab_prior,
         semantic_vote_audit=semantic_vote_audit,
+        marker_partition_restore=marker_partition_restore,
+        marker_restoration_audit=marker_audit,
     )
 
     inst_path = os.path.join(output_dir, f"{image_basename}_inst.png")
@@ -684,6 +764,11 @@ def post_process_prediction_boundary(
         json.dump(class_json, f, ensure_ascii=False, indent=2)
 
     output_paths = {"inst_path": inst_path, "class_json_path": class_json_path}
+    if (marker_partition_restore or {}).get('enabled', False):
+        marker_audit_path = os.path.join(output_dir, f'{image_basename}_marker_restore.json')
+        with open(marker_audit_path, 'w', encoding='utf-8') as stream:
+            json.dump(marker_audit, stream, ensure_ascii=False, indent=2, allow_nan=False)
+        output_paths['marker_restoration_audit'] = marker_audit_path
 
     vote_audit = {}
     for instance_id, cls in class_map.items():

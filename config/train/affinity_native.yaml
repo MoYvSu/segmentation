@@ -1,0 +1,17 @@
+# -*- coding: utf-8 -*-
+# 两组独立初始化，依次训练1024原生裁块、512裁块放大；复用已完成的全图control。
+_base: affinity_connectivity.yaml
+backend_adaptation:
+  output_dir: outputs/affinity_native
+affinity_native:
+  sizes: [1024, 512]
+  overlap: 0.25
+  reused_control: outputs/affinity_connectivity/control
+  control_sha256: e9fd8eb36dc40c538a5b090e9ab059e8358dc0ef2565a95d1efc924c0d93140b
+  prior_probe: outputs/affinity_patch
+  smoke_updates: 8
+  expected_test_images: 100
+  minimum_free_gib: 6
+  crop_attempts: 32
+  minimum_known_pairs: 16
+  monitor_width: 300

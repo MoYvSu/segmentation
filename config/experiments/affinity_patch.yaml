@@ -1,0 +1,17 @@
+# -*- coding: utf-8 -*-
+# 冻结最佳control，原生裁窗/修复及batch数值诊断；不训练或改默认部署。
+_base: ../train/affinity_connectivity.yaml
+affinity_patch_probe:
+  output_dir: outputs/affinity_patch
+  checkpoint: outputs/affinity_connectivity/control/final.pt
+  checkpoint_sha256: e9fd8eb36dc40c538a5b090e9ab059e8358dc0ef2565a95d1efc924c0d93140b
+  manual_indices: [0, 10, 20, 31]
+  test_fixed: [test_101, test_116]
+  test_random: 2
+  selection_seed: 20260928
+  tile_sizes: [1024, 512]
+  overlap: 0.25
+  batch_probe: 4
+  restoration_crops: 2
+  restoration_profiles: [identity, down075, down050, spatial050]
+  control_predictions: outputs/affinity_connectivity/control/deployment

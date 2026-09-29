@@ -1,0 +1,14 @@
+# -*- coding: utf-8 -*-
+# 仅作同起点、固定小批输入的64步力度检验，不调度正式20轮。
+_base: ../train/affinity_interface.yaml
+affinity_budget_probe:
+  output_dir: outputs/affinity_budget
+  checkpoint: outputs/affinity_connectivity/control/final.pt
+  checkpoint_sha256: e9fd8eb36dc40c538a5b090e9ab059e8358dc0ef2565a95d1efc924c0d93140b
+  manual_indices: [0, 1, 2, 3]
+  fixed_epoch: 20
+  updates: 64
+  parameter_ratio: 0.15
+  snapshots: [0, 16, 32, 64]
+  monitor_views: [0, 3]
+  selection_partition: frozen_initial_full_deployment

@@ -1,0 +1,14 @@
+# -*- coding: utf-8 -*-
+# 固定D5a/simple+独立语义LoRA/V；恢复已有分隔，对全部实例统一过滤异常小块。
+_base: semantic_split.yaml
+
+inference:
+  marker_partition_restore:
+    enabled: true
+    min_core_area: 50
+    # 每图首次分水岭全部实例log面积的箱线图下界，过滤过程中不重新估计。
+    # exp(Q25(logA)-1.5*(Q75(logA)-Q25(logA)))；不依赖训练GT或类别。
+    area_iqr_multiplier: 1.5
+
+marker_restore:
+  output_dir: outputs/marker_restore

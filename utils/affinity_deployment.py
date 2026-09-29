@@ -260,6 +260,7 @@ def postprocess(
         marker_boundary_reconstruction_steps=int(
             infer_cfg.get("marker_boundary_reconstruction_steps", 0)
         ),
+        marker_partition_restore=infer_cfg.get('marker_partition_restore'),
         semantic_vote_mode=str(
             infer_cfg.get("semantic_vote_mode", "hard_majority")
         ),

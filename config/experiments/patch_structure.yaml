@@ -1,0 +1,7 @@
+# -*- coding: utf-8 -*-
+# 原生patch检查发现恢复图内部网状纹理后，只读复测全部32对，不重跑分区。
+_base: affinity_patch.yaml
+patch_structure:
+  output_dir: outputs/affinity_patch/structure
+  source_dir: outputs/affinity_patch
+  interior_radius_grid: 8

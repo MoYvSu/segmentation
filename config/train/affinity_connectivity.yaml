@@ -1,0 +1,36 @@
+# -*- coding: utf-8 -*-
+# 两组共同适配D5a几何输入；唯一差异是部署误连/误断关系监督权重。
+_base: backend_d4.yaml
+
+backend_adaptation:
+  output_dir: outputs/affinity_connectivity
+  seed: 20260928
+  epochs: 20
+  learning_rates:
+    affinity: 0.00002
+  restoration:
+    checkpoint: outputs/d5a/candidate/epoch_060.pt
+    checkpoint_sha256: 048954795dc634f82fecf96d5e02bb2f2505afe5eb76298dff5a1b0713b3c80a
+    degradation_config: config/train/rgb_diffusion_d5a.yaml
+  monitor:
+    every_epochs: 5
+    images: [test_101, test_116, test_090, test_123, test_104, test_147]
+
+affinity_connectivity:
+  reference_zip: outputs/semantic_cross/submission_grestored_sraw.zip
+  parity_images: [test_101, test_116]
+  every_updates: 4
+  weight: 0.1
+  warmup_epochs: 2
+  logit_gradient_ratio: 0.25
+  max_groups: 8
+  edges_per_group: 16
+  minimum_group_edges: 2
+  negative_margin: 0.3
+  positive_margin: 0.7
+  smoke_updates: 8
+
+# 当前比较恢复图几何+原图最终语义，不启用此前降低面积得分的marker改动。
+inference:
+  marker_partition_restore:
+    enabled: false
