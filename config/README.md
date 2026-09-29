@@ -1,5 +1,147 @@
 # 配置目录
 
+`train/affinity_native.yaml`继承`affinity_connectivity.yaml`，只新增原生裁块选项和输出根目录。
+入口`tools/run_affinity_native.py`先`--smoke`，通过后顺序训练1024／512，每组20轮／1280更新，
+分别从旧control的原初始化出发；旧全图control直接复用。两组已完成，配对／冻结／重载通过。
+仅affinity decoder训练，原32人工／64 SAM2、退化、D5a、语义与后处理不变；
+过程图和各自全图／本尺度局部及control局部的6套100图对照全部完成。
+分析入口`tools/analyze_affinity_native.py`，私有图册`output/native_analysis/index.html`。
+优先建议1024权重配1024原生推理作黑盒候选；不替换旧全图入口权重、不改默认配置。
+输出`outputs/affinity_native/`，详见[实验记录](../docs/AFFINITY_NATIVE_20260928.md)。
+
+`experiments/affinity_patch.yaml`固定最高分control e20、D5a e60，做原生1024／512、raw／D5a
+及逐张／batch检查。入口`tools/probe_affinity_patch.py`，完成8源×6方案完整分区及32对恢复。
+追加`experiments/patch_structure.yaml`重放相同32对，检查已知铁素体内部无清晰参照支持的边界响应；
+入口`tools/probe_patch_structure.py`。汇总`tools/analyze_affinity_patch.py`，私有`outputs/affinity_patch/`。
+两配置均只读冻结诊断，不启动训练或修改默认推理；后续原生裁块训练完成记录见上条。冻结结果见
+[专题记录](../docs/AFFINITY_PATCH_20260928.md)。
+
+`experiments/affinity_budget.yaml`为最高分control e20上固定4源8视图的力度机制短测，
+入口`tools/probe_affinity_budget.py`，输出`outputs/affinity_budget/`。两组各64步，
+仅比较旧输出梯度上限与15%参数梯度预算；使用缓存特征与固定初始候选分区，不是正式续训协议。
+2026-09-28完成；新预算粘连修复仅多1个、新增粘连更多，未通过20轮门槛。
+配置不会自动启动正式训练，未改变旧训练入口或默认部署；见[记录](../docs/AFFINITY_BUDGET_20260928.md)。
+
+`train/affinity_interface.yaml`继承`affinity_connectivity.yaml`，仅更换附加监督为完整短程界面选位。
+输出`outputs/affinity_interface/`，从相同原始初始化只训候选20轮／1280更新，复用既有control。
+共同配置、初始化、GT/样本来源和逐步增强回执必须与control一致；原后处理和梯度预算不改。
+入口`tools/run_affinity_interface.py`要求64视图检查及同源码smoke通过；2026-09-28完成20轮及100图。
+候选额外作用仍小，98.64%控制实例匹配IoU≥0.95，当前保留control；分析入口`tools/analyze_affinity_interface.py`。
+详细作用与新增错误风险见[专题记录](../docs/AFFINITY_INTERFACE_20260928.md)，无新黑盒、不晋级。
+
+`experiments/affinity_preserve.yaml`只在最高分control e20上开启既有分隔恢复，
+以`marker_partition_restore.area_filter_enabled: false`独立关闭附加log-IQR面积过滤。
+原最小面积50和其它部署项不变；旧恢复配置默认仍启用附加过滤，control配置仍关闭全部恢复。
+入口`tools/run_affinity_preserve.py --mode train/test`分别运行冻结的标注源诊断／测试推理，均不训练。
+64标注视图及100测试图已完成；候选用户回分0.8499／0.8559（85.290），比同权重control低0.945分，不晋级。
+详见[实验记录](../docs/AFFINITY_PRESERVE_20260928.md)及[回分分析](../docs/AFFINITY_REVIEW_20260928.md)；未改配置或默认推理。
+
+`train/affinity_connectivity.yaml`保持D5a／joint-v3／S-align／原部署，唯一A/B差异是affinity双向困难关系损失。
+两组各20轮、1280更新及100图部署已完成，产物`outputs/affinity_connectivity/{control,candidate}/final.pt`。
+control用户回分0.8486／0.8761（86.235），是当前综合最佳研究对照；candidate尚无黑盒。
+新增监督实际参数梯度偏弱、完整输出几乎相同；再次只改附加损失时应从相同初始权重训练新候选并复用control。
+精确复现使用`train_affinity_connectivity.py --arm control --infer`及本组final，详见专题命令；不沿用旧通用入口推断权重。
+分析入口`tools/analyze_affinity_connectivity.py`，详见[完成分析](../docs/AFFINITY_CONNECTIVITY_20260928.md)。
+
+`experiments/marker_restore.yaml`在固定D5a／语义LoRA／V上开启保守种子恢复和统一面积离群过滤。
+面积阈值取每图首次真实分割的log面积箱线图下界，系数1.5；一次估计后冻结，对所有实例同等处理，
+不读取训练GT。入口`tools/run_marker_restore.py`，私有`outputs/marker_restore/`；其余配置默认关闭。
+实现、检查和全量结果见[记录](../docs/MARKER_RESTORE_20260927.md)。
+
+`experiments/semantic_split.yaml`用于只读比较simple／gray4／语义LoRA，固定D5a输入及LoRA最终轮廓。
+入口`tools/analyze_semantic_split.py`；最终有效统计`outputs/semantic_split_checked/`。
+同配置供`tools/probe_semantic_channels.py`追踪原有种子连通性，以及`tools/probe_marker_anchor.py`
+生成只改变种子的反事实输出。前置封边仅存在于诊断helper，没有更改默认部署配置或重训控制。
+复现门槛、统计范围与整体方案见[诊断记录](../docs/SEMANTIC_SPLIT_20260927.md)。
+
+`train/semantic_coverage.yaml`目前用于`tools/probe_semantic_coverage.py`的只读预检查。
+在256网格新增192／步长64窗口，仅补旧128窗口零支持且全图一致的位置；旧目标保持不变。
+完整1000源／1280视图仅14源增加监督，新增目标与已完成LoRA零类别分歧，仅2格未达0.9。
+预检查未满足新增信号条件，未接通正式训练协调器或启动20轮；见[实验记录](../docs/SEMANTIC_COVERAGE_20260927.md)。
+
+新增`train/semantic_scale.yaml`：在私有LoRA原配方上，仅把D5a之后的语义输入改为50%全图／50%有效域512方窗放大。
+原图先验先生成再同步裁切，保持原核心／概率池化损失及全图部署；复用LoRA e20控制，不重训控制。
+入口`tools/run_semantic_scale.py --smoke`后`tools/run_semantic_scale.py`，20轮、输出`outputs/semantic_scale/`；
+保留原monitor，并增加固定训练源的同ROI全图／局部过程缩略图。详见[尺度实验](../docs/SEMANTIC_SCALE_20260927.md)。
+
+新增`train/semantic_lora.yaml`：从gray4继承全部数据、灰度监督、梯度预算及20轮学习率，只开放独立语义LoRA。
+SAM2基础权重共用、原affinity LoRA冻结；候选重放gray4实际选中的增强视图，不重新选样。
+新入口`tools/run_semantic_lora.py --config config/train/semantic_lora.yaml`，首次需加`--smoke`。
+控制直接复用`outputs/semantic_gray4/prior`；父配置的旧`reuse_control_dir`不用于本入口。
+99项本地检查和GPU短测通过，冻结6步逐值复现gray4；正式20轮／1280更新、100图部署与96张过程图已完成。
+相对gray4改判65实例，主要在分类阈值附近；affinity冻结及严格重载通过，末轮`candidate/epoch_020.pt`。
+输出`outputs/semantic_lora/`，无新官方分数、不提交黑盒或更改默认模型；结论见[完成分析](../docs/SEMANTIC_LORA_20260927.md)。
+
+新增`train/semantic_gray4.yaml`：继承gray3，增加候选无标签光度困难视图选择及逐步附加梯度预算。
+全局／局部类型交替，20%保留原视图，其余从原图增强与两个候选中选较难者；清晰图先验不改写。
+名义系数仍最高0.15，实际系数限制使附加梯度范数不超过GT。共同GT、初始化、冻结上游及最终部署不变。
+复用`outputs/semantic_gray/control`，76项CPU检查与GPU短测通过；正式20轮／1280更新、100图推理和96张过程图已完成。
+对控制102处改判，训练源固定光照视图的区域冲突120／60→1／1；后期同时存在低学习率与当前合成任务趋于满足。
+未验证官方收益，未自动续训；建议学习率实验保持视图与监督不变，详见完成分析。
+入口`tools/run_semantic_gray.py --config config/train/semantic_gray4.yaml`，输出`outputs/semantic_gray4/`。
+训练前诊断入口`tools/probe_semantic_hard.py`，仅抽取训练源；见[实验记录](../docs/SEMANTIC_GRAY4_20260927.md)。
+
+新增`train/semantic_gray3.yaml`：继承gray2，只有灰度损失平均上限改为20，最高权重仍为0.15。
+`semantic_consistency.reuse_control_dir`显式引用`outputs/semantic_gray/control`，正式只训练／推理prior。
+复用前检查共同训练条件、依赖、旧权重与100图部署，并用新代码6步短测复现旧控制输入及loss。
+62项CPU检查及GPU短测／8图部署通过；正式20轮候选、100图部署和48张过程图已完成。
+旧控制全1280步配对通过，gray3对控制35／8668实例改判，训练先验分歧较gray2减少31.17%。
+这是训练规则拟合与预测变化，不是准确率；输出`outputs/semantic_gray3/`，未晋级或继续训练。
+入口`tools/run_semantic_gray.py --config config/train/semantic_gray3.yaml`（首次必须先加`--smoke`）。
+过程缩略图和完整100图部署已保存，无新黑盒成绩。见[完成分析](../docs/SEMANTIC_GRAY3_20260927.md)。
+
+新增`train/semantic_gray2.yaml`：原simple e60重新接续的20轮A/B；候选改为单向灰度约束，
+可靠亮／暗区达到0.9／0.1后梯度归零，最高系数由0.10提高至0.15，前5轮渐增。
+目标接受域、数据、随机种子、冻结模块和最终部署不变；短目录`outputs/semantic_gray2/`。
+入口`tools/run_semantic_gray.py --config config/train/semantic_gray2.yaml --smoke`，
+本地38项检查、GPU三组短测及完整8图推理通过，正式两组各20轮、100图部署与48张过程图已完成。
+实际活动比例0.06146%，对控制仅6／8668实例改判，未晋级或自动续训。
+两控制全部模型张量及100图输出一致，后续必须复用旧控制；本轮重复控制权重已清除，
+现存控制为`outputs/semantic_gray/control/epoch_020.pt`。显式复用入口已在上方gray3落实；
+没有复用字段的历史配置仍会按原流程运行。见[完整分析](../docs/SEMANTIC_GRAY2_20260927.md)。
+
+新增`train/semantic_gray.yaml`：原simple e60接续的20轮A/B；A为GT＋现有增强，
+B额外接受清晰训练原图的独立Lab明度软监督。全部1000源循环抽样，已有GT覆盖排除先验，
+保留Stage1/joint-v3、D5a、LoRA及affinity冻结。入口`tools/run_semantic_gray.py --smoke`，
+短测后去掉`--smoke`，输出`outputs/semantic_gray/`；保存8图过程缩略图及完成后的完整推理。
+见[实验约定](../docs/SEMANTIC_GRAY_20260927.md)，45项CPU检查及GPU三组短测通过，
+确定性零权重重放完全一致；正式各20轮、1280更新、100图部署及48张过程图均已完成。
+B对A为43／8668个实例改判，接受域类别分歧仅0.0455%，多数实例分数向0.5靠近；
+无新黑盒或晋级，不自动续训。此旧配置仍为软目标BCE，新单向约束另见上方`semantic_gray2.yaml`。
+
+新增只读诊断`experiments/semantic_teacher_probe.yaml`：原图S-align教师对D5a/simple e60，
+检查全部32人工源及按内容排除后固定抽取的64张其他训练图，各两次独立退化。
+入口`tools/probe_semantic_teacher.py`，7项CPU检查、三图GPU短测及正式96图均已完成；
+64图共同可靠域214万格点的两教师类别完全一致，暂不启动仅换教师的训练。
+不创建留出、不读取测试图、不更新模型。口径及结果见
+[教师可用性检查](../docs/SEMANTIC_TEACHER_PROBE_20260926.md)。
+
+新增`train/semantic_consistency.yaml`：原simple e60接续的20轮A/B，各1280次更新。
+两组共同使用现有模糊／噪声及D5a前新增的正斜率外观模拟，仅B附加1000训练源的可靠语义一致性；
+弱教师固定、共享几何、全源循环抽取，无留出。保留Stage1/joint-v3依赖，冻结D5a、编码器／LoRA和affinity。
+入口`tools/run_semantic_consistency.py --smoke`，通过后去掉`--smoke`；保存8图过程缩略图，
+完成后自动推理／渲染并停止，不自动续训。见[分布依据](../docs/SEMANTIC_DOMAIN_20260926.md)
+与[实验约定和完成分析](../docs/SEMANTIC_CONSISTENCY_20260926.md)。两组已各完成20轮及100图推理，
+B对A仅7／8668个对应实例改判，额外一致性作用很小；不原样延长到60轮，尚无新黑盒成绩。
+
+新增`train/illumination_calibration.yaml`：独立小型校光模块，全部1000训练源、60轮；
+冻结指定V e115＋原simple e60及其joint-v3特征，同一校光权重分别放D5a前后对照。
+入口`tools/run_illumination_calibration.py`先`--preflight`、再`--short`，通过后正式训练；
+保存五组过程缩略图和四图完整预测，不生成提交包。见`docs/ILLUMINATION_CALIBRATION_20260926.md`。
+
+新增`train/backend_cold.yaml`：固定D5a首步与SAM2基座，纯SSL LoRA＋随机simple/affinity。
+60轮两头预热＋60轮LoRA联合，全32人工及既有64 SAM2，无留出，不接额外无标签流或新增光照。
+入口`tools/run_backend_coldstart.py`，输出`outputs/backend_cold/`；短测通过，但用户已于e93后停止正式训练与后续推理。
+该纯SSL短链绕开尚未消融的Stage1/joint-v3，仅保留探索记录，不作为后续默认初始化。
+权重及诊断已保存，详见[实验记录](../docs/BACKEND_COLD_20260926.md)。
+
+新增`train/semantic_light.yaml`：继承simple既有60轮配方，只覆盖输出目录并增加光照配置。
+D5a后50%概率增强，整图／平滑局部偏移各半、幅度最多±0.10，限制有效内容新增截断不超过1%。
+入口`tools/run_semantic_light.py`只训练simple，复用历史无光照组；短测独立强制光照覆盖，
+正式seed仍为`20260925`。60轮已完成并产出100图提交包；受截断保护影响，实际非零增强37.97%。
+黑盒回分`0.8474/0.8445`（84.595），比原simple仅+0.055分，不晋级，未修改默认推理。
+详见[实验与完成分析](../docs/SEMANTIC_LIGHT_20260926.md)。
+
 2026-09-25：扩散修复与配套后端／语义对照配置已随研究分支归入`main`。
 本次合并保留既有推理入口和权重选择；下列实验配置、黑盒结果及采用结论继续有效。
 
