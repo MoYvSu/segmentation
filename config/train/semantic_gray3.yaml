@@ -1,0 +1,9 @@
+# -*- coding: utf-8 -*-
+# 保留单向目标及0.15系数，仅对活动位置的平均设置最大20倍增益。
+_base: semantic_gray2.yaml
+semantic_adaptation:
+  output_dir: outputs/semantic_gray3
+semantic_consistency:
+  reuse_control_dir: outputs/semantic_gray/control
+semantic_gray:
+  maximum_normalization_gain: 20.0

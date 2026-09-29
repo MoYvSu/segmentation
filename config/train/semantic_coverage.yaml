@@ -1,0 +1,16 @@
+# -*- coding: utf-8 -*-
+# 从同一原simple及复制LoRA初始化；唯一变化为零局部支持区的大窗口补充目标。
+# 当前仅供tools/probe_semantic_coverage.py预检查；新增信号不足，未接通或启动正式训练。
+_base: semantic_lora.yaml
+semantic_adaptation:
+  output_dir: outputs/semantic_coverage
+semantic_gray:
+  coverage:
+    enabled: true
+    version: larger_window_v1
+    window: 192
+    stride: 64
+semantic_coverage:
+  reference_dir: outputs/semantic_lora/candidate
+  reference_sha256: 23b23d1f0cecb268091943610ceddffd1dffc4371ca548ce725639e2dfc4068b
+  probe_dir: outputs/semantic_coverage_probe

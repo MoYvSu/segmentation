@@ -1,0 +1,50 @@
+# -*- coding: utf-8 -*-
+# D5a固定、SAM2基座冻结，纯SSL LoRA -> 随机simple与affinity；本轮不接新增无标签流。
+_base: backend_d4.yaml
+
+paths:
+  output_dir: outputs/backend_cold
+
+lora:
+  enabled: true
+  rank: 16
+  alpha: 32.0
+  target_layers: [attn.qkv, attn.proj]
+  init_from: outputs/lora_pretrain/lora_state_dict.pth
+  gradient_checkpointing: true
+
+backend_adaptation:
+  output_dir: outputs/backend_cold
+  seed: 20260926
+  epochs: 120
+  head_warmup_epochs: 60
+  joint_epochs: 60
+  initialization:
+    mode: ssl_random_heads
+    ssl_sha256: 4701e770e658a4f152da695c4b3a3dbb3a0b66152d63c03626399cfea2f4c152
+  learning_rates:
+    warmup_semantic: 0.0001
+    warmup_affinity: 0.00005
+    joint_semantic: 0.00002
+    joint_affinity: 0.00001
+    joint_lora: 0.000002
+  restoration:
+    checkpoint: outputs/d5a/candidate/epoch_060.pt
+    checkpoint_sha256: 048954795dc634f82fecf96d5e02bb2f2505afe5eb76298dff5a1b0713b3c80a
+    degradation_config: config/train/rgb_diffusion_d5a.yaml
+    mode: first_x0
+    inference_seed: 314159
+  d5a_prediction_dir: outputs/d5a_candidate/deployment
+  simple_prediction_dir: outputs/semantic_d5a/simple/deployment
+
+direct_semantic_affinity:
+  affinity_grid: 512
+  semantic_decoder:
+    fpn_channels: 256
+    dropout: 0.10
+    use_group_norm: true
+    highres: false
+  affinity_decoder:
+    channels: 8
+    fpn_channels: 256
+    up_channels: 128

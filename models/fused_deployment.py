@@ -16,6 +16,7 @@ from models.fpn_decoder import FPNDecoder
 from models.gda_mim import GenerativeDomainAdapterPyramid
 from models.lora import inject_trunk_lora
 from models.sam2_encoder import SAM2Encoder
+from models.semantic_lora import SemanticLoRA, semantic_features
 from utils.semantic_challenger import (
     SemanticChallenger,
     _build_checkpoint_semantic_residual,
@@ -35,6 +36,7 @@ class FusedPhaseAffinityModel(nn.Module):
         affinity_decoder: nn.Module,
         geometry_feature_adapter: nn.Module | None = None,
         geometry_highres_refiner: nn.Module | None = None,
+        semantic_lora: nn.Module | None = None,
     ):
         super().__init__()
         self.encoder = encoder
@@ -42,10 +44,15 @@ class FusedPhaseAffinityModel(nn.Module):
         self.affinity_decoder = affinity_decoder
         self.geometry_feature_adapter = geometry_feature_adapter
         self.geometry_highres_refiner = geometry_highres_refiner
+        self.semantic_lora = semantic_lora
 
-    def forward(self, image: torch.Tensor):
+    def forward(self, image: torch.Tensor, *, return_features=False):
         features = self.encoder(image)
-        semantic_logits = self.semantic_decoder(features, image)
+        semantic_input = features if self.semantic_lora is None else semantic_features(self, image)
+        if return_features:
+            semantic_logits, semantic_feature = self.semantic_decoder(semantic_input, image, return_features=True)
+        else:
+            semantic_logits = self.semantic_decoder(semantic_input, image)
         geometry_features = features
         if self.geometry_feature_adapter is not None:
             geometry_features = self.geometry_feature_adapter(
@@ -66,6 +73,9 @@ class FusedPhaseAffinityModel(nn.Module):
         }
         if coarse_affinity_logits is not None:
             output["coarse_affinity_logits"] = coarse_affinity_logits
+        if return_features:
+            output["semantic_feature"] = semantic_feature
+            output["affinity_feature"] = affinity_output["affinity_feature"]
         return output
 
     def parameter_summary(self):
@@ -77,6 +87,8 @@ class FusedPhaseAffinityModel(nn.Module):
             "affinity_decoder": sum(
                 p.numel() for p in self.affinity_decoder.parameters()
             ),
+            "semantic_lora": sum(p.numel() for p in self.semantic_lora.parameters())
+            if self.semantic_lora is not None else 0,
             "geometry_feature_adapter": (
                 sum(p.numel() for p in self.geometry_feature_adapter.parameters())
                 if self.geometry_feature_adapter is not None else 0
@@ -182,6 +194,8 @@ def build_fused_model_from_bundle(bundle, config, device):
         affinity_decoder,
         geometry_feature_adapter=adapter,
         geometry_highres_refiner=highres_refiner,
+        semantic_lora=(SemanticLoRA.from_architecture(encoder.trunk, architecture['semantic_lora'])
+                       if architecture.get('semantic_lora') is not None else None),
     ).to(device)
     model.load_state_dict(bundle["model_state_dict"], strict=True)
     model.eval()

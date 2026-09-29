@@ -1,0 +1,15 @@
+# -*- coding: utf-8 -*-
+# 固定已回分simple的全部配方，仅在D5a之后、encoder之前在线改变光照。
+_base: semantic_d5a.yaml
+
+semantic_adaptation:
+  output_dir: outputs/semantic_light
+  illumination:
+    enabled: true
+    probability: 0.5
+    local_probability: 0.5
+    max_offset: 0.10
+    max_clipped_fraction: 0.01
+
+semantic_light:
+  control_dir: outputs/semantic_d5a/simple

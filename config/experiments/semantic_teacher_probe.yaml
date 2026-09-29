@@ -1,0 +1,14 @@
+# -*- coding: utf-8 -*-
+# 只读检查原图 S-align 教师；不启动蒸馏训练或读取测试图。
+_base: ../train/semantic_consistency.yaml
+semantic_teacher_probe:
+  output_dir: outputs/semantic_teacher
+  seed: 20260928
+  unlabeled_sources: 64
+  strong_draws: 2
+  teacher_sha256: ea905a94355117b750feeb73a99f3aca3200ec2219d1ae5f61a85e54d90dff44
+  weak_contrast: 0.98
+  weak_offset: 0.01
+  confidence: 0.90
+  max_probability_gap: 0.05
+  erosion_radius: 1

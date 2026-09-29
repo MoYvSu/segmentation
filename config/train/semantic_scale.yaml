@@ -1,0 +1,15 @@
+# -*- coding: utf-8 -*-
+# 同simple e60初始化及私有LoRA配方；仅增加D5a之后的全图/局部尺度视图。
+_base: semantic_lora.yaml
+semantic_adaptation:
+  output_dir: outputs/semantic_scale
+semantic_scale:
+  enabled: true
+  local_probability: 0.5
+  crop_size: 512
+  alignment: 4
+  control_dir: outputs/semantic_lora/candidate
+  control_sha256: 23b23d1f0cecb268091943610ceddffd1dffc4371ca548ce725639e2dfc4068b
+  monitor:
+    sources: 2
+    dataset_epoch: 1

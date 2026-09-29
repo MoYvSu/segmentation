@@ -1,0 +1,10 @@
+# -*- coding: utf-8 -*-
+# gray4配对：只开放语义专用LoRA，重放gray4实际选择的全部增强视图。
+_base: semantic_gray4.yaml
+semantic_adaptation:
+  output_dir: outputs/semantic_lora
+semantic_lora:
+  enabled: true
+  gradient_checkpointing: true
+  reference_dir: outputs/semantic_gray4/prior
+  reference_sha256: ebbf255ebea6c11d9015c6190840a795d67d317b2860505509bebf931de15446

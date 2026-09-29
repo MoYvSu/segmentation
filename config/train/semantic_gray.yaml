@@ -1,0 +1,27 @@
+# -*- coding: utf-8 -*-
+# 接续原simple e60；对照仅GT，候选增加清晰训练原图的独立明度软监督。
+_base: semantic_consistency.yaml
+semantic_adaptation:
+  output_dir: outputs/semantic_gray
+  seed: 20260927
+  epochs: 20
+semantic_consistency:
+  target_mode: gray_prior
+  deterministic_training: true
+  maximum_weight: 0.1
+  ramp_epochs: 5
+  weak_check:
+    enabled: false
+semantic_gray:
+  comparison_grid: 256
+  confidence: 0.90
+  max_probability_gap: 0.15
+  erosion_radius: 1
+  local_window: 128
+  local_stride: 64
+  min_region_pixels: 256
+  min_mode_fraction: 0.05
+  min_lightness_gap: 0.12
+  min_separation: 2.5
+  max_valley_ratio: 0.60
+  transition_fraction: 0.15

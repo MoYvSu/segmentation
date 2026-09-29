@@ -1,0 +1,22 @@
+# -*- coding: utf-8 -*-
+# 只读诊断：相同D5a输入、固定LoRA最终实例图，比较三组语义。
+_base: ../train/semantic_lora.yaml
+semantic_split:
+  output_dir: outputs/semantic_split
+  expected_images: 100
+  anchor: lora
+  random_seed: 20260928
+  random_images: 4
+  models:
+    simple:
+      checkpoint: outputs/semantic_d5a/simple/epoch_060.pt
+      sha256: b3399ada651e7ff4a9b6495808ce5af65373a9177e9957c159f53b1e1824d6a1
+      deployment: outputs/semantic_d5a/simple/deployment
+    gray4:
+      checkpoint: outputs/semantic_gray4/prior/epoch_020.pt
+      sha256: ebbf255ebea6c11d9015c6190840a795d67d317b2860505509bebf931de15446
+      deployment: outputs/semantic_gray4/prior/deployment
+    lora:
+      checkpoint: outputs/semantic_lora/candidate/epoch_020.pt
+      sha256: 23b23d1f0cecb268091943610ceddffd1dffc4371ca548ce725639e2dfc4068b
+      deployment: outputs/semantic_lora/candidate/deployment

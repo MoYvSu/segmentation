@@ -18,6 +18,7 @@ from torch.utils.data import DataLoader
 
 from data.backend_adaptation import CanonicalBackendDataset, PairedDegradationDataset
 from data.mim_dataset import list_images
+from data.semantic_illumination import training_illumination
 from models.backend_adaptation import build_backend, load_backend, restore_first, save_backend
 from models.fpn_decoder import FPNDecoder
 from models.rgb_restoration import load_rgb_restorer
@@ -230,6 +231,17 @@ def train(config, arm, output_dir, smoke=False):
         'total_parameters': total_parameters, 'trainable_parameters': sum(p.numel() for p in parameters),
         'selection': 'prespecified_final_epoch_no_validation', 'updates': 0, 'failed_updates': 0,
         'precision': {'restorer': 'FP32', 'encoder': 'FP32', 'semantic_training': 'BF16', 'inference': 'FP32'}}
+    if 'semantic_light' in config:
+        if arm != 'simple':
+            raise ValueError('The illumination comparison fixes the simple semantic head')
+        control_path = Path(project_path(config, config['semantic_light']['control_dir']))
+        control = json.loads((control_path / 'status.json').read_text(encoding='utf-8'))
+        for key in ('init', 'sources', 'data', 'frozen_state_sha256', 'd5a_sha256',
+                    'd5a_state_sha256', 'trainable_parameters', 'precision'):
+            if status[key] != control[key]:
+                raise RuntimeError(f'Historical simple control differs before training: {key}')
+        status['historical_simple_initialization_equal'] = True
+        status['illumination'] = cfg.get('illumination', {'enabled': False})
     write_json(output / 'status.json', status)
     all_files = [Path(path) for path in list_images(project_path(config, config['inference']['test_dir']))]
     first = all_files[0]
@@ -269,6 +281,7 @@ def train(config, arm, output_dir, smoke=False):
             group['lr'] = lr
         semantic_train_mode(model)
         loss_total, count, endpoint_count = 0.0, 0, 0
+        light_count, light_offset_total, light_clipped_max = 0, 0.0, 0.0
         for index, raw in enumerate(loader):
             if smoke and index >= 2:
                 break
@@ -278,6 +291,10 @@ def train(config, arm, output_dir, smoke=False):
             batch = move_batch(raw, device)
             restoration_seed = step_seed + 1000000
             batch['image'] = restore_first(restorer, batch['image'], restoration_seed)
+            # 只扰动冻结修复器之后的光照；旧模糊、D5a噪声及Dropout随机流保持原样。
+            batch['image'], light_info = training_illumination(
+                batch['image'], cfg.get('illumination'), step_seed,
+                content_mask=batch['valid_content'])
             # 冻结 encoder 用部署相同 FP32 产生特征，仅语义头启用 BF16 训练。
             with torch.no_grad(), torch.autocast('cuda', enabled=False):
                 features = model.encoder(batch['image'].float())
@@ -298,12 +315,15 @@ def train(config, arm, output_dir, smoke=False):
             count += 1
             endpoint_applied = bool(raw['endpoint_applied'].item())
             endpoint_count += int(endpoint_applied)
+            light_count += int(light_info['applied'])
+            light_offset_total += abs(light_info['actual_offset'])
+            light_clipped_max = max(light_clipped_max, light_info['clipped_fraction'])
             row = {'epoch': epoch, 'step': index + 1, 'updates': steps, 'name': raw['name'][0],
                 'draw_index': int(raw['draw_index'].item()), 'input_sha256': input_digest,
                 'restoration_seed': restoration_seed, 'seed': step_seed, 'semantic_loss': loss_value,
                 'grad_norm': grad_norm, 'profile': raw['profile'][0],
                 'is_spatial': bool(raw['is_spatial'].item()), 'endpoint_applied': endpoint_applied,
-                'noise_sigma': float(raw['noise_sigma'].item())}
+                'noise_sigma': float(raw['noise_sigma'].item()), 'illumination': light_info}
             with (output / 'steps.jsonl').open('a', encoding='utf-8') as stream:
                 stream.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + '\n')
             del features, logits, loss, batch
@@ -311,7 +331,9 @@ def train(config, arm, output_dir, smoke=False):
             raise RuntimeError('Incomplete training epoch')
         row = {'epoch': epoch, 'updates': steps, 'failed_updates': failed, 'semantic_loss': loss_total / count,
             'learning_rate': lr, 'endpoint_draws': endpoint_count, 'elapsed_seconds': time.time() - started,
-            'peak_cuda_mib': torch.cuda.max_memory_allocated() / 1024**2}
+            'peak_cuda_mib': torch.cuda.max_memory_allocated() / 1024**2,
+            'illumination_draws': light_count, 'illumination_mean_abs_offset': light_offset_total / count,
+            'illumination_max_clipped_fraction': light_clipped_max}
         with (output / 'epochs.jsonl').open('a', encoding='utf-8') as stream:
             stream.write(json.dumps(row, allow_nan=False) + '\n')
         print(json.dumps({'arm': arm, **row}), flush=True)

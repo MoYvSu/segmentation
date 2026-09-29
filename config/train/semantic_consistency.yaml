@@ -1,0 +1,33 @@
+# -*- coding: utf-8 -*-
+# 同一simple e60接续；A/B共同外观增强，仅B增加训练池语义一致性。
+_base: semantic_d5a.yaml
+semantic_adaptation:
+  output_dir: outputs/semantic_consistency
+  seed: 20260927
+  epochs: 20
+  learning_rates:
+    simple: 0.00001
+  monitor:
+    every_epochs: 5
+    images: [test_101, test_074, test_120, test_161, test_078, test_094, test_108, test_163]
+semantic_consistency:
+  initial_checkpoint: outputs/semantic_d5a/simple/epoch_060.pt
+  initial_sha256: b3399ada651e7ff4a9b6495808ce5af65373a9177e9957c159f53b1e1824d6a1
+  original_prediction_dir: outputs/semantic_d5a/simple/deployment
+  unlabeled_dir: data/unlabeled
+  expected_sources: 1000
+  maximum_weight: 0.1
+  ramp_epochs: 5
+  confidence: 0.9
+  max_probability_gap: 0.05
+  erosion_radius: 1
+  smoke_steps: 6
+  weak_check:
+    max_offset: 0.02
+    max_clipped_fraction: 0.005
+  appearance:
+    probability: 0.5
+    contrast: [0.5, 1.0]
+    offset: [0.0, 0.15]
+    max_rgb_shift: 0.03
+    max_clipped_fraction: 0.01

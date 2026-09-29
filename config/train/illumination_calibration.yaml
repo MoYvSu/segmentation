@@ -1,0 +1,45 @@
+# -*- coding: utf-8 -*-
+# 独立校光从零训练；同一权重分别放D5a前后；固定V e115 + simple e60。
+_base: semantic_d5a.yaml
+
+illumination_calibration:
+  output_dir: outputs/light_calibration
+  data_dir: data/unlabeled
+  expected_sources: 1000
+  seed: 20260926
+  image_size: 1024
+  epochs: 60
+  batch_size: 4
+  num_workers: 4
+  learning_rate: 0.0003
+  minimum_lr: 0.000003
+  identity_probability: 0.25
+  blur_probability: 0.5
+  model:
+    width: 24
+    context_size: 256
+    field_size: 8
+    max_log_gain: 0.6
+    max_log_gamma: 0.3
+  augmentation:
+    gamma: [0.8, 1.25]
+    exposure: [0.8, 1.15]
+    local_log_strength: 0.2
+    max_clipped_fraction: 0.01
+  backend:
+    checkpoint: outputs/semantic_d5a/simple/epoch_060.pt
+    sha256: b3399ada651e7ff4a9b6495808ce5af65373a9177e9957c159f53b1e1824d6a1
+    simple_epoch: 60
+    affinity_epoch: 115
+    affinity_sha256: 9bfacdad4d82d148e950f5fe36d08af44290244835bd70b35a93d94cb7c8a739
+    reference_sha256: dde542325a28666de730a72d6f77f37149c8ac02b44c5434cddad74725f317ce
+    baseline_dir: outputs/semantic_d5a/simple/deployment
+  monitor:
+    images: [test_101, test_091, test_130, test_089]
+    every_epochs: 5
+    thumbnail_size: 224
+  short_test:
+    steps: 600
+    sources: 4
+    rgb_ratio: 0.8
+    identity_mae: 0.00784313725490196

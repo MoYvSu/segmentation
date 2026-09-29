@@ -1,0 +1,10 @@
+# -*- coding: utf-8 -*-
+# 同一simple e60重新接续；满足置信门槛后停止灰度惩罚，最高权重提高50%。
+_base: semantic_gray.yaml
+semantic_adaptation:
+  output_dir: outputs/semantic_gray2
+semantic_consistency:
+  maximum_weight: 0.15
+semantic_gray:
+  loss_mode: one_sided
+  minimum_confidence: 0.90

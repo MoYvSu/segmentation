@@ -1,0 +1,23 @@
+# -*- coding: utf-8 -*-
+# 先诊断训练困难视图；共同GT、原simple初始化和既有控制保持不变。
+_base: semantic_gray3.yaml
+semantic_adaptation:
+  output_dir: outputs/semantic_gray4
+semantic_hard:
+  enabled: true
+  views: [base, global, local]
+  contrast: [0.25, 0.60]
+  offset: [0.12, 0.30]
+  max_clipped_fraction: 0.01
+  minimum_region_pixels: 32
+  probe_sources: 64
+  probe_views: 2
+  variants_per_family: 2
+  keep_base_probability: 0.20
+  maximum_gradient_ratio: 1.0
+  # 来自仅训练源诊断的固定过程样本，全部仍参与训练，不作checkpoint选择。
+  monitor:
+    - {draw: 227, mode: local}
+    - {draw: 221, mode: global}
+    - {draw: 509, mode: local}
+    - {draw: 3, mode: local}
