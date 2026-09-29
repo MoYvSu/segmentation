@@ -32,9 +32,6 @@
 
 - 项目级 Skills 位于 `.agents/skills/`。任务与某个 Skill 的 `description` 匹配时，按需读取其
   完整 `SKILL.md`，并且只加载当前工作所需的 references；不要把 Skill 全文复制到本文件。
-- 对任务范围、修改必要性、额外重构、新依赖、新抽象层或其他 scope creep 存疑时，优先使用
-  `stop-that-shit` 判断请求内容、必要后果与可达证据。这里只安装 advisory Skill，没有 Guard、
-  Hook 或 Plugin；保密检查使用独立Git hooks，不属于Skill Guard。
 - 工作中产生可能跨任务复用的实验教训、环境问题、代码库特性或有效/无效方案时，使用
   `maintain-project-knowledge`；候选知识先写入该 Skill 的 `references/`，不得因单次事件直接
   修改 `AGENTS.md`。

@@ -50,12 +50,11 @@ python -m pytest -q --ignore=output --ignore=outputs
 
 ## 项目 Skill
 
-仓库自带两个 Skill，规范正文在 `.agents/skills/`；`.claude/skills/` 下只是指向正文的薄指针，
+仓库自带的 Skill 规范正文在 `.agents/skills/`；`.claude/skills/` 下只是指向正文的薄指针，
 执行前必须先完整读取正文文件。
 
 - `maintain-project-knowledge` — 可复用的实验教训、环境问题、代码库特性写入其 `references/`，
   按 observation → validated → skill-rule → `AGENTS.md` 的生命周期晋升。
-- `stop-that-shit` — 范围控制：只做被请求的工作和必要后果。
 
 不要另建知识库，也不要把单次事件直接写进 `AGENTS.md`。
 
