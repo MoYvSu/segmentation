@@ -1,0 +1,33 @@
+# -*- coding: utf-8 -*-
+# 原图S-align末端分类有限机制拟合：A共同pixel/core/pool，B另加strict区域概率均值BCE。
+_base: affinity_balance_mixed.yaml
+semantic_object_fit:
+  format: semantic_object_fit_v1
+  output_dir: outputs/semantic_object
+  checkpoint: outputs/affinity_balance/mixed/final.pt
+  checkpoint_sha256: 43da103c95c7f85149bd0533fd116d26f0a81c91d793db7e8938b7d4ae80e434
+  manifest: outputs/gt_source/targets/manifest.json
+  manifest_sha256: 1796105aed0911f78d5f3b0752a645483482120e4a33bccfcda84016052ba52d
+  reference_inputs: outputs/semantic_reflect_cache/inputs.json
+  reference_rows: outputs/semantic_reflect/rows.json
+  reference_rows_sha256: 553da0937e2b9a1aec4d65169ef563dd5184137e6b001bb053d2ee247a28ae04
+  input_size: 1024
+  expected_sources: 32
+  expected_regions: 182
+  expected_F_regions: 101
+  expected_P_regions: 81
+  expected_initial_region_errors: 64
+  expected_geometric_pairs: 4918
+  steps: 64
+  learning_rate: 0.00002
+  weight_decay: 0.0001
+  adam_eps: 0.0001
+  grad_clip: 1.0
+  region_weight: 0.5
+  snapshots: [0, 16, 32, 64]
+  seed: 20261004
+  head_mode: eval_mode_fitting
+  monitor_sources: [train_001, train_173, train_558, train_889, train_175, train_873]
+  thumbnail_width: 320
+  cache_features_on_cpu: true
+  test_scope: fixed_eight_unlabeled_only

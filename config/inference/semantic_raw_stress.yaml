@@ -1,0 +1,24 @@
+# -*- coding: utf-8 -*-
+# 只检查已评分R1原图末端分类的强光度敏感性，不训练或重算实例。
+_base: ../train/affinity_balance_mixed.yaml
+semantic_raw_stress:
+  format: semantic_raw_stress_v1
+  output_dir: outputs/semantic_raw
+  checkpoint: outputs/affinity_balance/mixed/final.pt
+  checkpoint_sha256: 43da103c95c7f85149bd0533fd116d26f0a81c91d793db7e8938b7d4ae80e434
+  checkpoint_epoch: 20
+  expected_manual_sources: 32
+  initial_sources: [train_001, train_173, train_558, train_889]
+  # 复用既有清晰入口概率与固定PNG，仅为零变化门禁，不重跑四候选。
+  reference_inputs: outputs/semantic_reflect_cache/inputs.json
+  reference_rows: outputs/semantic_reflect/rows.json
+  reference_report: outputs/semantic_reflect/report.json
+  source_seed: 20261004
+  views_per_family: 2
+  minimum_native_area: 10000
+  core_fraction: 0.4
+  core_min_pixels: 8
+  contrast: [0.25, 0.60]
+  offset: [0.12, 0.30]
+  max_clipped_fraction: 0.01
+  thumbnail_width: 384

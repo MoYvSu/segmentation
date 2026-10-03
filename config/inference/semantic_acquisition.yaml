@@ -1,0 +1,12 @@
+# -*- coding: utf-8 -*-
+# 原图末端的一次有界采集模糊压力检查；旧光度probe保持封存。
+_base: semantic_raw_stress.yaml
+semantic_acquisition:
+  format: semantic_acquisition_v1
+  output_dir: outputs/semantic_acquisition
+  native_sigmas: [3.0, 8.0]
+  source_seed: 20261004
+  transition_fraction: [0.2, 0.8]
+  global_photometric_view: 0
+  # 四固定源清晰+四种压力条件，最后重复第一源清晰：21次前向。
+  sources: [train_001, train_173, train_558, train_889]

@@ -1,12 +1,207 @@
 # 配置目录
 
+2026-10-04：`train/semantic_object_fit.yaml`用于实际raw末端区域均值A64／B64，默认CLI仅校验计划；39项CPU与40缓存严格复现通过。两次JSON序列化兼容阻塞均为0优化，仅修序列化、配置SHA与配方不变。PID66251以`tools/probe_semantic_object_fit.py --go64 --recover-capture`严格恢复缓存、encoder调用0次，梯度／s0门禁通过，已只读核验A组真实参数更新；A64／B64顺次排队，B另过首步门禁，当前不称B已开始或训练完成，不监控。`--resume`仅用于已有优化状态；本地启动回执`output/semantic_object_init/startup.json`。固定上游与PNG，不恢复伪几何训练或晋级；见[本轮入口与门禁](../docs/SEMANTIC_OBJECT_FIT_20261004.md)。
+
+2026-10-04后续：`train/affinity_retention_guard.yaml`继承原interior_fit，新增独立负关系KL，原connect控制／损失不改。`tools/probe_affinity_retention_guard.py --go32`32更新完成，一例外围恢复但固定689F／135面积整体仍退步，不扩训或出包。93项CPU、实际梯度／冻结／strict通过，续训状态与s32头保留。`inference/semantic_raw_stress.yaml`与继承它的`semantic_acquisition.yaml`分别完成只读原图S-align光度／原生局部模糊检查，各四固定源21前向，原标整对象均未错相；强模糊仅局部像素错误增加，不据此声称测试饱和或开同项训练。详见[外围保护](../docs/AFFINITY_RETENTION_GUARD_20261004.md)、[光度压力](../docs/SEMANTIC_RAW_STRESS_20261004.md)与[采集模糊](../docs/SEMANTIC_ACQUISITION_20261004.md)。
+
+2026-10-04：`train/teacher_seams.yaml`继承`affinity_gt_source.yaml`，只恢复原teacher窄零缝支持，绑定派生manifest与旧B320步／状态SHA。旧common继续决定crop、原合法答案保持；同R1起点5轮已完成，不重复控制。配对／冻结／strict通过，e0/e1/e5齐全；六源最终收益不明确，按用户取舍搁置伪GT，不扩训／全量／出包。只读`tools/probe_teacher_seams.py`／`tools/probe_teacher_seams_extra.py`分别核对四固定与两预随机源。已返回独立新GT外围保护方向，最新状态见上方guard条目。见[末态分析与取舍](../docs/AFFINITY_TEACHER_SEAMS_20261004.md)。
+
+2026-10-04：`train/affinity_gt_source.yaml`继承`affinity_balance_mixed.yaml`，用于相同32训练源的已处理人工GT／固定部署伪几何来源对照。用户已确认本批候选；两组各e5／320更新已完成，冻结上游、语义与D5a，共同ignore与实际输入配对。A100图完成，B按短跑分析需要停在75；未来队列`tools/run_affinity_gt_source_queue.py`默认仅训练，显式`--evaluate`才追加全量。已有目录不能重复fresh运行；不修改最佳部署，不凭暗热图续训。配方、结果与限制见[本轮说明](../docs/AFFINITY_GT_SOURCE_20261004.md)。
+
+2026-10-03：`inference/affinity_interior_trace.yaml`和`inference/affinity_support_trace.yaml`仅用于冻结末态定位，入口分别`tools/probe_interior_trace.py --run`／`tools/probe_interior_support.py --run`。封存输入、私有目标和旧头按SHA固定，重算实际完整窗口；第二项还需核对control缓存与封存ZIP清单。两项已完成，不训练、不改GT，不替换正式推理配置；见[完整结果与下一步](../docs/AFFINITY_INTERIOR_TRACE_20261003.md)。
+
+2026-10-03：`train/affinity_interior_fit.yaml`是独立三源32更新诊断，继承`affinity_balance_mixed.yaml`，不替换正式部署。私有目标计划按SHA固定；入口`tools/probe_affinity_interior_fit.py --go32`才执行有限训练，默认仅查配方。两组均已完成并出现七源退步，不原样再跑、扩轮或出包；详见[结果与冻结定位方向](../docs/AFFINITY_INTERIOR_FIT_20261003.md)。产物仅在被忽略目录。
+
+2026-10-03最新：[镜像marker完整候选](../docs/AFFINITY_MARKER_TRIAL_20261003.md)复用R1 mixed balance e20及原49部署合同，独立入口`tools/run_marker_reflect.py`固定reflect32，仅改变WS种子，不叠加seams；不新增默认训练／推理配置。
+六源及100图完成，原控制全部exact；已交付`output/marker_trial/reflect1024.zip`（SHA前缀`c812fbf3`）。2026-10-03用户更正回分为0.8645／0.9006，等权88.255，刷新已记录最高；后续研究以reflect作已评分参照，默认配置未自动改动。47项CPU检查及远端／本地包契约通过。下方为历史记录。
+
+七源逐阶段CPU重放及独立汇总见`docs/AFFINITY_MARKER_STAGES_20261003.md`，入口`tools/probe_marker_stages.py`／`tools/analyze_marker_stages.py`。只复用已有连续图；原及reflect终态exact，不细化无新增完整目标修复且有安全副作用，未新增训练配置或修改部署默认。
+
+2026-10-03最新：[marker读出定位与镜像边框](../docs/AFFINITY_MARKER_PATH_20261003.md)完成CPU短测；独立入口只换WS种子，原R1及U／R32的32／64完整输出一致。R原匹配名单恢复，固定21面积不变，但原R1全图F数／平均面积有变化；先扩大多源检查，不新增正式训练／部署配置。31项CPU测试通过，下方为历史记录。
+
+2026-10-03最新：[弱界保留32步](../docs/AFFINITY_WEAK_RETAIN_20261003.md)两组完成：相同完整新GT＋局部监督，只改保留项0／1。复用R1 e20及原推理参数，没有新增正式训练／部署配置。
+目标弱界与上轮F-P退步修好，但均有另一已知FF相界损失，额外保留独立精度差很小；暂不扩20轮、黑盒或换默认。真实冻结／重载、14项CPU及完整终态检查通过。下方为历史记录。
+
+2026-10-03最新：[复制头32步短测](../docs/AFFINITY_WEAK_FIT_20261003.md)完成。复用R1 mixed balance e20，A原完整有效GT／B局部合法short，各32步；冻结D5a、encoder、LoRA和语义，最终重算全部12窗。
+本例两组均拆粘，B深部归属更完整但整图最终F→P增加；只支持现有特征在此例可学，不作为新部署或官方指标。无新正式配置／扩轮／黑盒，默认保持。下方为历史记录。
+
+2026-10-03最新：[弱晶界定位](../docs/AFFINITY_WEAK_PATH_20261003.md)完成，只使用原R1／coverage e20冻结配置，未新增或切换训练／部署配置。
+实际目标保留，原关系预测已弱；有标签输出纠正能分开主要区域，但带来侵入／小片风险。后续固定特征复制头32步检查已完成，见上方新记录。下方为历史记录。
+
+2026-10-03最新：`train/affinity_coverage.yaml`的独立20轮／1280更新及100图分析完成，旧R1未重训。
+必要资源已迁至`connect.bjb2.seetacloud.com:15930`的临时盘独立项目；配置仍使用原相对路径，未写入服务器绝对地址。
+共同3051个已见GT铁素体平均IoU0.900239→0.900120，466共同安全面积MAE2.930%→2.953%，固定弱界未分开；不足以支持扩轮或晋级。
+默认训练／部署配置不切换；本轮无新训练、黑盒包或平台提交。详见[覆盖结果](../docs/AFFINITY_COVERAGE_20261002.md)与[迁移记录](../docs/SERVER_MIGRATION_20261003.md)。下方为历史记录。
+
+2026-10-02回分：`inference/instance_seams.yaml`对应seams1024，用户转报0.8625／0.8786、平台总分87.05。
+候选ZIP SHA `a2a1c760…`与本地复核一致；两项显示值均分87.055，较原R1约＋0.040分，记录为最高单次成绩，不自动更换默认配置或裁窗实验对照。
+
+2026-10-02最新：新增`train/affinity_coverage.yaml`，继承`affinity_balance_mixed.yaml`。
+唯一训练变量为manual native选窗：每轮16旧随机／16合法九点；来源、新GT、增强、原初始化／损失与上游冻结保持。
+全部32源实际512格目标及真实8步GPU门禁通过；独立20轮／1280更新已用`tools/run_affinity_coverage.py --go20`启动，旧控制不重训。
+输出`outputs/affinity_coverage/candidate/`；保留固定缩略图和完整epoch边界状态，结束自动推理100图native1024。
+固定R1对照及默认配置不更换；详见[覆盖实验](../docs/AFFINITY_COVERAGE_20261002.md)。以下为历史记录。
+
+2026-10-02最新：[同相细零缝归属](../docs/AFFINITY_SEAMS_20261002.md)新增候选配置`inference/instance_seams.yaml`，
+继承`train/affinity_balance_mixed.yaml`并锁定R1 e20 SHA `43da103c…`及最高原ZIP `ac7533b5…`。
+`legacy_none`显式记录原归一化；只有`instance_seam_assignment`启用，无训练或默认配置更换。
+`tools/package_instance_seams.py`从原ZIP直接转换；`tools/probe_instance_seams.py`只CPU分析原32训练缓存。
+
+| 分析方案 | 结果 | 结论 |
+| --- | --- | --- |
+| 固定原467面积与完整匹配 | MAE2.928%→2.283%，共同F IoU＋0.004731 | 已见GT支持小机制验证，不重新筛分母或开启训练 |
+| 唯一预设规则／100图格式 | F5984固定、逐图均面积中位＋0.5950%；200文件位深／尺寸／类别／CRC／SHA通过 | 已回分见顶部；不按无标签均面积或小粒尾部调阈值 |
+
+原正像素／ID集合／类别文件保持，未证明拓扑全不变或语义学习；113粒面积增幅＞10%，尤其留意小粒。
+候选`output/affinity_seams/test/seams1024.zip`（SHA `a2a1c760…`）已获用户转报87.05；默认配置及原R1训练对照保持。
+36项CPU、父114／来源148／新GT／runtime与原467名单验真通过，弱界监督覆盖仅建议尚未执行。以下为历史记录。
+
+2026-10-02最新：[留缝／固定语义blur32](../docs/AFFINITY_FERRITE_BLUR_20261002.md)完整完成，没有新训练／推理配置。
+诊断只在局部D5a＋affinity入口施加固定原生σ1–4场，全图两路语义、模型、阈值／融合及后处理保持。
+六层clean重放和来源／新GT／冻结通过，454共同安全F面积MAE2.965%→3.098%，未支持直接开新空间模糊20轮。
+下一项仅建议可信GT界面监督分配审计，不重复旧界面增力、不压GT遗漏横线；当前尚未开新审计或训练。
+最高mixed balance87.015及所有已验证配置不变，无新包／黑盒；原32来源诊断详见专题及私有图册。
+
+2026-10-02最新：[正式1024铁素体检查](../docs/AFFINITY_FERRITE_20261002.md)完成全部32训练原图。
+没有新训练／推理配置，最高mixed balance e20的D5a、encoder／LoRA、两路语义、融合／阈值及后处理均未改。
+可靠一对一面积仅467粒、配对汇总收缩1.249%；确定一例完整FF粘连，固定多切例有GT漏分歧义。
+先拆ID0来源与正式尺度模糊连通性，不依据训练内类别良好或安全小子集推出黑盒病因，不直接加内部负权重。
+本轮不训练／打包／晋级，后续诊断仅建议；详见专题覆盖口径和回执。
+
+2026-10-02最新：[划分机制定位](../docs/AFFINITY_PARTITION_20261002.md)完成20组关系干预及两原图正式native1024补查。
+已有合法短关系能改变真实最终拆粘，但五预设中只有珠光体109误切在正式原图两组重现。
+未新增训练／推理配置，不叠加TAIL、不增权或扩轮，最高mixed balance87.015仍保持；后续监督候选先核实空间覆盖。
+
+2026-10-02最新：[TAIL单变量采样](../docs/AFFINITY_TAIL_20261002.md)：`train/affinity_tail.yaml`继承旧FUSED，
+仅新增`affinity_tail_ranking_v1`与`tail_rank_stratified_v1`，改输出目录为`outputs/affinity_tail/`。
+完整10%尾池内按预设等距响应秩取最多256点，其余lambda／margin、新GT、图序、初始化与gated不变。
+入口`tools/run_affinity_tail.py --queue`；不重训旧控制或旧FUSED，不继承旧fused权重。
+41项CPU及8步GPU门禁通过，148源封存、正式e20／1280及100图已完成；续训状态和108固定过程图齐全。
+完整新GT四draw匹配393不变、共同389平均IoU−0.003775，保守误切7→8；100图分布较旧FUSED收敛，但未证明更准。
+新增8项CPU及只读GPU最终划分诊断通过，旧源码／冻结／控制输出保持；暂缓TAIL黑盒、续训与增权，不改训练或部署配置。
+short1024回分0.8623／0.8691（86.570），不晋级；默认最佳仍mixed balance87.015。以下为历史阶段。
+
+2026-10-02：[新GT融合排序](../docs/AFFINITY_FUSION_TARGET_20261002.md)e20／1280及完整100图分析完成，暂缓黑盒。
+新增`train/affinity_fused.yaml`继承mixed balance；仅登记人工源附加排序0.1，其余初始化、来源、
+混合视野和gated部署不变。使用处理后的radius8完整新GT已知区域，包含补缝，未知区忽略。
+入口`tools/run_affinity_fused.py --queue`，8步门禁后原初态独立20轮；原控制不重训，默认最佳配置不改。
+四draw完整匹配393不变、保守误切7→10；全100汇总铁素体均面积−4.117%。
+实际内部top256仅约0.163%尾端，不因动态loss仍活跃扩轮或加权重；下一项仅建议代表性尾部取样。
+
+2026-10-02最新：[short全100图对照](../docs/AFFINITY_SHORT_20261002.md)已完成，无新训练或默认配置改动。
+独立`tools/run_affinity_short.py`读取已评分mixed balance e20的实际config，只临时将
+`affinity_deployment.fusion_mode`由gated改short，逐键断言其余不变。两源控制最终输出／语义门禁通过。
+138来源与模型不变，全100候选通过输出验收，建议单独黑盒，不改最高分配置或开启Cshort。
+分析后单独候选包`output/affinity_short/short1024.zip`，未提交平台或晋级；详见专题身份／分布风险。
+
+2026-10-02最新：[距离／融合诊断](../docs/AFFINITY_DISTANCE_20261002.md)没有新增训练或部署配置。
+独立`tools/run_affinity_distance_diagnostic.py`只读复用mixed balance e20，160融合／128梯度／4图终态完成；
+共享梯度不支持现在开Cshort。四图仅临时改变fusion mode为short，其余全固定，旧gated终态精确复现。
+共同IoU改善但铁素体匹配未增加、预测略增，优先建议固定short全100图风险检查，本轮尚未执行。
+最高分配置与134封存来源未改，不自动训练／提交／晋级。
+
+2026-10-02最新：`train/affinity_source_p100.yaml`继承mixed balance，仅β0.5→1，
+实际人工／SAM2 0.75／0.75。独立`train_affinity_p100.py`复用封存逻辑，不放宽旧P025白名单。
+73项新CPU、独立复核、服务器self-test及八步GPU放行通过；旧控制只读复现／回执复用。
+正式e20／1280更新、100图与完整分析均完成，来源／配对／冻结／重载通过；
+等召回误边界增加、GT新增误切，P100暂缓黑盒，停止β密扫、不自动扩轮或出包。
+新根`outputs/affinity_p100/`，最高mixed balance保持不变。详见[P100结果](../docs/AFFINITY_P100_20261002.md)。
+
+2026-10-02最新：`train/affinity_source_p025.yaml`对应的中断恢复已经完成e20／1280更新、
+100图及完整分析，原20轮日程、122来源、冻结与抽样不变，控制没有重训。
+专用恢复入口`tools/resume_affinity_source.py`的CPU7项与GPU单步短测通过，独立输出
+`outputs/affinity_source_resume/p025/`；小幅等召回改善未形成充分新增纠错，暂不打包／晋级。
+P100 β1、实际人工／SAM2 0.75／0.75仅规划，现入口白名单不接受β1，后续须独立实现并短测；
+未启动新组或密扫β。详见[来源实验](../docs/AFFINITY_SOURCE_20261001.md)。
+
+2026-10-01最新：`train/affinity_source_p025.yaml`继承mixed balance，唯一来源比β0.5→0.25。
+新`train_affinity_source.py`按α=1.5/(1+β)缩放反传，实际人工／SAM2为1.2／0.3，原BCE日志不缩放。
+r1／h1／gamma2、原初态、抽样、冻结及最终部署保持；36项CPU、GPU各8步、控制最终输出与有界兼容通过。
+`tools/run_affinity_source.py`绑定122份来源，保留旧119份；正式P025 20轮／1280更新已启动PID46561。
+β0.5仅8步技术兼容，禁止完整控制重训；结束自动100图1024对照，不自动打包／提交。
+H0训练／推理／分析已完成，未见充分新增纠错，暂不占黑盒；融合正式86.850低于最高87.015，
+N075／N125继续暂缓、最佳不变。见[来源比例实验](../docs/AFFINITY_SOURCE_20261001.md)。
+
+2026-10-01最新：`train/affinity_sweep_n075.yaml`／`train/affinity_sweep_n125.yaml`继承mixed balance，
+唯一训练变量r=0.75／1.25；新`train_affinity_sweep.py`严格白名单核验控制和共同初态。
+`tools/run_affinity_sweep.py --smoke`两组各8更新、已有完整输出精确复现及保存／重载／过程图检查通过，
+正式同入口各20轮／1280更新及各100图原生1024推理均完成；旧控制不重训。
+输出`outputs/affinity_sweep/`；116份实际服务器代码配置、第三方SAM2代码／配置／环境与smoke绑定。
+冻结／配对／重载／monitor通过；没有新官方成绩，不自动展开h／β或提交。
+默认部署与暂缓融合包保持；见[执行与分析](../docs/AFFINITY_SWEEP_20261001.md)。
+
+2026-10-01最新：[生效参数与监督扫参](../docs/AFFINITY_SWEEP_20261001.md)明确实际读取的loss节与继承但未启用字段。
+用户暂缓融合包，当前配置与最高分部署不改。先建议r=0.75／1.25，后续条件h=0／2、SAM2来源比β=0.25／1；
+β组需新归一化入口，`pseudo_negative_weight`正数常量被现有分母抵消，不作连续扫参。
+现balance入口仅支持r=1复现；首批候选使用专用sweep入口，不直接套旧入口。
+
+2026-10-01最新：`inference/affinity_balance_fusion.yaml`继承当前mixed balance完整部署，
+显式注册native／mixed两e20 SHA，仅将同1024视野的连续边界按50/50融合。
+`tools/probe_affinity_balance_fusion.py --mode probe`完成12源精确端点核验，14项CPU测试通过；
+两头参数分别计入，总90,621,069。内部`--mode full --full-ok`的100图已完成，端点／冻结／源码核验通过。
+唯一包`output/balance_fusion/balance_fusion.zip`（SHA `0f88f206…`）完整验收通过，尚无正式回分。
+固定D5a／语义／encoder／LoRA／融合阈值／后处理，通用默认未改，无新训练或比例扫描。
+身份、局部取舍与正式状态见[融合记录](../docs/AFFINITY_BALANCE_FUSION_20261001.md)。
+
+2026-10-01最新：`train/affinity_pair.yaml`继承mixed balance，仅新增同源互补视野0.25辅助监督。
+正式20轮／1280更新与e20原生1024全100图输出完成，输出`outputs/affinity_pair/`。
+主序列、共同原初态、优化器、D5a、冻结SAM2／LoRA、语义和后处理固定，已有20轮控制不重训。
+36张过程图及完整性通过，主损失仅降0.255%，四张已见GT的589个配对保持同一批，完整输出近似mixed。
+用户回分0.8629／0.8760（86.945），比mixed balance低0.070；不续训或晋级。
+下一项仅建议固定新native／mixed balance同视野连续边界50/50融合，小诊断通过再出包，尚未实现。
+具体身份、数值兼容及结束分析见
+[实验记录](../docs/AFFINITY_PAIR_20261001.md)，当前通用部署默认不变。
+
+2026-10-01最新：`train/affinity_balance_mixed.yaml`对应mixed e20＋原生1024官方用户回分
+**0.8629／0.8774（87.015）**，成为已记录综合及面积项最高分包；native balance仍保留mIoU最高。
+用户提醒+0.170分未必可靠，两组为近邻对照，不因这点差距认定混合采样稳定优于纯局部。
+显式使用`outputs/affinity_balance/mixed/final.pt`（SHA256 `43da103c…`）和`--views 1024`，
+旧D5a／语义／LoRA／完整后处理固定；通用默认配置不变。交付ZIP `ac7533b5…`重新核验一致。
+以下保留早期状态，最新完整身份以[实验记录](../docs/AFFINITY_BALANCE_20260930.md)文末为准。
+
+`train/affinity_balance_native.yaml`／`train/affinity_balance_mixed.yaml`分别继承原纯1024／混合配置，
+唯一loss改动`negative_weight: 1.0`（控制1.5），完整候选配置保存在checkpoint中。
+入口`tools/run_affinity_balance.py --smoke`后正式执行同入口；两组独立同初态，各20轮／1280更新，
+已有控制不重训。本地19项及GPU两组各8更新短测通过，两组正式20轮与全量推理完成；输出`outputs/affinity_balance/{native,mixed}/`。
+实际输入源、裁窗、增强及视野逐步对齐各自旧控制，冻结／重载与216张过程图通过核验。
+分析`tools/analyze_affinity_balance.py`显示内部连接提高但真分界下降；native原生候选随后正式回分
+0.8639／0.8730（86.845），比旧p1024+1.105分、比旧全图control+0.610分，晋级当前研究对照。
+显式用本native配置＋`outputs/affinity_balance/native/final.pt`固定e20＋原生1024推理，
+旧D5a、语义与完整后处理固定；mixed balance尚无回分，旧全图control留作回退。
+mixed balance e20＋原生1024包已交付`output/balance_analysis/mixedbalance1024.zip`，
+ZIP SHA256 `ac7533b529a35ce98a94ac8b2822d9f7543ea015762c15343b62dd3207fa3c77`。
+它是上述mixed配置的1.0权重候选，与原loss mixed包不同，不直接替换native最佳。
+详见[实验记录](../docs/AFFINITY_BALANCE_20260930.md)，不从旧e20续训、不改默认部署。
+
+`train/affinity_mixed.yaml`继承`affinity_native.yaml`，唯一训练变化为全图／原生1024各50%的视野配方。
+入口`tools/run_affinity_mixed.py`，复用原control初始化与已完成控制输出，只训练affinity头20轮／1280更新。
+每轮精确32次全图和32次局部，同步两种监督来源的视野，源图和增强回执继续与control核对。
+损失、旧D5a、语义、LoRA及后处理不变；正式20轮及两套100图已完成，冻结、配对、源码和重载通过。
+输出`outputs/affinity_mixed/`，108张过程图完整；分析入口`tools/analyze_affinity_mixed.py`。
+混合原生比p1024预测铁素体数+2.76%、均面积变化中位−2.02%，4张已见GT仅多1个有效匹配，未证明净收益。
+2026-10-01原loss mixed1024回分0.8582／0.8536（85.590），比p1024综合低0.150分；不晋级，勿与惩罚组混淆。
+详见[实验记录](../docs/AFFINITY_MIXED_20260930.md)，不自动出包或晋级。
+
+`train/restore_native.yaml`继承旧D5a配方，只训练新恢复器；A原生1024，B原生1024／512各50%，
+网络输入均1024。同一份随机初态，1000源无留出、有效batch4、各20轮／5000更新，保留60轮学习率日程。
+原生模糊／降采样／局部任务先于配对放大，明确记录两个像素尺度；不继承旧恢复器权重。
+入口`tools/run_restore_native.py`，输出`outputs/restore_native/`，两组已续至40轮／10000更新及100图对照，隔离通过。
+A的1024合成去模糊、B的512保真改善，真实输入作用偏弱，尚无最终分割增益；各160张过程图保留。
+用户授权的20→40续训已完成：`tools/continue_restore_native.py --stop 40`，原配置／60轮日程不变，
+e20备份424文件及e40状态通过复核；下一轮预设lr=0.0000515，未启动60轮或新含噪配方。
+只替换局部affinity路径恢复器，主检查固定p1024 e20、全图语义仍使用旧D5a；不改默认部署。
+实施、续训命令与结果边界见[实验记录](../docs/RESTORE_NATIVE_20260930.md)。
+
 `train/affinity_native.yaml`继承`affinity_connectivity.yaml`，只新增原生裁块选项和输出根目录。
 入口`tools/run_affinity_native.py`先`--smoke`，通过后顺序训练1024／512，每组20轮／1280更新，
 分别从旧control的原初始化出发；旧全图control直接复用。两组已完成，配对／冻结／重载通过。
 仅affinity decoder训练，原32人工／64 SAM2、退化、D5a、语义与后处理不变；
 过程图和各自全图／本尺度局部及control局部的6套100图对照全部完成。
 分析入口`tools/analyze_affinity_native.py`，私有图册`output/native_analysis/index.html`。
-优先建议1024权重配1024原生推理作黑盒候选；不替换旧全图入口权重、不改默认配置。
+用户回报1024权重配原生1024为0.8580／0.8568（85.740）、512配原生512为0.8534／0.8130（83.320）；
+综合均未超过control的86.235，不替换旧全图入口权重、不改默认配置。
+旧control原生1024随后回分0.8551／0.8217（83.840），p1024同入口高1.900，支持当前尺度适配训练收益；
+仍保留旧control全图综合最佳。[完整对照与独立复核](../docs/AFFINITY_NATIVE_REVIEW_20260930.md)。
 输出`outputs/affinity_native/`，详见[实验记录](../docs/AFFINITY_NATIVE_20260928.md)。
 
 `experiments/affinity_patch.yaml`固定最高分control e20、D5a e60，做原生1024／512、raw／D5a

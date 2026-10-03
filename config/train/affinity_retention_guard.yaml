@@ -1,0 +1,18 @@
+# -*- coding: utf-8 -*-
+# 唯一变量：独立增加processed-known高置信负关系KL；旧各项/归一保持。旧connect s32直接复用。
+_base: affinity_interior_fit.yaml
+affinity_retention_guard:
+  format: affinity_retention_guard_v1
+  output_dir: outputs/retention_guard
+  previous_fit: outputs/interior_fit/report.json
+  previous_fit_sha256: d4c37e300901e2430b94a857cdde43bf9331d469ce76f4aa88f7f80e7f1dd885
+  previous_head: outputs/interior_fit/connect/head_s32.pt
+  previous_head_sha256: 7ac58657be2d12c73467528ba71e51033dcc2ef9d3ca9e9f004e3473e21bcf42
+  previous_steps: outputs/interior_fit/connect/steps.jsonl
+  previous_steps_sha256: f7c6cbe0b792a550ef4c70e6beb8025345a29263c4fe9affc84980d72bb26bce
+  retention_objective: old_plus_added_kl
+  actual_gate_requires_nonzero_added_parameter_gradient: true
+  training_sources: original_three
+  formal_requires_explicit_go: true
+  added_retention_weight: 1.0
+  loss_contract: retention_guard_loss_v1
