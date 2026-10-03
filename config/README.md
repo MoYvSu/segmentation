@@ -1,6 +1,6 @@
 # 配置目录
 
-2026-10-04：`train/semantic_object_fit.yaml`用于实际raw末端区域均值A64／B64，默认CLI仅校验计划；39项CPU与40缓存严格复现通过。两次JSON序列化兼容阻塞均为0优化，仅修序列化、配置SHA与配方不变。PID66251以`tools/probe_semantic_object_fit.py --go64 --recover-capture`严格恢复缓存、encoder调用0次，梯度／s0门禁通过，已只读核验A组真实参数更新；A64／B64顺次排队，B另过首步门禁，当前不称B已开始或训练完成，不监控。`--resume`仅用于已有优化状态；本地启动回执`output/semantic_object_init/startup.json`。固定上游与PNG，不恢复伪几何训练或晋级；见[本轮入口与门禁](../docs/SEMANTIC_OBJECT_FIT_20261004.md)。
+2026-10-04：`train/semantic_object_fit.yaml`的raw末端A64/B64现均已完成；默认CLI只查计划，不fresh覆盖已完成目录，`--resume`仅用于未完成优化状态。32源各两遍、相同初始化／特征／共同GT，B增区域均值BCE0.5；固定PNG和40源strict重载／BN／上游／源码输入通过。182区域GT分歧64/49/25，固定4918匹配错类1/1/3；B小片GT一致改善不等于真实物相或比赛提升。八测试F数532→636、聚合均面积−16.19%，暂无新官方分数。暂不扩训／全量／黑盒或晋级，下一raw尺度读出建议未执行。详见[终态分析、标签粒度与权重SHA](../docs/SEMANTIC_OBJECT_FIT_20261004.md)。
 
 2026-10-04后续：`train/affinity_retention_guard.yaml`继承原interior_fit，新增独立负关系KL，原connect控制／损失不改。`tools/probe_affinity_retention_guard.py --go32`32更新完成，一例外围恢复但固定689F／135面积整体仍退步，不扩训或出包。93项CPU、实际梯度／冻结／strict通过，续训状态与s32头保留。`inference/semantic_raw_stress.yaml`与继承它的`semantic_acquisition.yaml`分别完成只读原图S-align光度／原生局部模糊检查，各四固定源21前向，原标整对象均未错相；强模糊仅局部像素错误增加，不据此声称测试饱和或开同项训练。详见[外围保护](../docs/AFFINITY_RETENTION_GUARD_20261004.md)、[光度压力](../docs/SEMANTIC_RAW_STRESS_20261004.md)与[采集模糊](../docs/SEMANTIC_ACQUISITION_20261004.md)。
 

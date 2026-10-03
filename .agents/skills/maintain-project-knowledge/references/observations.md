@@ -3,6 +3,22 @@
 This file holds potentially reusable findings that still need validation or
 scope clarification. It is not a chronological task log.
 
+## 20261004-semantic-region-label-granularity
+
+- status: observation
+- last_verified: 2026-10-04
+- scope: 当前raw／S-align末端、冻结几何与特征，同32已见源的原目标／附加预测区域均值监督，各64更新。
+- finding: 父GT类别与覆盖都一致，并不保证其内部细分预测区域的物理相被单独标注。
+  两处亮岛完全位于原始P多边形，原始F多边形重叠为0，处理后original覆盖逐值复现；更符合父P类别不能直接称物相纠错。
+  同初态／输入的新增目标确实可学，但只改善小片时能同时牵动F平均面积，不能因GT分歧减少就扩大训练。
+- evidence: `docs/SEMANTIC_OBJECT_FIT_20261004.md`；182区域GT分歧A49／B25，B多26符合GT、另退2；
+  B原目标同源第二遍升6.18%、区域项降42.45%，固定4918匹配错1→3；8测试仅小片改类，F数532→636、聚合均面积−16.19%。
+  私有原标逐多边形查证、相同PNG及完整复核在`output/semantic_object_analysis/`。
+- reuse_hypothesis: 区分GT一致性、完整实例语义与真实局部物相；检查父标注粒度和原处理来源，保护旧正确对象，
+  同时报告小F数量及面积组成。不要把源coverage或记录类纯度当作局部物相确定性，不用测试外观补标签。
+- verification_gap: 当前仅已见图、短预算、两个原标例和八无标签测试源，无官方增益或泛化证据；
+  不能断言亮岛一定为F、GT普遍错误、训练已饱和或所有区域监督无效。不晋升全局规则，不改GT。
+
 ## 20261001-cuda-repeatability-gate
 
 - status: observation
