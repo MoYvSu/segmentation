@@ -1,0 +1,9 @@
+# -*- coding: utf-8 -*-
+# 原图全图语义一次前向，只观察既有coarse与RGB高分辨率修正的贡献。
+_base: semantic_native.yaml
+semantic_components:
+  format: semantic_components_probe_v1
+  output_dir: outputs/semantic_parts
+  routes: [full, coarse]
+  correction_version: highres_v1
+  correction_limit: 2.0

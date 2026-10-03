@@ -1,0 +1,24 @@
+# -*- coding: utf-8 -*-
+# 只替换固定实例的末端 raw/S-align 分类视野；不训练、不重算几何。
+_base: ../train/affinity_balance_mixed.yaml
+semantic_native:
+  format: semantic_native_probe_v1
+  output_dir: outputs/semantic_native
+  checkpoint: outputs/affinity_balance/mixed/final.pt
+  checkpoint_sha256: 43da103c95c7f85149bd0533fd116d26f0a81c91d793db7e8938b7d4ae80e434
+  checkpoint_epoch: 20
+  expected_manual_sources: 32
+  train_sources: [train_001, train_173, train_558, train_889]
+  test_sources: [test_101, test_084, test_116, test_146]
+  reference_inputs: outputs/semantic_reflect_cache/inputs.json
+  reference_rows: outputs/semantic_reflect/rows.json
+  reference_report: outputs/semantic_reflect/report.json
+  routes: [whole, native1024, native512]
+  network_size: 1024
+  native_sizes: [1024, 512]
+  overlap: 0.25
+  minimum_axis_weight: 0.001
+  minimum_native_area: 10000
+  core_fraction: 0.4
+  core_min_pixels: 8
+  thumbnail_width: 320
