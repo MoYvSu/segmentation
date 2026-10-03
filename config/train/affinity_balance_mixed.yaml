@@ -1,0 +1,12 @@
+# -*- coding: utf-8 -*-
+# 同一权重改动，原全图/1024视野表、图序与增强全部复用。
+_base: affinity_mixed.yaml
+backend_adaptation:
+  output_dir: outputs/affinity_balance/mixed
+direct_semantic_affinity:
+  affinity_loss:
+    negative_weight: 1.0
+affinity_native:
+  penalty_sampling: mixed
+  penalty_reference: outputs/affinity_mixed/candidate
+  penalty_sha256: f047f70823df16ddd361231fd3499e5a703e9300e049bf66c8e7b82f1fc220f7

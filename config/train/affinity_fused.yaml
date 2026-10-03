@@ -1,0 +1,17 @@
+# -*- coding: utf-8 -*-
+# 复用mixed balance新GT与原初始化，仅增加实际gated边界的排序监督。
+_base: affinity_balance_mixed.yaml
+backend_adaptation:
+  output_dir: outputs/affinity_fused
+affinity_fused:
+  format: affinity_fused_ranking_v1
+  reference: outputs/affinity_balance/mixed
+  reference_sha256: 43da103c95c7f85149bd0533fd116d26f0a81c91d793db7e8938b7d4ae80e434
+  gt_npz_cohort_sha256: e7e34544fbb792c0e300d086689d28739882edd4b7aecd847f9e07499b49fe06
+  gt_class_cohort_sha256: 1905ee57eec60c930fb75a5c1a8a605816a682262fa88e2c979d9a4fb87ce020
+  weight: 0.10
+  margin: 0.10
+  tail_fraction: 0.10
+  max_per_group: 256
+  support_radius: 4
+  manual_only: true

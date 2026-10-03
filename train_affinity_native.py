@@ -100,12 +100,14 @@ def audit_control(config, output):
                control_initial_state=prior['initial_state_sha256']))
 
 
-def train(config, size, output, smoke=False):
+def train(config, size, output, smoke=False, *, dataset_builder=None, control_verifier=None,
+          keep_smoke_checkpoint=False, checkpoint_extras=None, monitor_saver=None):
     if not torch.cuda.is_available():
         raise RuntimeError('Use GPU server sam2_env')
     torch.set_num_threads(4)
     cv2.setNumThreads(2)
     cfg, opt = config['backend_adaptation'], config['affinity_native']
+    monitor = monitor_saver or save_monitor
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
     if cfg['num_workers'] != 0:
@@ -117,7 +119,7 @@ def train(config, size, output, smoke=False):
     total = sum(p.numel() for p in model.parameters()) + sum(p.numel() for p in restorer.parameters())
     if total >= 500_000_000:
         raise RuntimeError('Model parameter limit exceeded')
-    manual, pseudo, data = build_datasets(config, size)
+    manual, pseudo, data = (dataset_builder or build_datasets)(config, size)
     initial_head = tensor_digest(model.affinity_decoder.state_dict().items())
     status = dict(status='preflight', size=size, smoke=smoke, config=config, initialization=initialization,
                   initial_state_sha256=tensor_digest(model.state_dict().items()),
@@ -126,7 +128,7 @@ def train(config, size, output, smoke=False):
                   data=data, total_parameters=total, precision='FP32',
                   selection='fixed_e20_all_sources_no_holdout', official_score=None)
     write_json(output/'status.json', status)
-    _, reference = verify_control(config, status)
+    _, reference = (control_verifier or verify_control)(config, status)
     status['reused_control_verified'] = True
     status['initial_parity'] = initial_parity(model, restorer, config, device)
     configure_training(model)
@@ -134,7 +136,7 @@ def train(config, size, output, smoke=False):
                                  lr=cfg['learning_rates']['affinity'], weight_decay=cfg['weight_decay'], eps=1e-4)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda e: cfg['minimum_lr_ratio'] +
         (1-cfg['minimum_lr_ratio'])*(1+math.cos(math.pi*e/cfg['epochs']))/2)
-    save_monitor(model, restorer, config, device, output, 0, size, smoke=smoke)
+    monitor(model, restorer, config, device, output, 0, size, smoke=smoke)
     status['status'] = 'running'
     write_json(output/'status.json', status)
     loss_cfg = config['direct_semantic_affinity']['affinity_loss']
@@ -157,6 +159,10 @@ def train(config, size, output, smoke=False):
                        manual_draw=draw_receipt(raw), pseudo_draw=draw_receipt(raw_pseudo),
                        manual_crop=raw['crop_box'].tolist(), pseudo_crop=raw_pseudo['crop_box'].tolist(),
                        crop_attempts=[raw['crop_attempt'].tolist(), raw_pseudo['crop_attempt'].tolist()])
+            if 'training_view' in raw:
+                if raw['training_view'] != raw_pseudo['training_view']:
+                    raise RuntimeError('Manual and pseudo training views differ within an update')
+                row['training_view'] = raw['training_view'][0]
             compare_draw(row, reference[updates])
             optimizer.zero_grad(set_to_none=True)
             losses, supervision = [], []
@@ -197,11 +203,16 @@ def train(config, size, output, smoke=False):
         checkpoint = dict(format='affinity_native_head_v1', epoch=epoch, size=size,
                           geometry_state_dict=model.affinity_decoder.state_dict(), config=config,
                           initialization=initialization, optimizer=optimizer.state_dict(), scheduler=scheduler.state_dict())
+        if checkpoint_extras is not None:
+            extra = checkpoint_extras(epoch)
+            if not isinstance(extra, dict) or set(extra).intersection(checkpoint):
+                raise ValueError('Checkpoint extras must be a dict without reserved keys')
+            checkpoint.update(extra)
         torch.save(checkpoint, output/'last_head.pt')
         if epoch % 5 == 0:
             torch.save({k:v for k,v in checkpoint.items() if k not in ('optimizer','scheduler')}, output/f'head_{epoch:03d}.pt')
         if epoch == 1 or epoch % cfg['monitor']['every_epochs'] == 0 or epoch == epochs:
-            save_monitor(model, restorer, config, device, output, epoch, size, smoke=smoke)
+            monitor(model, restorer, config, device, output, epoch, size, smoke=smoke)
         status.update(status='running', **epoch_row)
         write_json(output/'status.json', status)
         print(json.dumps(dict(size=size, **epoch_row)), flush=True)
@@ -225,7 +236,7 @@ def train(config, size, output, smoke=False):
                   final_checkpoint_sha256=sha(output/'final.pt'))
     write_json(output/'status.json', status)
     print(f'COMPLETE native {size}, {updates} updates', flush=True)
-    if smoke:
+    if smoke and not keep_smoke_checkpoint:
         del reloaded
         (output/'final.pt').unlink()
 

@@ -1,0 +1,10 @@
+# -*- coding: utf-8 -*-
+# 固定mixed balance，唯一变量是SAM2/人工来源比beta：.5→.25。
+# 新包装器按1.5/(1+beta)缩放反传，实际系数由1/.5变为1.2/.3；原BCE日志不缩放。
+_base: affinity_balance_mixed.yaml
+backend_adaptation:
+  output_dir: outputs/affinity_source/p025
+  pseudo_weight: 0.25
+affinity_source:
+  reference: outputs/affinity_balance/mixed
+  reference_sha256: 43da103c95c7f85149bd0533fd116d26f0a81c91d793db7e8938b7d4ae80e434

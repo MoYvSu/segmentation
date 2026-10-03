@@ -1,0 +1,11 @@
+# -*- coding: utf-8 -*-
+# 固定mixed balance采样、初态和预算，仅降低异实例断开关系的相对监督权重。
+_base: affinity_balance_mixed.yaml
+backend_adaptation:
+  output_dir: outputs/affinity_sweep/n075
+direct_semantic_affinity:
+  affinity_loss:
+    negative_weight: 0.75
+affinity_sweep:
+  reference: outputs/affinity_balance/mixed
+  reference_sha256: 43da103c95c7f85149bd0533fd116d26f0a81c91d793db7e8938b7d4ae80e434

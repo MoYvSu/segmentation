@@ -1,0 +1,28 @@
+# -*- coding: utf-8 -*-
+# 固定R1 e20的小步多源几何学习；逐图目标只读取私有计划，不改GT。
+_base: affinity_balance_mixed.yaml
+affinity_interior_fit:
+  format: affinity_interior_fit_v1
+  output_dir: outputs/interior_fit
+  plan: outputs/interior_plan/plan.json
+  plan_sha256: 5b216d9457a4c78e55333358a937d151df2cbbb5db7cfe5a4eef8beefef0ab11
+  structure: outputs/geometry_structure/report.json
+  structure_sha256: fa5273b273abb808bb663c756b80dcbf4d7dc75674ffdc8c8f2084fbadcbb639
+  representation: outputs/geometry_interior/report.json
+  representation_sha256: ce2835bf699c2c3ee0c035424141d89b8381ab852468aefafdd004104eabc18e
+  receipt: outputs/affinity_weak/capture.json
+  stage: outputs/marker_stages/report.json
+  steps: 32
+  accumulation: 3
+  learning_rate: 0.00002
+  adam_eps: 0.0001
+  full_weight: 1.0
+  outer_weight: 0.5
+  retention_weight: 1.0
+  local_weight: 0.25
+  interior_margin: 4
+  activity_threshold: 0.45
+  retention_confidence: 0.9
+  snapshots: [0, 8, 16, 32]
+  seed: 20261003
+  formal_requires_explicit_go: true

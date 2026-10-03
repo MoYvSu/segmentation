@@ -1,0 +1,19 @@
+# -*- coding: utf-8 -*-
+# 只改变人工原生坐标；全部来源、增强、R1损失、共同初始化及预算固定。
+_base: affinity_balance_mixed.yaml
+backend_adaptation:
+  output_dir: outputs/affinity_coverage
+affinity_coverage:
+  format: affinity_coverage_v1
+  reference: outputs/affinity_balance/mixed
+  reference_sha256: 43da103c95c7f85149bd0533fd116d26f0a81c91d793db7e8938b7d4ae80e434
+  trial_root: outputs/affinity_crop_trial
+  trial_sha256: 9a207cc9bd8953eb0d807c288c059a1aff951a06fd26c0a1507a163b4d56178b
+  metadata_sha256: 33dd94a24ad720d9e52edaa83facf39733210593b9770b0d290a8978ec6c3b07
+  seed: 20271002
+  flag_namespace: 4103
+  anchor_namespace: 4109
+  per_epoch_old_uniform: 16
+  per_epoch_anchor: 16
+  manual_native_only: true
+  formal_requires_explicit_go: true

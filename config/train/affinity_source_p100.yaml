@@ -1,0 +1,10 @@
+# -*- coding: utf-8 -*-
+# 唯一变量SAM2/人工来源比beta：.5→1；实际系数1/.5→.75/.75。
+# 原初态、数据/裁块/增强/混合视野、20轮1280更新与部署链完全复用。
+_base: affinity_balance_mixed.yaml
+backend_adaptation:
+  output_dir: outputs/affinity_p100/p100
+  pseudo_weight: 1.0
+affinity_source:
+  reference: outputs/affinity_balance/mixed
+  reference_sha256: 43da103c95c7f85149bd0533fd116d26f0a81c91d793db7e8938b7d4ae80e434

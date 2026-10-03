@@ -1,0 +1,8 @@
+# -*- coding: utf-8 -*-
+# 相对已完成fused组，仅将极端top256改为完整10%尾部的等距响应秩采样。
+_base: affinity_fused.yaml
+backend_adaptation:
+  output_dir: outputs/affinity_tail
+affinity_fused:
+  format: affinity_tail_ranking_v1
+  sampling: tail_rank_stratified_v1

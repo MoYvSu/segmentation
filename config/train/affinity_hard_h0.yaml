@@ -1,0 +1,11 @@
+# -*- coding: utf-8 -*-
+# 复用mixed balance的初态、采样和预算；唯一训练变量是关闭困难异实例关系重加权。
+_base: affinity_balance_mixed.yaml
+backend_adaptation:
+  output_dir: outputs/affinity_hard/h0
+direct_semantic_affinity:
+  affinity_loss:
+    hard_negative_weight: 0.0
+affinity_hard:
+  reference: outputs/affinity_balance/mixed
+  reference_sha256: 43da103c95c7f85149bd0533fd116d26f0a81c91d793db7e8938b7d4ae80e434

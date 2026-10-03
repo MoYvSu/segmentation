@@ -1,0 +1,9 @@
+# -*- coding: utf-8 -*-
+# 只改变affinity适配的视野分布；每轮32次全图、32次原生1024，同预算复用两套控制。
+_base: affinity_native.yaml
+backend_adaptation:
+  output_dir: outputs/affinity_mixed
+affinity_native:
+  mixed_view_seed: 20260930
+  reused_native: outputs/affinity_native/p1024
+  native_sha256: b750a3da2e93195bfa1f220aa1873ac7e85fe6ab34302afc614959fb0e583fca
