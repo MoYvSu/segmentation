@@ -2,10 +2,15 @@
 
 2026-10-04：`train/semantic_grain_view.yaml`预检已完成32源64窗，整对象类别无错，21个有效像素信号全为P。
 默认入口`tools/probe_semantic_grain_view.py`只列计划，`--preflight --all-sources`显式执行。
-独立`train/semantic_grain_fit.yaml`用于一次有限64更新机制短测：从原R1开始，whole／完整GT裁窗共同目标等权；
+独立`train/semantic_grain_fit.yaml`的一次有限64更新机制短测已完成：从原R1开始，whole／完整GT裁窗共同目标等权；
 旧A64只读复用。`tools/fit_semantic_grain_view.py`默认仅列计划，先独立`--smoke`2更新，再fresh `--go64`。
-smoke只评固定8整图／8训练裁窗，正式末态固定40整图／64训练裁窗及严格重载，均无100图推理或自动晋级。
-源位、裁窗配方、编码缓存及监督来源绑定，执行状态和局限见[本轮说明](../docs/SEMANTIC_GRAIN_20261004.md)。
+smoke只评固定8整图／8训练裁窗，正式末态固定40整图／64训练裁窗及严格重载均通过，无100图推理或自动晋级。
+裁窗局部P错误明显下降，但整图P回退、测试只改变小片且小F组成增加；不原样扩训，默认部署不变。
+用户随后授权单独一版固定s64＋reflect原100PNG的评分对照；验收结果以专题追加记录为准，不改训练配方或选epoch。
+`inference/semantic_grain_submission.yaml`及`tools/package_semantic_grain.py`已通过固定八图GPU精确验收；
+默认只列计划，`--run --limit 8`验收，`--run`才完整100图。该工具只产出内部结果及兼容ZIP；
+按10月4日新格式，正式复赛包还必须封装`results/`及完整`code_model/`。当前100图／独立工程均未完成。
+已完成目录不fresh覆盖；源位、裁窗配方、编码缓存及监督来源绑定，结果和局限见[本轮说明](../docs/SEMANTIC_GRAIN_20261004.md)。
 
 2026-10-04：`train/semantic_object_fit.yaml`的raw末端A64/B64现均已完成；默认CLI只查计划，不fresh覆盖已完成目录，`--resume`仅用于未完成优化状态。32源各两遍、相同初始化／特征／共同GT，B增区域均值BCE0.5；固定PNG和40源strict重载／BN／上游／源码输入通过。182区域GT分歧64/49/25，固定4918匹配错类1/1/3；B小片GT一致改善不等于真实物相或比赛提升。八测试F数532→636、聚合均面积−16.19%，暂无新官方分数。暂不扩训／全量／黑盒或晋级；后续`inference/semantic_native.yaml`完成冻结309前向，只改类小片；继承它的`inference/semantic_components.yaml`完成9前向与原输出精确回放，当前修正减少34.3031%记录GT像素分歧，保留支路。两工具默认仅列计划、显式`--run`才执行，要求fresh忽略目录；当前不训练、不改最佳。结果见[尺度与分支检查](../docs/SEMANTIC_NATIVE_20261004.md)，前次见[终态分析、标签粒度与权重SHA](../docs/SEMANTIC_OBJECT_FIT_20261004.md)。
 

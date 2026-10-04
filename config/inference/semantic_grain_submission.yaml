@@ -1,0 +1,24 @@
+# -*- coding: utf-8 -*-
+# 只替换末端类别投票；原已评分reflect32实例PNG逐字节保持。
+_base: ../train/semantic_grain_fit.yaml
+semantic_grain_submission:
+  format: semantic_grain_submission_v1
+  output_dir: outputs/semantic_grain_blackbox
+  input_receipt: outputs/semantic_reflect_cache/inputs.json
+  capture: outputs/semantic_object/capture.json
+  training_dir: outputs/semantic_grain/candidate
+  training_report_sha256: 590581824a1ba3ce2d9d57e610b5a34aa4c1e08a714e07506a4d62019419692d
+  checkpoint: outputs/affinity_balance/mixed/final.pt
+  checkpoint_sha256: 43da103c95c7f85149bd0533fd116d26f0a81c91d793db7e8938b7d4ae80e434
+  head_checkpoint: outputs/semantic_grain/candidate/head_s64.pt
+  head_checkpoint_sha256: 19433e78379026458566c06d3ca5eb2a14195b9c6fd9ce3e7a1b635adba9b67e
+  scored_zip_sha256: c812fbf32a87ae3a22973b2cd5548a4ab4bf9643dfc4b3136a584942d54da1e2
+  base_state_sha256: 6ae2866ff8b76137dba8e3282f1f54de7a485e975105a453521ed7133906a3f4
+  initial_head_sha256: be3686f15c2f42703157234f584bc2f4f83f8dc8d57d8c8fc80729cced8eb11e
+  final_head_sha256: a6d5eeb82d31a3a211f99061f739de99a40b07c336d9eb241375884349703aab
+  steps: 64
+  input_size: 1024
+  expected_images: 100
+  conservative_parameters: 91253055
+  monitor_seed: 20261004
+  random_monitor_images: 4

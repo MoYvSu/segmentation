@@ -312,7 +312,8 @@ def run(args):
                 area=np.bincount(item['ids'].ravel()); ferrite=[int(k) for k,v in classes.items() if v]; pixels=sum(int(area[k]) for k in ferrite)
                 row=dict(kind=item['kind'],source=name,probability_sha256=hashlib.sha256(p.tobytes()).hexdigest(),png_sha256=file_sha(folder/item['png'].name),
                     instances=len(classes),ferrite_count=len(ferrite),ferrite_pixels=pixels,ferrite_mean_area=pixels/len(ferrite) if ferrite else None,
-                    changed_ids=[k for k in classes if classes[k]!=item['classes'][k]],old_control64=control_snapshots[name])
+                    changed_ids=[k for k in classes if classes[k]!=item['classes'][k]],instance_scores=scores,
+                    old_control64=control_snapshots[name])
                 gt=item['gtdata']
                 if gt is not None:
                     object_rows=probability_rows(gt['cohort'],p); baseline_rows=probability_rows(gt['cohort'],whole_cache[name]['reference_probability'])
@@ -372,9 +373,12 @@ def run(args):
             for name in snapshots[str(total)]['rows']:
                 item=records[name]
                 with torch.no_grad(): logits,_=forward(reloaded,whole_cache[name]); _,p=probability(logits,item)
-                classes,_=revote_instances(item['ids'],p); expected=snapshots[str(total)]['rows'][name]
+                classes,replay_scores=revote_instances(item['ids'],p); expected=snapshots[str(total)]['rows'][name]
                 folder=out/f's{total:02d}'/name
                 verify_terminal_output(p,classes,expected,item['png'],folder/item['png'].name,folder/(name+'_class.json'))
+                # 新回执保存实例均值票分；旧回执缺此字段时不伪造置信度记录。
+                if 'instance_scores' in expected and replay_scores!=expected['instance_scores']:
+                    raise RuntimeError('Strict final native instance score replay differs')
             for view,expected in snapshots[str(total)]['crop_rows'].items():
                 cache=crop_cache[view]; item=records[expected['source']]; y0,y1,x0,x1=cache['box']; gt=item['gtdata']
                 record=dict(shape=[y1-y0,x1-x0],pad_h=cache['image_receipt']['pad_h'],pad_w=cache['image_receipt']['pad_w'])
