@@ -9,7 +9,10 @@ smoke只评固定8整图／8训练裁窗，正式末态固定40整图／64训练
 用户随后授权单独一版固定s64＋reflect原100PNG的评分对照；验收结果以专题追加记录为准，不改训练配方或选epoch。
 `inference/semantic_grain_submission.yaml`及`tools/package_semantic_grain.py`已通过固定八图GPU精确验收；
 默认只列计划，`--run --limit 8`验收，`--run`才完整100图。该工具只产出内部结果及兼容ZIP；
-按10月4日新格式，正式复赛包还必须封装`results/`及完整`code_model/`。当前100图／独立工程均未完成。
+按10月4日新格式，正式复赛包还必须封装`results/`及完整`code_model/`。当前完整100图和双目录包已完成，
+独立工程两图精确复现通过；未重新安装环境或独立重算100图。`inference/submission_reflect.yaml`为便携模板，
+由`tools/build_semifinal_bundle.py`填入实际模型SHA；`tools/infer_semifinal.py`为随包推理入口。
+包328.67 MiB，平台实际限额未确认，见[提交演习](../docs/SUBMISSION_REHEARSAL_20261004.md)。
 已完成目录不fresh覆盖；源位、裁窗配方、编码缓存及监督来源绑定，结果和局限见[本轮说明](../docs/SEMANTIC_GRAIN_20261004.md)。
 
 2026-10-04：`train/semantic_object_fit.yaml`的raw末端A64/B64现均已完成；默认CLI只查计划，不fresh覆盖已完成目录，`--resume`仅用于未完成优化状态。32源各两遍、相同初始化／特征／共同GT，B增区域均值BCE0.5；固定PNG和40源strict重载／BN／上游／源码输入通过。182区域GT分歧64/49/25，固定4918匹配错类1/1/3；B小片GT一致改善不等于真实物相或比赛提升。八测试F数532→636、聚合均面积−16.19%，暂无新官方分数。暂不扩训／全量／黑盒或晋级；后续`inference/semantic_native.yaml`完成冻结309前向，只改类小片；继承它的`inference/semantic_components.yaml`完成9前向与原输出精确回放，当前修正减少34.3031%记录GT像素分歧，保留支路。两工具默认仅列计划、显式`--run`才执行，要求fresh忽略目录；当前不训练、不改最佳。结果见[尺度与分支检查](../docs/SEMANTIC_NATIVE_20261004.md)，前次见[终态分析、标签粒度与权重SHA](../docs/SEMANTIC_OBJECT_FIT_20261004.md)。

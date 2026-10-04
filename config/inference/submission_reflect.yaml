@@ -1,0 +1,47 @@
+# -*- coding: utf-8 -*-
+# 独立复赛推理模板；导出工具只替换模型文件SHA和可选末端头，几何固定。
+paths:
+  project_root: auto
+sam2:
+  sam2_repo_path: segment-anything-2
+  input_normalization: legacy_none
+affinity_native:
+  overlap: 0.25
+affinity_deployment:
+  fusion_mode: gated
+  distance2_weight: 0.5
+  distance4_weight: 0.25
+  support_threshold: 0.2
+  support_temperature: 0.05
+  short_reduction: top2
+  short_softmax_temperature: 0.15
+inference:
+  threshold: 0.5
+  boundary_threshold: 0.65
+  min_instance_area: 50
+  max_instance_id: 65535
+  watershed_dilate_width: 1
+  bridge_width: 1
+  marker_border_seal_width: 2
+  marker_boundary_low_threshold: 0.45
+  marker_boundary_reconstruction_steps: 8
+  semantic_vote_mode: probability_mean
+  semantic_vote_erode_width: 0
+  semantic_vote_threshold: 0.5
+  sem_edge_boost_alpha: 0.0
+  sem_edge_merge_weight: 0.0
+  center_seeds: false
+  marker_partition_restore:
+    enabled: false
+submission:
+  seed: 314159
+  native_sizes: [1024]
+  marker_reflection_padding: 32
+  models:
+    backend:
+      file: backend.pt
+      sha256: EXPORT_TOOL_FILLS_EXACT_SHA256
+    restorer:
+      file: restorer.pt
+      sha256: EXPORT_TOOL_FILLS_EXACT_SHA256
+    terminal_semantic: null
