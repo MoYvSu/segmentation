@@ -1,0 +1,19 @@
+# -*- coding: utf-8 -*-
+# e0全32源预检通过后，R1原始初始化：whole/crop共同监督等权，旧A64只读复用。
+_base: semantic_grain_view.yaml
+semantic_grain_fit:
+  format: semantic_grain_fit_v1
+  preflight_dir: outputs/semantic_grain/preflight32
+  output_dir: outputs/semantic_grain/candidate
+  smoke_dir: outputs/semantic_grain/smoke
+  steps: 64
+  smoke_steps: 2
+  whole_weight: 0.5
+  crop_weight: 0.5
+  snapshots: [0, 16, 32, 64]
+  learning_rate: 0.00002
+  adam_eps: 0.0001
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  seed: 20261004
+  monitor_sources: [train_001, train_173, train_558, train_889, train_175, train_873]

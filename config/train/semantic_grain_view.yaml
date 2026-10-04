@@ -1,0 +1,18 @@
+# -*- coding: utf-8 -*-
+# 先用预声明新GT整父对象裁窗验证训练是否有新增信号，不自动启动64更新。
+_base: semantic_object_fit.yaml
+semantic_grain_view:
+  format: semantic_grain_view_preflight_v1
+  preflight_dir: outputs/semantic_grain/preflight
+  preflight_all_dir: outputs/semantic_grain/preflight32
+  capture: outputs/semantic_object/capture.json
+  cache_dir: outputs/semantic_object/cache
+  control_checkpoint: outputs/semantic_object/control/head_s64.pt
+  control_head_digest: bda3dbb94e5312935f4946fa83a86e40f1960c5abda28bccfe01f1f4c6a5aadf
+  sources: [train_001, train_173, train_558, train_889]
+  minimum_native_area: 10000
+  minimum_original_fraction: 0.8
+  context_factor: 1.5
+  minimum_context_side: 512
+  input_size: 1024
+  training_implemented: false
