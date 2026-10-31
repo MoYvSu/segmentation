@@ -1,0 +1,7 @@
+# -*- coding: utf-8 -*-
+# 单变量：只去掉NAF判别器目标；填谷、GT、随机初态、采样和读出保持。
+_base: boundary_ridge.yaml
+boundary_naf:
+  output_dir: outputs/naf_nogan/candidate
+  training:
+    adversarial_weight: 0.0

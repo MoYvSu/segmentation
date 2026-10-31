@@ -1,0 +1,7 @@
+# -*- coding: utf-8 -*-
+# 单变量：仅替换NAF四级上采样；原T8擦断、监督、后端及读出保持。
+_base: boundary_erasure.yaml
+boundary_naf:
+  output_dir: outputs/naf_resize/candidate
+  model:
+    upsampling: project_bilinear_v1

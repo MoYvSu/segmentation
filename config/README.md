@@ -1,5 +1,334 @@
 # 配置目录
 
+2026-10-31：`train/naf_dual.yaml`继承`boundary_width`，显式双输入版本`boundary_continuous`／`t8_continuous_v1`。仅新增原N1连续float32输入，公共随机初态、原1000更新/16000计划、旧GAN/loss保持；monitor不自动WS或150图。32源只读缓存共享、连续缓存上限1GiB、磁盘保留10GiB；实际快盘展开配置与守卫入口见[执行记录](../docs/NAF_DUAL_20261031.md)。旧推理配置不变，新格式不冒认旧S0权重。
+
+2026-10-31：`train/naf_perturb.yaml`对应s1000已完成，但固定同输入配对不支持普遍收益，不写入推荐推理配置。新state695ca只作候选留档；S0白名单、旧20a59部署保持。见[终态分析](../docs/NAF_PERTURB_ANALYSIS_20261031.md)，资源异常来自独立诊断脚本，不属于训练配置变更。
+
+2026-10-30：`train/naf_perturb.yaml`继承旧`boundary_width`，只新增冻结受扰热图manifest及独立50/50选择流；不继承已训练NAF，不改loss/模型/1000预算。正式运行的实际路径与SHA保存在私有run配置，公开YAML保持相对路径；`monitor.full_readout_steps=[]`，训练期间仅过程热图，不自动WS/150图。见[合同及GPU预检](../docs/NAF_PERTURB_20261030.md)。
+
+2026-10-30：[无网络P连通组合并](../docs/PEARLITE_MERGE_20261030.md)已按用户要求撤掉共享入口开关，不新增配置开关。独立`tools/infer_pearlite.py`固定原C的S0/20a59/final200；末端只执行一次P连通合并，保持F最终ID及类别精确不变。150图包已生成，配方源码留档；新增参数0。
+
+2026-10-30：[实际关系合并](../docs/BOUNDARY_RELATION_READOUT_20261030.md)已实现显式CLI入口，但0.1全范围读出未通过效果晋级，不新增默认启用配置。原命令无`--relation-checkpoint`时保持旧链；启用时要求N1＋旧20a59＋`--seed-support original-zero`＋final200，检查checkpoint来源和新增211865参数。支持`--relation-threshold`／`--relation-expected-model-sha`，不对未知GT或测试实例数自动校准。13源最终输出及90项测试完成，完整SAM2主链本轮未重算。
+
+2026-10-30：`train/boundary_relation_long.yaml`两组均完成1000更新，[分析](../docs/BOUNDARY_RELATION_LONG_ANALYSIS_20261030.md)支持RGB在已见F/F参照上的排序增量。固定0.1仅作此前预设的候选诊断，不写入全局部署；不拿GT相别当部署门控。未改loss、推理配置、实例或原C，尚无新正式黑盒；完整协议／源哈希保留，当前无需重复控制组或追加训练。
+
+2026-10-30：新增`train/boundary_relation_long.yaml`，继承五轮配方，显式`max_updates=schedule_updates=1000`，仅按0／215／500／750／1000更新保存monitor和完整续训权重。maps／RGB均从原共同随机`initial.pt`重新开始，不加载e5；batch64与完整轮尾批58不变，最终是23整轮＋第24轮11批。标准队列`tools/train_boundary_relation_pair.py`显式接收数据／初态／快盘输出路径并逐步核共同输入；旧epoch配置行为保留，旧源哈希checkpoint不绕过严格身份校验。见[执行合同](../docs/BOUNDARY_RELATION_LONG_20261030.md)。
+
+2026-10-30：[H0官方回分](../docs/STRONG_READOUT_20261030.md#官方回分不晋级保留同源c) .7452／.9063，较同末端200的C两项均略降。
+本轮只记录回分，不将取消marker弱生长写入默认配置；关系分类实验仍用原C监督输入，配方不变。
+
+2026-10-30：新增`train/boundary_relation.yaml`，新关系分类任务各五轮、batch64、FP32、随机初始化。
+maps／rgb通过CLI只改变RGB可用性，共用完整初态和冻结数据，不加载主线模型权重。
+配置默认不应用合并；实际FS manifest用`--data-manifest`覆盖，不把机器绝对路径写入配置。
+2746例每轮43次、各共215次更新，两组五轮已完成；[合同与完成记录](../docs/BOUNDARY_RELATION_20261030.md)包含source／checkpoint身份和monitor限制。
+过程图／日志／权重已复制到快盘`/root/autodl-tmp/seg/supervised/runs/boundary_relation/`，原FS归档保留，不重跑。
+服务器新实验统一使用相应路线`autodl-tmp/seg/<路线>/runs/<短名>/`，显式传`--output`；配置中的相对outputs只是可移植默认值，不替代服务器组织约定。
+本地两个旧一次性FS启动器现已停用、原件封存；[清理与归位结果](../docs/STORAGE_MAINTENANCE_20261030.md)包括标准代码入口及实际数据路径。
+当前relation的完整数据已归回快盘；FS保留原始执行冷备，不篡改旧checkpoint的路径身份。恢复训练须另核路径兼容，不以strict=False绕过。
+
+2026-10-30：[封存无监督语义B e5对照](../docs/SEMANTIC_UNSUP_COMPARE_20261030.md)已完成，
+无监督原配置仍在其工作树`train/semantic_distill_band.yaml`，使用配套LoRA/归一化，非只换监督decoder。
+本次仅私有独立推理入口，150＋4例固定几何，未新增训练或公共配置；不整体替换当前语义。
+
+2026-10-30：[旧最高＋200交付与5%缓存诊断](../docs/SUPPORT_RATIO_20261030.md)：
+旧最高包仅末端200合并，来自旧20a59结果ZIP，不是新NoGAN的area_floor200包。
+S0比例仅私有脚本启用0/5%，公共helper/配置默认未改，比例不叠200，发现小P→F风险暂不推广。
+本轮无新训练配置或权重变更，NoGAN继续保留独立候选。
+
+2026-10-30：[area_floor三档已获官方回分](../docs/FINAL_AREA_FILTER_20261029.md)，
+100/200/500等权81.305/81.620/81.840，均不及旧最高82.625；保持候选，不修改部署缺省。
+后续建议对旧最高单独验证200、再研究S0支撑比例，不把当前NoGAN配置当新主线；本轮未新增配置或任务。
+
+2026-10-29：[独立面积参数与三档候选](../docs/FINAL_AREA_FILTER_20261029.md)已实现：
+`seed_min_area`控制起点，`final_min_instance_area`控制终态；缺省分别回落旧`min_instance_area`。
+`inference/area_floor_100.yaml`及200/500继承固定N1，统一seed50、显式`neighbor_merge_v1`，
+仅终态门槛不同，实际NoGAN＋S0还须显式绑定8eb权重与S0参数。旧配置不自动改变动作。
+50/50旧路径、显式拆分及合并路径在真实169最终PNG/classes完全相同；源码冻结后顺序CPU出三包。
+
+2026-10-29：[NoGAN无S0已回.7489/.8609](../docs/NAF_NOGAN_20261029.md#官方回分无s0包整体退化)，
+整体劣于旧naf-support，不晋级；新S0仍待独立回分。无配置/阈值变更，暂停新增实验。
+
+2026-10-29：新增`train/boundary_color.yaml`，继承`boundary_nogan.yaml`，
+只添加冻结D5a零噪恢复RGB条件与相应输入格式/清单，GAN0、ridge0.1、bilinear及其余配方固定。
+[真实配对、初态与存载预检](../docs/NAF_RGB_RETRY_20261029.md)已过，GPU128门槛全部通过；
+首轮因旧B1绘图入口退出；train2补齐正确RGB monitor，实际s0/s1验收通过，并修正私有验收模式名误拦。
+原s1权重接续至总1000，最后检查已到285，当前日志`naf_color/train2/resume/train.log`；训练配方/已有控制保持。
+训练monitor仍是B1/none，最终S0另比较，不自动150或改全局默认。
+
+2026-10-29：[新NoGAN＋S0](../docs/NAF_NOGAN_S0_20261029.md)使用同N1配置，显式
+`--seed-support original-zero --expected-model-sha 8eb7c8da...`（实际必须完整64位SHA）。
+新入口有限允许旧20a59和已桥接8eb，缺省仍旧20a59，不接受任意新SHA；85项CPU/169实际桥接通过，正式150已启动。
+[RGB重试](../docs/NAF_RGB_RETRY_20261029.md)的新配置与执行进展见本页上方。
+
+2026-10-29：[已验证最高分](../docs/NAF_SUPPORT_PACKAGE_20261028.md)为N1＋旧20a59 NAF＋
+`--seed-support original-zero`（S0），.7467/.9058、平台82.62。配置继续N1，S0是显式CLI读出，
+缺省none没有自动改。新NoGAN/ridge候选目前用none；本成绩不属于新8eb。
+S0当前只允许已桥接的20a59/8eb，需按完整冻结入口复现；移植其他新G要单独验收，不仅改开关。
+
+2026-10-29：`train/boundary_plain.yaml`已1000更新终态G `989a8954…`，
+[固定四格消融](../docs/NAF_PLAIN_20261029.md)支持关闭ridge导致外围多轨/最终小碎块回升，
+原loss更低不能代替结构判断。保留`boundary_nogan.yaml`的ridge0.1为优先候选，不扩训或替换部署。
+
+2026-10-29：`train/boundary_plain.yaml`继承nogan，只关闭ridge并独立输出；
+[准备回执](../docs/NAF_PLAIN_20261029.md)确认实际同服务器完整初态/GT/计划/原损失及CPU预检配对，
+有效批16/1000预算、GAN0、原.65/.45不变；NoGAN包已交付后，本组队列PID318803已启动，
+先128 GPU短测过门槛再fresh1000，自验首步、保留过程图；不宣称正式训练已经完成。
+
+2026-10-29：`train/boundary_nogan.yaml`继承ridge，仅`training.adversarial_weight .01→0`和独立输出。
+[预检与缓存阈值小测](../docs/NAF_NOGAN_20261029.md)保留ridge0.1/完整随机初态/GT/批16/1000预算及原.65/.45读出。
+显式GAN0短测严格验证D不前向/更新、参数缓冲和优化器不变，G真实更新；原补边保线门槛保持。
+128短测与独立正式1000已完成（G `8eb7c8da…`），全±8三轨151→0，四测试小F800→34、116点对分开；
+原强支持也有下降，保留候选而非部署晋级。.65/.55仅独立读出候选，本轮仍原.65/.45；无新训练或150图。
+
+2026-10-29：`train/boundary_ridge.yaml`已1000更新结束，G `8ae39216…`。
+[终态诊断](../docs/NAF_RIDGE_20261029.md#终态分析中央填谷有效外围多轨仍在)支持中央填谷有效，但外围多轨未解决，
+四测试小F958→800；原生四人工分隔保留，另有局部粘连/内部响应退化，不晋级或原样延训/出包。
+下一仅建议独立GAN消融，尚无新配置/训练；原默认推理及旧控制保持。
+
+2026-10-29：`train/boundary_ridge.yaml`继承resize，仅加显式`ridge_supervision.normal_hull_v1`权重0.1。
+[配方与门槛](../docs/NAF_RIDGE_20261029.md)保留完整随机初态/模型/原监督/采样/读出；
+只在处理后GT实例走廊恰好一次界面切换处填中央±2暗谷，外侧锚点±4停止梯度。
+CPU关闭完整更新兼容、真实缓存资格和128固定批短测通过，独立1000队列已进入正式阶段，真实首步及s0/s1已验。
+不自动全150、出包或换部署，默认旧配置不启该项；产物仅私有`runs/naf_ridge/train2/`。
+
+2026-10-29：`train/boundary_resize.yaml`已1000更新完整结束，G `70b7852c…`。
+[终态对照](../docs/NAF_RESIZE_20261029.md#终态分析周期伪影下降平行多轨和最终碎分割加重)显示周期/位移敏感下降，
+但平滑平行多轨仍在，自然缺口2→0/161、固定四测试小F30→958。不晋级/延训/自动150或出包。
+源码/配置合同不变，旧默认checkpoint保持严格兼容；下方“尚未改up/启动”属于当时历史状态。
+
+2026-10-29：`train/boundary_resize.yaml`继承原T8擦断，只加`model.upsampling: project_bilinear_v1`及独立输出。
+[实际启动验收](../docs/NAF_RESIZE_20261029.md)已核99/29项CPU检查、同随机公共骨干及D、新up独立随机、128短测门槛；
+正式1000更新已有真实首步、initial/latest与s0/s1图。无RGB/shiftloss，训练器/数据/损失/monitor/读出使用原封存代码。
+旧默认`pixelshuffle`不新增架构键，仍严格兼容；错误up形状拒绝，未自动150/出包或换部署。
+
+2026-10-29：`train/boundary_shift.yaml`已完成1000更新；[终态诊断](../docs/NAF_SHIFT_20261029.md#终态分析局部位移稳定性改善多轨与最终微块仍在)
+显示人工4/4保留，但自然缺口和四缓存微块未改善，不原样续训/自动出包或晋级。
+上采样替换仅为下一步方案，当前未新增结构模式或修改旧checkpoint合同。
+
+2026-10-29：`train/boundary_shift.yaml`继承单通道擦断组，仅加`shift_consistency`权重0.1和两张位移monitor。
+[实际启动验收](../docs/NAF_SHIFT_20261029.md)已核数据/初态/关闭兼容、256固定批全部门槛，
+独立随机初始化正式1000更新已实际首步，s0/s1图和initial/latest保存正常。无RGB，原loss/GAN/LR/批16/读出保持。
+当前不自动150/出包/部署替换；快盘约5.15GiB并保留3GiB下限。
+
+2026-10-29：`train/boundary_rgb_erasure.yaml`已完成1000更新，终态G `943503b8…`。
+[恢复RGB终态诊断](../docs/NAF_RGB_ERASURE_20261028.md#2026-10-29终态rgb参与学习完整分隔和微块未改善)显示自然缺口仅2→5/161，
+人工四例完整分隔4/4→1/4、四测试小F30→163，未晋级/续训/自动出包；固定原B1与部署均不改。
+源码/配置沿用启动SHA，权重和缓存仍只在私有忽略目录。
+
+2026-10-28：[恢复RGB条件擦断](../docs/NAF_RGB_ERASURE_20261028.md)使用`train/boundary_rgb_erasure.yaml`，
+继承单通道T8擦断，只增加冻结D5a/N1zero恢复RGB；train/monitor清单隔离，显式`float32_unit`不再/255。
+NAF随机共同骨干＋RGB入口0，复用afc1bbaa控制；128短测与正式1000首步/权重/s0/s1已验收。
+GT/擦断/目标/GAN/LR/原B1与后端不改；不自动150/出包/晋级。权重和缓存只在私有忽略目录。
+
+2026-10-28：[显式擦断](../docs/NAF_ERASURE_20261028.md)使用`train/boundary_erasure.yaml`继承8核控制，
+只在线损伤已有支持短段，目标/valid、采样计划、损失与原B1不变；七个共同monitor显式补回历史draw9921。
+已完成1000更新/892.01秒，G状态`afc1bbaa…`；人工四例恢复完整分隔，自然共同缺口仅0→2/161、116未解。
+raw周期和bridge/thin成环仍在，不原样扩训；终态/共同初态和热数据保留，低频中间/短测已SHA冷备。
+复用20a59控制；不加载旧训练权重、不叠S0、不自动150图或晋级。
+
+2026-10-28：[S0独立出包](../docs/NAF_SUPPORT_PACKAGE_20261028.md)已完成150图及一次性手动下载后的本地全量核验。
+配置继续固定`inference/semifinal_n1.yaml`；仅入口显式`--seed-support original-zero`选择S0，缺省none保持旧8核读出。
+私有包`output/naf_support/submission/semifinal_naf_support.zip`，SHA前缀`939cccb59175`，150对/300文件；
+737上游窗口及NAF/语义/raw保持exact，共撤507个seed，平均预测7.873秒/图（NAF0.710秒、读出4.849秒）。
+没有修改默认推理配置或替换部署，尚无新回分；原本机自动拉包器已停止，不再后台轮询。
+
+2026-10-28：固定`train/boundary_width.yaml`对应20a59旧G的[读出对照](../docs/NAF_READOUT_20261028.md)
+支持保留S0局部撤种子候选；B0/C1不直接采用。原部署配置未改，没有新增默认开关、150图包或官方成绩。
+S0沿用原low0.45，不新增面积/类别/比例阈值；后继8核入口/队列见上条，不直接混用旧Region入口。
+
+2026-10-28：`train/boundary_kernel6.yaml`继承`boundary_width.yaml`，只改独立输出和训练/推理共同的ellipse核8→6。
+实际使用旧width冻结源码，pointwise/r2/网络/GT/计划/LR/读出不变，公共随机初态1000更新、控制不重训。
+已完成1000更新及全部monitor，终态SHA前缀`a9c360ab3b77`；四缓存部分环/周期起伏减轻，
+共同缺口仍0/161、小F29→35、小P197→263，尚不支持补边或精度晋级。实际合同、共同分母及限定见
+[核6实验记录](../docs/NAF_KERNEL6_20261028.md)。不原样扩训/继续缩核/自动150图或出包，原8核部署入口保持。
+
+2026-10-28（终态）：`train/boundary_coherent.yaml`的1000更新已完成，点阵减弱但带内多轨/小F增加，
+当前不原样续训、出包或晋级；只做固定热图的marker桥接独立对照，未改默认配置。
+原文读出差异、终态模型SHA与证据见[完整分析](../docs/NAF_COHERENT_20261028.md#终态分析点阵减弱带内多轨和小环仍有退化)。
+
+2026-10-28：`train/boundary_coherent.yaml`继承标准化输入控制，仅将覆盖目标改为
+`rgb_loss.coverage_mode: coherent3`并使用独立输出；缺省`pointwise`保持旧目标。
+三个可信相邻GT点共用法向偏移，非可靠短段保持原逐点覆盖，全部原positive及分母保留。
+不改网络/GAN/负集/学习率/后处理，不继承旧权重，直接复用已完成控制。
+90项服务器CPU检查通过，真实预检和G/D初态/配方核验通过；正式启动状态及monitor见
+[三点覆盖实验](../docs/NAF_COHERENT_20261028.md)。
+
+2026-10-27（作者式输入试验）：`train/boundary_width.yaml`继承已完成单通道控制，
+仅增加训练/推理共同的`input_normalization: {mode: skeleton_dilate, kernel_size: 8}`及独立输出。
+整图先处理再crop/D4或pad/tile；缺省none保持旧路径。模型/loss/GT/计划/LR/预算保持，
+106项CPU与真实none兼容、初始化/配方核对和128步短测通过；不重训控制、不继承旧权重。
+raw T共同缺失指标和标准化自身指标另列，路径及状态见[专题](../docs/NAF_WIDTH_TRIAL_20261027.md)。
+
+2026-10-27（新独立配方）：`train/boundary_rgb.yaml`和`train/boundary_rgb_control.yaml`
+分别为RGB＋真实N1二值T与T-only，只有输入模式/输出路径不同，公共骨干从同随机初态建立。
+两组各1000更新，以容差截面覆盖＋内部抑制＋GAN0.01（前64步关闭）恢复新GT，G/D LR独立。
+新入口`train_boundary_rgb.py`、队列`tools/run_boundary_rgb.py`；旧骨架/Region配置不被修改或续训。
+两组128步真实固定批门槛已通过；RGB正式1000更新已结束。队列完成汇总重复checkpoint键导致控制未启动，
+已修外层调度并单独恢复原配方控制；不改已封存的训练源码/损失，避免破坏RGB消融。
+监督自由度、真实终态及恢复路径见[专题](../docs/BOUNDARY_RGB_NAF_20261027.md)。
+
+2026-10-27（原affinity预检）：[缓存及实际终态门槛](../docs/AFFINITY_GAP_20261027.md)未支持启动C/A。
+未完成的`train/affinity_gap.yaml`草稿已移至被忽略私有归档，当前没有可启动的正式训练配置；旧配置/部署保持。
+浅盆地候选仅独立诊断，没有自动启用或出包；上下文seed可靠性网络仍是未实施候选。
+
+2026-10-27（后续归因）：[缓存归因检查](../docs/NAF_LIMITS_20261027.md)后，骨架输入NAF实验配置转为封存对照，
+不继续扫权重或扩大负掩码；保留原配置/权重，不改默认推理。后续优先连续affinity信息及邻接几何，不启动新训练。
+
+2026-10-27：三份`naf_sweep_h05/l2/s2.yaml`所声明的独立1000步训练均已完成并归档，
+单变量及相同初态/采样检查通过；[终态分析](../docs/NAF_TRAIN_SWEEP_20261026.md)暂不支持出包或替换部署。
+没有根据monitor调整推理阈值或叠加种子筛选，没有新训练/全150。下方排队状态保留为10月26日启动记录。
+
+2026-10-26：[NAF三权重短训](../docs/NAF_TRAIN_SWEEP_20261026.md)使用
+`train/naf_sweep_h05.yaml`、`train/naf_sweep_l2.yaml`、`train/naf_sweep_s2.yaml`，
+都以`boundary_naf_region.yaml`为基底，除输出目录外只改一个损失权重。
+服务器从旧封存完整配置展开路径，复用原控制manifest/ROI；H05已完成并归档，L2训练中、S2排队。
+不改变结构、输入、语义、选割、学习率或读出，不继承旧权重，不自动150图推理或出包。
+
+2026-10-26：[种子支撑四臂对照](../docs/MARKER_SUPPORT_20261026.md)沿用相同N1配置及NAF s1000，
+没有新增默认配置或自动启用过滤。独立函数仅使用既有low=.45，零内部支撑撤种子；
+8源小样本完成、35项CPU检查通过。下一候选需显式读出接入，不能把未改的旧NAF包当过滤包。
+
+2026-10-26：`tools/infer_boundary_naf.py`复用`inference/semifinal_n1.yaml`，
+显式`--naf-checkpoint`接s1000，仅在完整边界拼接后加NAF，不修改原后处理。
+完整test169桥接及150图出包已通过，结果已下载；80项CPU回归通过，总参数102.583M。
+推理输出与训练输出分开，核验JSON不入ZIP；见[运行与小空腔诊断](../docs/BOUNDARY_REGION_20261026.md#用户授权的150图黑盒包及边界小空腔诊断)。
+
+2026-10-26：`train/boundary_naf_region.yaml`的1000步已正常结束，但未晋级。
+保住线幅值却主要加粗旧骨架，116最终缺口仍未分开；采样均衡，不能归为漏用训练源。
+固定过程的缺失线响应后期退步，旧可疑线未删；不原样续训/出包，参见[终态分析](../docs/BOUNDARY_REGION_20261026.md#完整训练分析)。
+
+2026-10-26：`train/boundary_naf_region.yaml`继承真实N1纯BCE配置的网络/数据/前1000步LR，
+只将监督改为可信内部保持、已有可信线保持及完整8邻接分隔，精确BCE/GAN/PH关闭。
+已随机正式开始1000步，旧同预算控制复用，固定后端不变；不是加载旧NAF续训。
+81项CPU检查和GPU128步可行性门槛通过，过程图0/1/100/250/500/1000，最终仅固定四图读出，
+不自动150图推理/出包。私有正式配置`runs/naf_region/config_run.json`，
+详见[监督及实际启动记录](../docs/BOUNDARY_REGION_20261026.md)。
+
+2026-10-26：`train/boundary_naf_real_bce.yaml`对应的6000步完整结束，但未通过最终输出验收。
+固定四图原接法均严重粘连，32源强线几乎全灭；五档全图单调校准未补上116既定缺口。
+配置与权重保留，不作为部署候选晋级，不原样续训；详见[终态分析](../docs/BOUNDARY_NAF_REAL_20261026.md)。
+
+2026-10-26：`train/boundary_naf_real_bce.yaml`只覆盖真实输入组的`adversarial_weight: 0.0`。
+同随机初态512步固定批通过原门槛，64次换批稳定，正式5000步BCE＋1000步BCE/PH已实际更新；
+主/拓扑LR、网络、32处理后GT与采样不变。随机重启，不继承短测或旧NAF；四图N1控制直接复用。
+旧GAN1真实输入配置保留失败对应。详见[纯BCE排查与启动](../docs/BOUNDARY_NAF_REAL_20261026.md)。
+
+2026-10-26：`train/boundary_naf_real.yaml`继承旧NAF结构/损失/预算，仅改真实N1输入任务及相同N1监控。
+必须先整图细化再裁窗；禁止额外人工擦断、按GT遮掉输入未知区，或继承旧NAF权重。
+全部32源、同公共随机初态。缓存及重载通过，但512步固定批质量门槛未过，正式训练未启动；
+旧6000步权重只在相同N1上重评，不重复控制训练，正式部署未改。
+详见[真实输入短测](../docs/BOUNDARY_NAF_REAL_20261026.md)，模板路径需绑定私有缓存回执。
+
+2026-10-26：[NAF6000完整结束](../docs/BOUNDARY_NAF_20261026.md#第6000步终态与固定输入细化对照)。
+原`train/boundary_naf.yaml`未中途改变；细化输入仅为独立固定四图研究包装层，不写入正式部署配置。
+该包装层能恢复边界/116最终分隔，但新增切分和F均面积漂移尚不支持晋级；无新训练或150图候选推理。
+
+2026-10-26：[N0/N1/N2用户回报官方成绩](../docs/SEMIFINAL_NOISE_SCORES_20261026.md)支持后续优先以N1进行局部零噪声研究。
+这不消融全图噪声，也不更改本轮NAF的N0控制；三个推理配置及包均保持，N2微小总分优势不作自动晋级。
+
+2026-10-26：`train/boundary_naf.yaml`是独立NAF恢复分支，不继承旧补边训练配置或其权重。
+生成器width48／encoder1,1,2,4／middle2／decoder各1；随机初始化17.632M。
+处理后GT32、原生256、有效batch16，5000主训＋1000有限H1微调是阶段检查，
+不是原文53,000更新的完整训练；固定旧N0作参照，明确输入0.5二值化并单报adapter-only。
+新增GUDHI3.11.0；推理单次、无修复后回退，正式部署配置不变。
+CPU／真实GPU短测已过，正式随机初始化训练已实际更新，详见[运行记录](../docs/BOUNDARY_NAF_20261026.md)。
+
+2026-10-25：[尺度检查](../docs/SCALE_SHAPE_20261025.md)只使用封存N0配置和私有研究包装层，
+没有修改正式尺度、融合、噪声、模型或训练配置。768／1024／1280是真实原生视野，
+均映到1024网络，不是三个网络输入尺寸；裁不出的档明确缺失，不用填充补造上下文。
+局部响应有尺度敏感性但未做最终读出；夜间扫参搁置，不将该诊断配置当作新部署。
+
+2026-10-25：`train/boundary_mass.yaml`继承`boundary_structure.yaml`，只覆盖输出目录和
+`structure.mass_weight: 0.005`。实际五轮从同一公共随机e0开始，复用0.05结构e5控制，
+不重复控制或继承训练后权重；其余条件固定。CPU、实际GPU和启动前独立审查通过，
+五轮320更新及e0/e1/e3/e5过程图已完成。人工gap改善、结构项竞争解除，但天然弱界未稳定改善，
+116实际仍未分开；保留研究候选，不晋级、原样续训或自动150图推理。
+旧`boundary_structure.yaml`仍保留0.05以对应控制，详见[单变量实验](../docs/BOUNDARY_MASS_20261025.md)。
+
+2026-10-25：`train/boundary_structure.yaml`继承RGB控制配置，仅新增结构监督配方。
+原网络／公共随机e0／32源采样／五轮320更新／20轮LR日程固定，复用已有RGB e5控制。
+在±12原生像素合法走廊内选择连续路径，原N0<.65的自由区释放自复制约束，
+增加路径正响应和防整片抬亮项；不训练上游，不把0.9精确GT细线作教师。
+73项CPU、实际32源旧配对exact及CUDA梯度／重载／续训、七图e0最终输出通过。
+正式五轮／320更新已完整结束，未继承smoke权重。冻结梯度诊断发现mass/path存在竞争，
+人工断口改善未转化为116天然漏界分隔；不晋级或原样续训。后续0.005采用上列独立配置和run，
+本0.05配置继续绑定原实验。e0/e1/e3/e5缩略图留服务器，不自动150图推理，
+详见[结构短训分析](../docs/BOUNDARY_STRUCTURE_20261025.md#五轮完成后的分析)。
+
+2026-10-25后续：原RGB队列在CUDA第三步SHA核验失败，原五轮未开始。
+修复只对该续训核验临时确定化，不改正式数值模式；29本地检查和实际CUDA门禁通过，
+新封存`boundary_context_fix`已从共同随机e0实际启动五轮。旧控制与失败现场保留，
+没有续用两更新smoke权重。详见[实际重试记录](../docs/BOUNDARY_CONTEXT_20261025.md#实际cuda通过与正式启动)。
+
+2026-10-25：`train/boundary_context.yaml`继承`boundary_real.yaml`，仅增加对齐原RGB输入。
+公共参数绑定旧随机e0，新增RGB通道权重为零，不继承e5；严格独立checkpoint版本。
+原真实热图配对、32源×8窗、batch4、五轮320更新及原损失不变，旧控制直接复用。
+运行配置另绑定新四图只读monitor，保留旧三图及e0/e1/e3/e5缩略图。
+CPU预检/独立审计已过，CUDA smoke及正式五轮已接入等待N0结束的单GPU队列，尚非已完成训练。
+见[RGB输入消融](../docs/BOUNDARY_CONTEXT_20261025.md)及[新150图登记](../docs/SEMIFINAL_DATA_20261025.md)。
+
+2026-10-25：`train/boundary_real.yaml`继承补边短训配置，显式选择`real_n0_heatmaps`。
+先在32源原图上缓存完整冻结N0热图，目标保持实际幅值、宽度与底部，再做局部断口/假线重建。
+沿用相同随机初始化、采样计划、五轮预算和固定三图读出；不加载旧补全e5，不切换N1/C5。
+`real_recipe`明示损伤参数，`target_sigma: null`表示不再渲染GT软线。
+模板私有manifest路径需在运行时绑定实际文件；来源、噪声协议及SHA不匹配会拒绝启动。
+详见[真实热图配对](../docs/BOUNDARY_REAL_20261025.md)。
+
+2026-10-25：`train/boundary_restore.yaml`为原生512单通道独立补边短训，
+全部32源处理后新GT、每源8窗、有效batch4、每轮64更新，先五轮，保留20轮LR日程。
+`train_boundary_restore.py --preflight/--smoke/--run`分别执行CPU预检、独立两更新与正式训练。
+e0/e1/e3/e5固定过程图接入原N0冻结缓存；仅在连续边界拼接后增加补全，不训练上游或更改后处理。
+真实运行在私有配置中绑定源回执与冻结控制SHA，模板中的相对路径不代表数据已包含在仓库中。
+详见[补边试验](../docs/BOUNDARY_RESTORE_20261025.md)。
+
+2026-10-25：`train/semantic_dino.yaml`为冻结DINOv3 ViT-B/16＋随机末端语义头候选，
+使用32源处理后新GT，每轮整图/原生1024各128视图、64更新、有效batch4，先五轮，保留20轮LR日程。
+原几何及部署控制不训练，e0/e1/e3/e5固定monitor已接入。`train_dino_semantic.py --preflight`
+只核数据/采样/monitor输入；`--smoke`要求真实授权骨干并测试2更新；`--run`才正式五轮。
+模板权重SHA为空会拒绝训练，需使用实际官方权重及准备好的运行配置，不能用随机或任务分割权重替代。
+当前真实数据预检及CPU检查通过、正式训练待授权，详见[本轮说明](../docs/SEMANTIC_DINO_20261025.md)。
+
+2026-10-24：半决赛新增显式150图推理入口，使用`tools/infer_semifinal.py`。
+旧`inference/submission_reflect.yaml`省略`submission.dataset`时仍为
+`quarter_final_100`（`test_069`至`test_168`），不会根据文件数量自动切换阶段。
+以下三组通过`_base`继承，均明确采用`semifinal_150`（`test_169`至`test_318`）：
+
+| 组别 | 配置 | 局部 affinity 恢复 | 固定项 |
+| --- | --- | --- | --- |
+| N0 | `inference/semifinal_n0.yaml` | 原D5a，首步固定Philox噪声：`single/restorer` | 全图恢复、全图及末端语义、窗口、融合和后处理 |
+| N1 | `inference/semifinal_n1.yaml` | 原D5a，仅局部零噪声：`zero/restorer` | 与N0相同 |
+| N2 | `inference/semifinal_n2.yaml` | 局部换C5 e5并保持零噪声：`zero/local_restorer` | 与N1相同，全图仍用原D5a |
+
+`local_restorer.pt`独立保存并核对SHA，不覆盖`restorer.pt`。旧图小测必须显式切回旧阶段，
+例如（原图目录和模型目录替换为实际位置，输出使用新目录）：
+
+```bash
+python tools/infer_semifinal.py --config config/inference/semifinal_n2.yaml --dataset quarter_final_100 --input-dir /path/to/old_test_images --model-dir /path/to/model --output-dir outputs/n2_smoke --only test_101
+```
+
+子集仍按所选阶段的完整编号计算固定索引，不按本次`--only`顺序重新编号。
+新150图正式推理使用对应配置默认阶段，不加上述旧阶段覆盖；输出须有150对原尺寸单通道uint16 PNG及0/1类别JSON。
+本轮不实现本地代理黑盒或新评分器。固定101/116/166三图两遍GPU验收已通过，新N0与旧输出逐文件相同，
+固定全图路径及实际零噪声状态核验通过；详见[入口验收](../docs/SEMIFINAL_ENTRY_20261024.md)。真实150图尚未获得，也没有新官方收益结论。
+赛程及取舍见[半决赛规则与行动计划](../docs/SEMIFINAL_RULES_20261024.md)。
+
+2026-10-07：`train/restore_zero.yaml`继承共同首步配方，C实际注入噪声为零，仍保留双抽样／双forward，
+与已有A相同有效batch4和5轮1250更新。`tools/run_restore_zero.py`只运行C并逐步核对旧A，
+`tools/restore_zero_monitor.py`保留双推理模式图；58项CPU与实际四更新GPU短测通过。
+正式C现已完成5轮1250更新，逐步配对与完整状态严格重载通过；四已见源同零噪声原生1024恢复误差略降，
+但不能沿用旧带噪推理。固定后端与旧部署保持，见[阶段结果](../docs/RESTORATION_ZERO_20261007.md)。
+A/C已累计完成e10／2500配对更新，`tools/continue_restore_zero.py`保留各自原冻结配置与60轮LR日程，
+e7/e10过程图及完整续训状态齐全。C10同零噪声恢复误差仍略低于A10，但相对C5的原生空间模糊
+MSE+2.876%，六图固定后端无明确额外增益，暂不原配方扩轮或修改默认部署。
+见[e10阶段结果](../docs/RESTORATION_ZERO_E10_20261007.md)；无自动100图推理。
+
+2026-10-07：`train/restore_consistency.yaml`固定部署D5a e60导出，全部1000原图、
+后端不加载／训练，两组共同进行T16双噪声首步适配，仅候选附加权重0.1的一致性损失。
+各5轮1250更新，沿用60轮LR日程并保存完整续训状态；源数据epoch从60开始，
+不重启局部损伤预热。正式两臂均完成5轮／1250更新，逐步配对与e0/e5严格重载通过；
+监控e0/e1/e3/e5齐全。独立恢复及固定后端探针显示连续波动降低，但最终面积稳定性没有明确优于旧部署，
+见[阶段分析](../docs/RESTORATION_CONSISTENCY_20261007.md)。不自动扩轮、全100图／黑盒或替换部署。
+
 2026-10-04：`train/semantic_grain_view.yaml`预检已完成32源64窗，整对象类别无错，21个有效像素信号全为P。
 默认入口`tools/probe_semantic_grain_view.py`只列计划，`--preflight --all-sources`显式执行。
 独立`train/semantic_grain_fit.yaml`的一次有限64更新机制短测已完成：从原R1开始，whole／完整GT裁窗共同目标等权；

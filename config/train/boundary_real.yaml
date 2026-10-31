@@ -1,0 +1,30 @@
+# -*- coding: utf-8 -*-
+# 同一随机初始补全网络与五轮预算；只换成冻结N0真实热图自损坏配对。
+# 原N0热图是教师目标，不是正确晶界GT；新GT只限制可靠区域和损伤位置。
+_base: boundary_restore.yaml
+boundary_restore:
+  data_mode: real_n0_heatmaps
+  output_dir: outputs/boundary_real
+  manifest: output/boundary_real/assets/processed_gt32.json
+  real_manifest: output/boundary_real/assets/real_manifest.json
+  micro_batch_size: 4
+  target_sigma: null
+  real_recipe:
+    gap_count_range: [1, 4]
+    gap_length_native_range: [8, 40]
+    gap_radius_across_native_range: [8, 14]
+    gap_depth_range: [0.8, 1.0]
+    gap_soften_sigma: 0.55
+    floor_neighborhood_radius: 48
+    floor_gt_distance: 16
+    floor_quantile: 0.5
+    floor_fallback_quantile: 0.1
+    floor_min_samples: 16
+    gap_min_delta: 0.05
+    noise_count_range: [1, 4]
+    noise_length_native_range: [12, 64]
+    noise_thickness_native_range: [1, 2]
+    noise_strength_range: [0.25, 0.65]
+    noise_min_gt_distance: 16
+    noise_max_original_response: 0.2
+    noise_min_delta: 0.02

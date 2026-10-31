@@ -1,0 +1,18 @@
+# -*- coding: utf-8 -*-
+# 教师零缝支持恢复；仅训练派生teacher，复用原teacher e5控制。
+_base: affinity_gt_source.yaml
+
+gt_source:
+  output_dir: outputs/teacher_seams
+  seam_repair:
+    format: teacher_seam_support_v1
+    manifest: outputs/teacher_seams/targets/manifest.json
+    # CPU预检完整完成并验真后，绑定不可变派生manifest再启动训练。
+    manifest_sha256: 834355bcca7f29d1cdca40bd208c7eab3e1ae271e046d32c49499c86f6f874d2
+    baseline_steps: outputs/gt_source/teacher/steps.jsonl
+    baseline_steps_sha256: 8a6fccfc69e66a78377eed8fbee398cdd3488dd3aa5f5ca07645af8614dcc1b7
+    baseline_status: outputs/gt_source/teacher/status.json
+    baseline_status_sha256: db3f96045ed7e51555afe7f6b8c5196f2f75717a91a17cdf989c226cf5f2e7e7
+    policy:
+      max_distance_native: 1.0
+      context_radius_native: 2.0

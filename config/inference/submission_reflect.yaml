@@ -35,6 +35,8 @@ inference:
     enabled: false
 submission:
   seed: 314159
+  # 固定原4090的Philox噪声像素映射，避免同种子在不同显卡上生成不同输入。
+  restoration_noise: cuda_philox4090_v1
   native_sizes: [1024]
   marker_reflection_padding: 32
   models:

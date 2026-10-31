@@ -1,0 +1,10 @@
+# -*- coding: utf-8 -*-
+# 单变量缩核：从已回分的pointwise+ellipse8配方出发，训练/推理共同改为6。
+_base: boundary_width.yaml
+boundary_naf:
+  output_dir: outputs/naf_kernel6/candidate
+  input_normalization:
+    kernel_size: 6
+  inference:
+    input_normalization:
+      kernel_size: 6

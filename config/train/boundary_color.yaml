@@ -1,0 +1,12 @@
+# -*- coding: utf-8 -*-
+# 单变量：稳定NoGAN+ridge配方增加冻结D5a RGB条件，保留T8擦断/GT/采样。
+_base: boundary_nogan.yaml
+boundary_naf:
+  output_dir: outputs/naf_color/candidate
+  input_mode: rgb_boundary
+  restored_rgb_manifest: outputs/naf_rgb_erasure/rgb/train_manifest.json
+  inference:
+    input_mode: rgb_boundary
+    rgb_input_format: float32_unit
+  monitor:
+    restored_rgb_manifest: outputs/naf_rgb_erasure/rgb/monitor_manifest.json

@@ -3,6 +3,145 @@
 This file holds potentially reusable findings that still need validation or
 scope clarification. It is not a chronological task log.
 
+## 20261031-boolean-mask-before-large-array-indexing
+
+- status: candidate; last_verified: 2026-10-31.
+- scope: 私有GT来源分层统计；NPZ的original_covered/filled/residual_unknown为uint8。
+- finding: bool核心与uint8按位与仍为uint8，`gt[mask]`变成整数行索引；1936×2584掩码展开到1936×2584×2584，uint16约24.08GiB，再astype uint32约48.16GiB，足以压满62GiB容器。本轮train001统计停滞、内存98%，恢复后NPY头与3×4微型例确认索引错误；9保护文件SHA一致，训练和独立配对不受影响。
+- evidence: `docs/NAF_PERTURB_ANALYSIS_20261031.md`及私有incident的原脚本、微型复现、恢复header/cgroup/哈希回执；未取得现场PID、RSS峰值或内核OOM日志。
+- reuse: 索引前显式np.bool_并核同shape二维，原标/填补/未知字段不做含义不明的fallback。CPU大图统计与GPU推理解耦、限制工作进程内存并留PID；容器按cgroup而非宿主机/proc/meminfo判预算。本轮只验证类型修复，未恢复大图统计。
+- verification_gap: 不将所有高RAM都归因此错误，不把重启当实验增益，不因一次事故晋升AGENTS。
+- followup_bounded_GPU_diagnostics_20261031: 固定batch warm后的GPU worker VMS约12.79GiB而RSS峰约1.30GiB，不能沿用CPU统计8GiB RLIMIT_AS。实际采用warm后额外2GiB地址增长＋外部RSS4GiB/cgroup12GiB/180秒守卫，4源8ROI流式完成；CPU复票13源峰162.4MiB、无torch。退出瞬间/proc可先失去RSS而waitpid尚未回收，v1曾把exit0误报监视失效；v2有界重读并再次poll，仍保留原限额，独立8项Linux微测通过，未重跑GPU。证据`docs/NAF_CHECKS_20261031.md`及私有guard回执；这是诊断资源合同，不是模型准确率或所有CUDA环境的统一内存值。
+- followup_training_warmup_20261031: 同环境训练不能直接套仅前向的GPU地址预算。双输入NAF在batch16前向后加8GiB RLIMIT_AS仍于首个反向报CUDA OOM，当时显存空闲22.4GiB、RSS约4.28GiB，VMS接近该上限。原失败/已通过169最终桥接保留；在RSS8GiB/cgroup16GiB守卫不变下，完整G/D前后向和Adam预热66步后才设VMS增长限，80步短测及两路下一更新/优化器exact通过，容器峰约9.36GiB。源缓存只读共享，避免train/fixed重复驻留。证据`docs/NAF_DUAL_20261031.md`与私有`naf_dual/{preflight_bridge,preflight}`；只支持本配方的阶段性预算，不能把任意CUDA OOM都归于地址上限或推广固定GiB值，不晋升AGENTS。
+
+## 20261030-same-predicted-P-is-not-instance-sameness
+
+- status: candidate; last_verified: 2026-10-30.
+- scope: 同源C末端只将相邻预测P连成整组，F像素/ID/类别及面积完全不变。
+- finding: 150图P5422→3813、FP净少1488，但TP净少121，mIoU .7461→.7436，面积仍.9070。precision约+7个百分点不能当作新实例评分增益；按同类匹配，此次变化应定位于P匹配。
+- evidence: `docs/PEARLITE_MERGE_20261030.md`官方回分节，包SHA588aa7f3…62d7；用户报分与总预测14062、GT13068核对吻合。
+- reuse: 区分相邻预测同类与同一GT实例；把全连通组合并与一次关系配对区分。净TP/FP差不能逐对标成合并对错，尤其不能由1488/1609估计正确率。
+- verification_gap: 无逐图GT、类别匹配清单或重复回分，无法确定误判桥接/链式合并/GT粒度的分别贡献；不否定所有P去碎方法，不作统计显著声明，不晋升AGENTS。
+
+## 20261030-frozen-RGB-perturbation-is-not-line-erasure
+
+- status: candidate; last_verified: 2026-10-30.
+- scope: 原生RGB大范围平滑模糊，经固定旧D5a/N1后，作为单通道T8 NAF训练输入。
+- finding: 增大RGB模糊不只会删弱线。32源原标区域523023个可信GT正点中新缺口3838、旧缺口恢复2350，内部T8输入像素约+7.60%；损伤与新增响应并存。统计需分列原缺口、新缺口、恢复旧缺口和内部输入，不用净缺口数或名义sigma判断难例是否充分。
+- evidence: `docs/NAF_PERTURB_20261030.md`、私有preflight/diagnostic32；6源清晰输入经真实冻结前端逐窗口及整图B exact。共同初态/16000采样计划/GT和首个clean批损失也exact旧控制，保留原loss即可直接监督新增缺口。
+- reuse: 区分RGB退化宽度与后端响应宽度；保持整图扰动再裁窗，防止重叠窗出现人为增强接缝。训练访问日志的valid-GT计数与coverage进一步腐蚀后的trusted分母不能混用。
+- verification_gap: 32源参加训练且GT不完整，内部响应并不都是真假边界；80步固定批可学性不是泛化。正式候选刚启动，无官方增益，不晋升AGENTS。
+
+## 20261030-single-zero-merge-is-not-global-idempotence
+
+- status: candidate; last_verified: 2026-10-30.
+- scope: 基于原实例图一次性填一个零像素的P邻接连通组合并。
+- finding: 每次调用只填原始一零桥，不等于连续调用仍保持同一邻接范围。第一次填出的P像素可令第二次形成新的桥；循环到稳定会改变实验定义。
+- evidence: `tests/test_pearlite_merge.py::test_single_pass_does_not_iterate_newly_filled_zero_into_another_bridge`，7×9零图中令[3,2]=1、[2,3]=2、[3,5]=3且均P，首次只合1/2，第二次又连3。见`docs/PEARLITE_MERGE_20261030.md`；无测试GT。
+- reuse: 缓存回放与部署入口均只调用一次。若未来研究迭代，应明确算另一项逻辑变更，而不是无害的重复调用。
+- verification_gap: 不涉及准确率或官方收益，不泛化成所有形态合并都非幂等，不晋升AGENTS。
+
+## 20261026-ph-matching-and-valid-origin
+
+- status: observation
+- last_verified: 2026-10-26
+- scope: 处理后GT可靠域上的二维cubical有限H1监督；不涉及测试GT或最终实例数约束。
+- finding: 自由持久图Wasserstein配对可能把真实弱环送对角线并接受漏GT的代价，
+  得到压低缺口的反向梯度；必须用能分辨“保留真实结构／删除假结构”的合成概率场测试，
+  不能只测试有限loss或Betti计数。当前GT数量约束匹配在gap0.2／背景0.05弱环上给出
+  抬高缺口的实际梯度；这是受限适配，不保证空间逐实例对应。
+- followup_valid_origins: valid有4px裁边忽略时，从0起的stride网格会让224窗全部被拒绝，
+  尽管[4:252]内实际有合法窗。用积分图核所有合法起点，再按合法域边界／中心取有限代表点，
+  可恢复覆盖且不把unknown当背景。大窗、分离合法域、非方形索引与步数轮换已测。
+- evidence: `utils/boundary_topology.py`、`tests/test_boundary_topology.py`及
+  `docs/BOUNDARY_NAF_20261026.md`；真实32配对预检与合成梯度测试分别报告，不混作泛化收益。
+- limits: 只检查有限H1，平坦预测没有有限持久点时不能伪造补环梯度；需记录缺失目标。
+  合法候选分母与网格版本不同，不直接比较通过率；不晋升AGENTS或据此晋级部署。
+
+## 20261024-cache-inventory-not-dependency-closure
+
+- status: observation
+- last_verified: 2026-10-24
+- scope: 双路线工作区的历史缓存冷存、控制组复用与路径身份。
+- finding: 一份已核验文件清单不等于完整运行依赖闭包；清单外的缓存仍可能被后续步骤读取。
+  同样，history导航入口不证明整个旧输出目录都需要常驻快盘。冷存应结合封存源码、实际输入协议、
+  缓存别名与文件清单；不要仅按大小、日期、未出现在清单或无绝对路径字符串引用来删除。
+- evidence: `docs/STORAGE_MAINTENANCE_20261024.md`及私有
+  `output/storage_cleanup_20261024/dependency_cleanup_audit.json`。
+  proto/fast的688MB fit_pool不在原3402项保护集，但phase重建会读取，故保留完整fast。
+  原Affinity控制封存源码在线从RGB生成监督，不依赖旧CV v1；R2/full显式绑定独立v2缓存。
+- reuse_conditions: 下一次空间清理先核对当前依赖；闲置载荷可在逐文件校验冷备后离开快盘，
+  需要历史重跑时先恢复到原路径，不以指向fs的链接静默改变Path.resolve身份。
+- limits: 本次结论仅覆盖选定缓存和当前协议；不是全部历史实验均可即刻重跑的证明，
+  也不是自动清理规则。不修改AGENTS.md或旧不可变回执。
+- followup_archive_namespace_20261030: FS暂存清重中13个旧checkpoint的manifest成员名省略真实tar的`tree/`前缀；先保留疑项，限定读取约590MiB解压前缀才找到全部实际成员并核SHA，未据文件大小或旧清单删除。归档容器存在／清单记录相同SHA不代替实际成员可读回证据；成员命名需按真实header绑定。证据`docs/STORAGE_MAINTENANCE_20261030.md`及私有FS追加核验回执。567项TMP冷存和4442保护项前后复核只覆盖本轮范围，不晋升自动清理规则。
+
+## 20261005-cuda-randn-device-layout
+
+- status: observation
+- last_verified: 2026-10-26
+- scope: PyTorch2.8／CUDA12.8、FP32连续1024 RGB、新建CUDA generator且offset0的D5a首步推理。
+- finding: 同种子不保证跨GPU得到同一大张量噪声。CUDA normal4写入grid受SM数量影响，
+  会改变恢复器实际输入；不应将跨卡差异默认全部归为舍入或模型降精度。
+  阈值与分水岭可将连续边界差异放大为区域变化，进而改变相同raw语义概率的实例内投票。
+- evidence: `docs/INFERENCE_REPRO_20261005.md`及私有`output/final_delivery/runtime_probe/`。
+  五图各三次独立前向的实例／概率／噪声逐值一致；关闭TF32和数学注意力未消除差异。
+  本机G156随机内核在三种seed、两个编译目标下逐值复现原生torch.randn；模拟4090的G768后，
+  五图类别像素差从0.197%–1.564%降至0.002%–0.026%，F数量相同、预测F均面积最大差约0.003%。
+  固定实例图交换原／本地raw语义概率时test101类别变化0，支持几何范围驱动该例翻转。
+  正式接入后，虚拟布局与实际线程配置解耦，21组shape/seed、105种执行网格逐值一致；
+  compute70/75/89/120在同一5060上的三seed检查一致。五图两进程十次正式输出逐字节重复，
+  且复现诊断原型最终结果；已有训练默认保持legacy，正式入口显式启用版本化策略。
+- followup_linux: 随包compute70 PTX现已在Linux RTX4090实测；三个完整1024 RGB噪声张量
+  （seed314159、314191、−1）与Windows RTX5060 Laptop的SHA完全相同，4090上还与原生
+  fresh CUDA generator逐值一致。固定协议解决的是输入噪声复现，不等于网络对不同噪声图案鲁棒。
+  证据见`docs/RESTORATION_NOISE_20261007.md`及私有`output/noise_probe/kernel_*.json`。
+- followup_noise_sensitivity: 六源同卡八种子隔离检查中，局部恢复平均差仅约0.35–0.73灰度级，
+  四源仍改变F数量；固定末端raw概率也能因分区变化造成实例投票翻类。六源control与原最高分
+  PNG数组／类别完全相同，模型／源码冻结通过。重建误差、噪声复现、终态稳定性需分别验收；
+  不把图像近似不变或相同类别计数当作完整几何稳定，也不把相对控制的变化当作准确率。
+- followup_consistency_bias_variance: 同e60起点、1250更新且逐步数据／噪声完全配对的恢复器短适配中，
+  额外双噪声一致性使四个已见训练源的原生1024模糊输出像素std比控制低约25%–27%，
+  但弱图像梯度方向保留少约0.7–1.1个百分点。八种子经验MSE拆分中，全部模糊条件的
+  均值偏差项都略升；有的总MSE微降只来自方差下降。稳定性、偏差与细节需分别验收，
+  更低随机误差不能自动称为更准重建。见`docs/RESTORATION_CONSISTENCY_20261007.md`及私有
+  `output/noise_consistency/quality8/`；四源均参加过训练、非独立尺度因果或官方准确率证明。
+  六测试源八种子仅替换局部恢复器后，B比共同适配A的连续边界std低15.7%，但最终F均面积
+  相对波动旧／A／B为0.885%／1.000%／0.905%，且预测均值也漂移。连续稳定不保证
+  离散分区更稳；需隔离平均几何变化、方差及固定语义概率下的实例投票影响，不据此晋级。
+- followup_zero_mode_cross: 相同e60起点、1250配对更新的零噪声短适配C，在双方都用零噪声首步时，
+  四个已见源的原生1024均匀／空间MSE比带噪适配A低3.95%／2.06%，弱图像梯度保留略升；
+  但给C恢复旧噪声推理时，模糊输出std变为A的约2.25–2.87倍。训练噪声与推理噪声应交叉比较，
+  仅换权重而保留旧随机输入可能得到相反结论。零输入的确定性是构造性质，不是质量证明；
+  零输入输出也不等于多噪声输出平均。此为带噪预训练后的短适配，不能证明从零训练的噪声无用。
+  证据见`docs/RESTORATION_ZERO_20261007.md`与私有`output/noise_zero/quality/`；非黑盒晋级依据。
+- followup_zero_extension: 同配方由1250接续到2500更新后，同零噪声C仍优于A，但C5→C10的512均匀
+  MSE低1.132%，原生1024空间MSE却高2.876%且四源全差，弱图像梯度保留少0.469个百分点；
+  A原生空间MSE也高2.776%。训练视野改善不能代替实际部署视野检查，也不能把共同回升归因于
+  零噪声独有缺陷。两套视野裁块／退化不同、均为已见源，非纯尺度因果或独立泛化验证。
+  六图固定后端未呈现明确额外收益；证据见`docs/RESTORATION_ZERO_E10_20261007.md`。
+- followup_zero_acceptance: C5局部零噪声在4090／5060各两独立进程、三源终态全部同卡精确，
+  实际逐窗噪声／state核验及跨卡预设工程容差通过；旧固定Philox同样通过，部分最终指标残差仍略小于C。
+  去除种子自由度不会消除GPU浮点残差，也不自动证明质量更好。两已见GT源的可信边界仅7.71%／2.91%，
+  C模糊法线误差比共同适配A略降但弱点半参考响应覆盖不变、清晰漂移略增；GT锚定梯度误差小降
+  不等于补回更多边界。全图语义缓存固定，未覆盖完整包重算或任意GPU，见`docs/RESTORATION_ACCEPT_20261007.md`。
+- followup_third_gpu: RTX4080 SUPER 32GB的原D5a固定Philox三源两独立进程同卡全精确，20窗实际噪声、模型状态、首窗输入及核心精度与旧4090一致；跨卡恢复MAE仍约5e-6至1.26e-5，连续边界MAE约4.7e-5至5.9e-5，最终三态像素差0.261%至0.494%，其中一源F数208→209、预测F均面积变动−0.4405%。这不是新噪声布局不一致；同输入噪声不保证恢复/后端浮点计算与离散分区跨卡一致。未将全部差异单独归因D5a，未测C5第三卡、不据预测间差异判准确率；见`docs/VGPU_CHECK_20261024.md`和私有`output/vgpu_check_20261024/output_comparison.json`。完整portable三图两进程同卡文件精确，不推广150图或任意设备。
+- followup_official_local_zero: 用户回报半决赛150图N0/N1为0.7433/0.9025与0.7439/0.9032，
+  后者仅取消局部推理噪声，原权重不适配，等权+0.065分，未见保留局部噪声的得分必要性。
+  C5局部零噪声N2为0.7412/0.9062，较N1总分仅+0.015、净TP−33/FP+489；
+  更低已见源重建误差或更稳定输入不能自动推出更佳实例匹配。N2对N1净增456预测中428为P，
+  因此总FP不能全归F碎块，P也会影响实例项。分数来自用户，ZIP SHA和TP+FP总数本轮直接核验；
+  见`docs/SEMIFINAL_NOISE_SCORES_20261026.md`。仅支持这次局部消融，无全图去噪或显著等效证明；
+  当前绑定N0的NAF不换控制，最高分包保留与后续研究控制选择分开。
+- reuse_hypothesis: 跨设备复现先比较实际随机张量、恢复输出、连续概率与最终空间配对，
+  再检查计算精度。需要复现旧输入时记录参考随机布局或随机张量，不直接换CPU RNG／零噪声。
+  维持原已评分精度设置；更严格FP32可能改变微小实例组成，不能假定更接近原链。
+- verification_gap: 旧五源跨卡与六源多种子仍仅为机制诊断；新增同赛段150图局部消融回分见上条，
+  不能补足这些跨卡检查的完整性或推成全链去噪结论。
+  已补Linux4090及第三款4080 SUPER的固定噪声/有限终态检查，仍无跨卡完整100/150图检查，第三卡未达到此前严格终态工程参考线；依赖支持CUDA12.8的驱动及架构兼容的Torch。
+  不承诺跨任意GPU逐位一致，不推广到任意offset／dtype／随机算子。
+  不晋升AGENTS全局规则，不改GT或已验证部署权重。
+
 ## 20261004-semantic-region-label-granularity
 
 - status: observation
@@ -90,6 +229,19 @@ scope clarification. It is not a chronological task log.
   固定12源模糊后只加2/255独立噪声，A/B相对各自无噪声的原校正方向保留中位56%／58%，旧91%；
   新模型RGB误差仍略低于旧版，不能将校正减弱等同于精度排序。该结果支持检查高频扰动敏感性，
   不证明测试差距全部由噪声造成，也不说明只要加噪声训练就能提分。证据与定义见上述恢复器专题文档。
+- followup_native_texture_calibration: 48个预固定原生1024窗中，带限频谱加局部归一未通过已知
+  0.5／2倍缩放的方向自检，不可用来估倍率。去线性趋势的全谱代理通过两窗约半／双倍检查，
+  测试组中位粗纹理尺度偏大23%–37%，但只加sigma8模糊也能移动约24%，且清晰度／暗占比
+  联合匹配为0/16。尺度代理应先做已知缩放和模糊混淆校准；不能把统计域差解释为物理倍率，
+  也不能用不合格代理的区间重叠认定尺度一致。范围仅48中心窗、无真实晶粒标签，
+  证据见`docs/ROBUSTNESS_SCALE_20261007.md`与私有`output/scale_domain/`；保留候选、不升AGENTS。
+- followup_semifinal_fov_20261025: 新半决赛固定原生窗中亮度差仍明显，纹理波长区间重叠且受模糊
+  混淆；CV边缘曲折度混入清晰珠光体内部纹理，不能用来验证真实晶粒形状错配。固定N0同中心
+  原生768／1024／1280映至1024，在exact复现原窗口／拼接并配对网络噪声后，768通常线带更细、
+  中心峰更强；逐像素原强响应跌阈会将线带收窄误作断边，需另查同原图坐标邻域峰和最终分隔。
+  116两处弱口的尺度偏好相反；更细更强不足以证明统一倍率或真实补界。本轮只查九源24档局部，
+  视野、上下文、网格间距和原图点噪声对应关系同时变化；没有完整实例读出或官方成绩。
+  证据见`docs/SCALE_SHAPE_20261025.md`及私有`output/scale_shape/`，保留候选，不升AGENTS。
 - followup_mixed_budget: 固定1280更新的全图／1024混合头，各视野只有640更新；拆分相同输入后，
   两边末5轮人工loss仍比对应专用控制高1.26%／2.80%。这既不等于混合无效，也不足以证明梯度冲突，
   因为专项更新预算同时减半。报告混合实验时同时给出总预算和各视野预算，并固定推理入口比较。
@@ -336,7 +488,7 @@ scope clarification. It is not a chronological task log.
 ## 20260919-instance-count-shift-includes-class-voting
 
 - status: observation
-- last_verified: 2026-10-03
+- last_verified: 2026-10-30
 - scope: 铁素体计数/平均面积变化的语义与几何归因
 - finding: 铁素体像素总量接近而实例数减少，不足以将变化全归为合并；小实例改判为珠光体也会显著改变均面积分母，却只改变少量像素。
 - evidence: `docs/STAGE1_FINAL_TASKS_20260919.md`回分后诊断。旧新68图按形状IoU≥0.5对应4966对，F→P 308、P→F 17，净类别计数差−291；未对应部分净F差−278，总F差−569。F→P旧预测面积中位1575像素，F→F为14950.5像素，前者仅占旧F总像素0.90%。
@@ -355,6 +507,9 @@ scope clarification. It is not a chronological task log.
 - reuse_hypothesis: 面积退化时同时检查类别组成与预测划分；以各自encoder/LoRA独立前向的输出交换进一步定位，不把旧头直接挂到新共享特征。
 - verification_gap: 无测试GT，无法判定具体改判正确性；旧替代实验的预测对应仅为计数分解，不能按−291/−278给语义/几何作因果分摊。新交叉可量化固定PNG后的分类来源影响，但PNG生成已含上游语义作用，不能推成纯affinity因果效果或LoRA失配的唯一原因；回分来自用户，暂无逐图官方分数与重复实验。
 - limits: 不据此恢复错误类别、强制铁素体数量或用黑盒分数反推目标平均面积；一次替代配方失败不证明旧joint-v3不可替代。
+- followup_WS_semantic_input_20261030: 同20a59/S0/200、同13源固定NAF及分类概率，仅把WS的128/200语义底图改为统一128，当前9图F计数逐图不变，F均面积却全部下降0.1106%–0.3428%；该改动同时改变两类区域边界带的灰度对比，不能只归因消除了语义界面。独立种子内缩1px则使九图F总像素全部增加，但总F733不变来自两图+1/−1抵消。固定head和raw投票不等于冻结几何、逐图面积或逐实例类别。两组均无稳定原标核／接口定位收益，不据此调目标面积或解释旧高分为错误抵消。证据`docs/SEED_CORE_20261030.md`、私有`output/readout_core/received/`；九图不是全150，GT已见不完整，保持观察项，不晋升AGENTS。
+- followup_readout_identity_20261030: 分层检查不能停在种子身份或最终面积档。K1虽保留种子ID，仍能把原F面积推过末端200门槛，间接触发合并；H0重新生成ID后，须按空间覆盖及双方类别核对，才确认237的两个非超小F预测区合并，而非超小碎块去噪或语义翻转。逐实例精确面积保留私有risk记录，不复制进公开知识条目。种子计数、最终总数、小F面积档、实例身份和类别变化应分别记录；预封ROI未包含该变化位置，补图必须标为后验差异定位，不能混成预封样本或测试真值证据。证据`docs/STRONG_READOUT_20261030.md`，无新增官方收益结论，保留观察项。
+- followup_H0_official_20261030: H0同末端200正式回分两项均略降，等权参考相对C低.080分，FP少94伴TP少11。已见接口覆盖微升、全150实例净少105和precision提高，均未保证官方收益；不能把旧support50到H0的变化全归因取消弱生长。证据见同报告的回分节，保留C、不晋级；只更新该候选观察，不推断弱生长普遍必要或统计显著性。
 
 ## 20260925-brightness-change-versus-sensitivity
 
@@ -514,6 +669,7 @@ Use this shape:
 - reuse_hypothesis: 跨目录统计有标签覆盖、去重或排除已标注样本时，先核验来源身份，不按文件名直接关联。
 - verification_gap: 已核验当前服务器32/32一一对应，尚不推广到其他历史数据副本。
 - limits: 不改变原图、GT或文件名；无标签训练仍可完整遍历1000源。
+- followup_20261030: 封存无监督语义对照再次遇到raw32与1000池train001/557同名不同像素，GPU前hash门槛截住；正确原标raw32与冻结诊断cache RGB完全一致，改用无损同像素输入后执行，不放宽hash或改旧资料。仅凭同名不能推断模型是否见过某图，跨池需原SHA映射；正式150另逐图绑定原file及RGB hash。证据`docs/SEMANTIC_UNSUP_COMPARE_20261030.md`、私有`output/unsup_semcheck/received/diagnostic_rgb_difference.json`；旧32/32映射未在本轮重新全部核验，不扩张其适用范围。
 
 ## 20260926-consistency-coverage-and-signal
 
@@ -638,3 +794,290 @@ Use this shape:
 - followup_support_e5: 同R1／旧B实际输入的320更新已完成，旧答案、冻结及strict重载通过；共同SAM2训练断开specificity回拨0.3984百分点，但四源冻结分隔带未一致恢复、固定188F最终IoU几乎不变且测试小F增加，另两预随机非monitor无一致收益。预检恢复大量合法关系不保证最终结构改善；日志恢复比例不能分摊剩余误差的因果占比，也不能据5轮判饱和。用户据阶段收益／成本搁置伪GT并返回此前外围保护方向；这不是伪GT普遍无效的结论。不晋级经验或全局规则。
 - verification_gap: 支持修补5轮已完成，无独立验证集或本轮官方回分；GT端点关系不等于重新确认的物理边界，原生窗口计数变化与whole不同，不能外推为所有尺度同方向；未训练断开冲突保留变体。
 - limits: 保持既有允许数据、人工确认和未知ignore边界；不从测试图推断GT，不凭诊断替换最佳部署，不晋升AGENTS全局规则。
+## 20261008-unsupervised-provenance-evaluation
+
+- status: observation
+- last_verified: 2026-10-08
+- scope: 纯无监督路线的初始化、教师、评价和模型选择来源审计。
+- finding: 脚本名含SSL或论文称无监督，并不保证默认执行链完全不读人工标签。
+  与表征梯度隔离的监督探针，不等于表征训练被GT回传；但若据其选权重、阈值或配方，
+  仍可能引入选择依赖。需分别核对梯度路径、数据读取和模型选择，不能只查loss。
+- evidence: 本地`tools/pretrain_lora_ssl.py`默认eval_every=5，探针加载监督decoder与人工验证集；
+  no_grad且best按重建loss、末态固定导出。STEGO官方训练代码还含标签读取、detach的监督probe、
+  GT簇匹配及GT cluster mIoU checkpoint选择。详见`docs/UNSUPERVISED_RESEARCH_20261008.md`及其原始来源链接。
+- reuse_hypothesis: 新严格路线关闭GT探针并使用独立允许清单；旧权重同时审计训练和人为选择历史。
+  只证明checkpoint哈希相同不足以证明纯净来源；不因发现GT评估就断言其进入SSL梯度。
+- verification_gap: 组委尚未澄清冻结后GT评估、自动mask或人工质量筛选的认定；本观察不代替正式资格判定，
+  不晋升AGENTS规则，也不改变有监督主线的训练／部署要求。
+
+## 20261023-linked-workspace-source-preservation
+
+- status: observation
+- last_verified: 2026-10-23
+- scope: Windows实际源码快照导入Linux新Git worktree；原实验实体原位保留。
+- finding: 尾斜杠目录ignore不一定匹配新建的目录符号链接，应在新仓库以准确、无尾斜杠路径补充本地exclude并逐项check-ignore。原字节保留CRLF时，Git 2.34.1即使正常status或update-index --refresh也可能多报M；实际diff与filtered hash应先区分内容改动和索引stat差异。
+- evidence: `docs/SERVER_WORKSPACE_RESULT_20261023.md`；私有`output/workspace_setup/reference_audit/stat_refresh_receipt.json`与`new_entries.json`。仅对filtered hash等于index blob的准确tracked名单刷新stat后，前后ls-files --stage完全一致、869/1025源码SHA不变、真实17/1修改与187未跟踪源码保留，stage空；106新链接和两个实际保密hook通过。
+- reuse_hypothesis: 保留历史字节和路径优先于让目录看起来整齐；新入口既要验证resolve目标，也要验证Git是否忽略链接。CRLF导入出现大量M时，先核内容而非批量转换换行或暂存真实改动。
+- verification_gap: 本轮Git版本及两工作树已验证，不外推到所有Git/filter配置；不是允许宽泛git add的规则。只处理已证明内容与索引一致的明确名单，不触碰原工作树或真实未提交改动，不晋升AGENTS。
+
+## 20261025-gap-origin-through-frozen-window-trace
+
+- status: observation
+- last_verified: 2026-10-25
+- scope: 固定N0、三张旧测试图20个原生窗口；只捕获响应并重放实际融合、插值、拼接和最终输出，不使用测试GT。
+- finding: 近闭合强响应缺口不能仅由最终热图归因于拼接或marker。此次主缺口在各覆盖窗口的短程top2中已经低于现有弱阈值，长程门控接近全开；原网格邻点也偏弱，实际融合与拼接只是进一步降低。另一个位置确有融合稀释，但最终仍超过弱阈值，不能据其局部降幅认定整环失效原因。该结论只定位到恢复器＋编码器／affinity共同链路，未隔离某个头或某个训练目标。
+- evidence: `docs/SEMANTIC_DINO_20261025.md`；私有`output/gap_trace/summary.json`、`roi_statistics.json`及远端逐窗数组。八方向SAME显式转CUT，融合网格、原生插值、BlendMap、边界缓存、最终实例／类别、全图分支及模型摘要均与原N0逐值兼容。
+- reuse_hypothesis: 按原始方向→短程归约→门控融合→插值→重叠窗权重逐层追踪，在实际部署输出兼容后判断哪个环节丢失证据；避免用单方向高值、各窗极值图接缝或单个阈值跨越代替完整连通分析。
+- verification_gap: 三张图只作机制和工程诊断，没有GT准确率、官方收益或不同尺度／输入／骨干的归因；不能据此全局降低阈值、改最大融合、强制补环或认定融合普遍无害。不晋升AGENTS。
+
+## 20261025-synthetic-boundary-restoration-domain
+
+- status: observation
+- last_verified: 2026-10-26
+- scope: 随机单通道残差补边五轮；处理后32源GT合成配对，固定N0三旧图原生连续热图与原reflect终态。
+- finding: 合成断口/假线误差下降与真实分割改善可以分离。此次固定和64新随机配对均有效，真实关注缺口也实际分开，但另一真实图在F像素近似不变时F小片大增。只看热图强度、净实例数或合成损失会掩盖修复与新增碎分割并存。
+- evidence: `docs/BOUNDARY_RESTORE_20261025.md`完成分析；私有`output/boundary_restore/analysis/`的训练审计、单调映射、响应域与最终关系统计。只按像素原强度的单调映射解释63%–73%输出变化，模型仍有超出映射的空间作用；.45响应带宽中位数合成6.00px、真实12.65px，低于.01像素比例86.41%/0.0369%。真实e5生成沿宽边界的双线/小环，不能把全部归因为统一增亮。
+- followup_naf_width_intervention: 独立随机17.632M NAF的s5000在四固定图将147/403/124/363实例降至2/1/1/1，二值适配单独控制仍175/423/126/390。固定权重CPU三训练源同图干预中，GT原细线正位置输出均值0.996–0.999，只有膨胀半径2后原线中心低于3e-8，半径2邻域最大均值降为0.370–0.429；真实N0响应带面积/骨架长度约10px而GT约2px。N0仅细化后中心线强响应恢复，两个测试中心窗同向；直接连续输入未修复。说明容量和人工缺口过拟合不覆盖真实输入表示验收，域差不能只归测试来源。尚未证明细化后完整划分更准；细化也改变线位/支路，需同预处理无NAF控制。固定六配对gap仅有效域0.1406%、s5000缺口响应0.296而全域MAE0.00197，须分开稀疏目标预算与原线保持。证据`docs/BOUNDARY_NAF_20261026.md#第5000步弱响应诊断线宽失配已得到直接支持`及私有`output/boundary_naf/analysis5000/`；只有33个CPU窗口变体、非完整GPU/官方收益，无新训练或当前拓扑干预，不晋升AGENTS。
+- followup_naf_final_readout: 原配方6000完整结束后，四图二值接法仍2/1/1/1；64已见源配对按源gap MAE0.629→0.529。额外冻结GPU对照将整图二值N0先统一细化再分窗，原N0终态与八条原NAF二值输出SHA全部exact、权重不变。仅细化与细化后3×3膨胀都未使116既定内外点最终分开，NAF5000/6000却分开；强0.65原始背景仍连通，必须区分概率屏障与marker膨胀/最终分隔。细化控制四图175/456/142/436，NAF6000为234/583/161/509；预测F均面积降4.1%–19.9%，不能把恢复强线/分开一例当完整收益。恒等细线保持、稀疏gap恢复、真实输入表示与新增线可靠性是不同门槛。见同文档6000末节及私有`output/boundary_naf/analysis6000/`；无新训练、测试GT、150图候选或官方分数，不晋级或把阶段收益单归PH。
+- followup_naf_gt_and_samples: 全32训练源同GT审计中，s6000原标域新增骨架6.84%距记录边界<=4px、82.79%>8px深部，填补域83.99%近界；来源落点与支持界面OO/含填补必须分开。仅深部响应不等于切分，须在完整同GT-safe域看子块，再用移除新增深部屏障的诊断反事实排除共现；395个双原标支持旧分量（375个GT）严格成立，但原标仍可遗漏，非物理错误率或最终WS成绩。与此同时精确重建96k样本访问、计划/日志匹配，可靠边界目标曝光99.975%、实际擦断87.327%，不能把失败首先归为没有采到；裁窗/D4不等于独立源，32源不保证泛化/收敛。gap像素访问83.86%落filled也不是错误率或参数梯度比。真实N0假支路/粗细/底噪未出现在GT擦断输入，需优先检查任务域覆盖。证据`docs/BOUNDARY_NAF_GT_20261026.md`及私有`output/boundary_naf/gt_audit/`；12构造测试通过，GT来源遮罩不另造连通域，未知忽略。没有新训练/测试图/官方评分，不晋升AGENTS。
+- reuse_hypothesis: 热图恢复首先检查真实输入线宽/底噪/幅值与合成配方，并用不看空间的强度对照、训练源新随机配对、固定终态及分类别拆分/合并诊断分解作用。优先试真实热图自损伤恢复其自身幅值和宽度，可作为隔离输入失配的实验，但不能默认纠正教师原有错误。
+- verification_gap: 没有本轮真实测试GT或官方成绩；域差与副作用同时观察到，未隔离哪项为唯一原因。64新配对源图参加过训练，单调映射只是输出变化分解，不是准确率/候选提交；后续真实热图短训见下方followup。不晋升AGENTS或替换最佳。
+- followup_same_source_domain: 后续80源同图/跨域对照确认两层失配同时存在：32GT同图native512的GT/真实N0 .45带宽为6.00/10.10px，原始标注层仍成立；GT采样插值控制为6.32，单窗/实际拼接带宽配对差中位为0。其余24训练与分层24旧测试真实N0又为10.00/13.11px，不能把真实域差全归合成。原标注4–8px距离带响应GT/控制/N0为.0347/.0544/.3737，显示宽软尾部；峰值则相近。详见`docs/BOUNDARY_DOMAIN_20261025.md`。这些观察不隔离采集倍率、模糊、组织/曝光或模型各环节，不提供e5副作用的因果贡献率；真实热图配对训练仍未启动。
+- followup_real_self_corruption: 五轮真实N0自损伤后，同目标64配对断口MAE旧/新为.1911/.1022，完整输入误改.1061/.0133；反向合成配对则旧更好，支持表示适配、不是新模型普遍更强。固定166的原单峰剖面多峰606/1753降到6/1753，F<500为65→1；但101为4→14，116原缺口点.324→.566后环内外仍同marker/最终ID。保存教师原幅值能抑制大幅误改，却不给教师既有漏界新的答案。固定假线中心去除还可伴原样邻域新增亮斑：须用input==target排除低于mask门槛的腐坏尾巴，再报邻域而非全域均值。实际noise单像素附加损失/普通valid中位1120倍提示稀疏区域独立分母的风险，不是参数梯度倍率或已证实因果。证据`docs/BOUNDARY_REAL_20261025.md`、私有同目标配对/clean64/原固定读出；无测试GT或官方收益，不晋级AGENTS。未来应区分局部恢复、既有响应保持和真实遗漏纠正，不以删小块或加epoch替代目标设计。
+- followup_rgb_induced_response: 8源/24ROI的原生sigma2/4均匀RGB模糊→固定N0，零档16窗与旧缓存exact、实际注入噪声同字节；新变化包含原弱线增强、错位及弱化，不能把所有扰动当单向退化或把原图教师视真值。54对原闭合区域在两档分别仅1对、2对合并，sigma4另12对不确定；真实补边e5的合并变0却13对不确定、配对MAE反升，说明删去受扰锚点后分母缩小可造成伪修复。所测一维幅值对照仅解释约3%变化能量，不支持主要归全局重标定，但个别粘连仍可由幅值映射触发；也未证明新增RGB一定有效。证据`docs/BOUNDARY_RGB_20261025.md`、私有capture/analysis及48次严格旧模型配对前向；没有GT/测试准确率或新训练，不能以八中心ROI否决所有模糊配方。下一候选为RGB输入单变量，MALIS须先核实际部署对应，不晋级AGENTS。
+- followup_rgb_context: 固定目标/损伤/共同随机层/五轮预算，仅加原RGB的实际对照中，模型确在使用RGB，完整输入到N0的偏移.01328→.00897，但人工断口误差.10219→.10871、22/29有效源退步，116关注环e1/e3/e5均未分隔。额外信息与训练loss下降不等于纠正教师原有错误；原目标漏线没有新增正答案，应先检验独立结构监督，再考虑扩输入或轮数。此结论只适用于当前自损伤目标，不否定RGB、其它配对或所有补边方法。证据`docs/BOUNDARY_CONTEXT_20261025.md`同配对/完整输入/原读出诊断；32源参加训练，CPU native与GPU计数相符但热图SHA不同，无官方准确率，不晋级AGENTS。
+- followup_dualcgb_fidelity: 核对原文后确认当前补边器仅借鉴恢复思路，并非Dual-CGB复现。
+  原文包含前端EGD/NormSkip抑噪、约17.63M恢复器、GT破损→完整GT的BCE+GAN训练、
+  后续持久同调微调、迭代修复与未连接扩展回退；4340的五轮约53,000更新，不能与当前320更新
+  按epoch等量比较。原文消融也有单加恢复器显著退步，且组合并非所有指标都升。
+  此次跨设计对照不能归因失败于单一缺失模块，也不能仅加轮数冒充原文验证；N0自复制目标与
+  GT纠错目标的差别需显式保留。证据为原文doi:10.1016/j.mtcomm.2026.115965的2.1–2.5节及
+  表4/5/8/11，对照见`docs/BOUNDARY_RESTORE_20261025.md`原论文核对节；仅候选知识，不升AGENTS。
+- followup_core_relations: 全32已见源、52异GT可信内核对的冻结反事实显示，处理后共享界面位置参照使39对消除预设显著共享、原同主体32对中25对主体分开，但严格零共享仅24对；将任意小共享对应的整marker画紫，会把54px／0.261%残留放大成主体仍粘的观感。严格零共享、主体分隔、实际泄漏量及登记原标内核副作用必须并列，不因像素级门禁未过而否定关系监督。六例扩已知外围使修改量3.38倍，严格残留未消、内核伤害增加，不支持仅扩大修改域；这些例的残留在两GT已知并域内已存在，不能先归第三GT／unknown绕行。原子稳定只覆盖登记内核，旧0变正的新跨GT共享需额外核对，内核外小种子不在保证内。证据`docs/BOUNDARY_CORE_20261025.md`、私有`output/boundary_core/analysis/`与`neighborhood/`；25项CPU、封存test116最终读出exact桥接及32源marker重放。属于机制观察，尚未训练可微关系目标、未验证泛化或官方增益，不将派生0.9界面当可靠新真值，不晋升AGENTS。
+
+## 20261025-source-namespace-content-alias
+
+- status: observation
+- last_verified: 2026-10-25
+- scope: 已处理32GT原图目录与允许1000训练池之间的来源绑定、抽样排除与固定索引。
+- finding: 两目录沿用相同train编号样式，但同basename可能是不同图片，编号对应也不是固定偏移。此次32GT原图各自通过已有SHA，并在1000池按文件SHA唯一匹配；按名字做“同图”或排除已标注来源会错配。原图文件SHA绑定正确的既有训练不因此失效。
+- evidence: `docs/BOUNDARY_DOMAIN_20261025.md`；私有`output/boundary_domain/gt_pool_identity.json`的1000内容索引、32唯一对应与按内容排除集合，以及`selection_audit.json`。同图GT与实际N0中心RGB逐值相同，三桥接旧N0完整ROI相同。
+- reuse_hypothesis: 跨目录同图比较、人工源排除与seed/index复用先绑定内容身份，再记录各目录展示名和完整源池index；不同命名空间的派生产物用显式别名区分，不能靠重命名真实数据补救。
+- verification_gap: 本轮32源均有文件SHA完全一致对应，没有研究重新压缩但解码等价的图片；不允许把近似视觉匹配默认为精确身份，不修改AGENTS或原数据。
+
+## 20261025-gt-boundary-support-density
+
+- status: observation
+- last_verified: 2026-10-25
+- scope: 已处理32源GT、完整真实N0原生热图，正边界纠错候选；不涉及测试GT或新的人工标注。
+- finding: 原标像素覆盖率不能替代晶界监督覆盖率。此次原标覆盖90.42%图像像素，但79.66%处理后GT边界中心落在filled；侵蚀原标联合域8像素后只剩6.26%骨架。仅严格域零候选不足以否决GT正监督。允许最近原标同实例且≤4像素的薄filled后仅4段/4源，放开来源约束的观察对照也仅8段/6源，多数被邻近偏移响应检查拒绝；已见训练源的GT半径4强响应匹配98.90%，难以给冻结后端新增漏界答案。
+- evidence: `docs/BOUNDARY_CORRECT_20261025.md`，私有`output/boundary_correct/analysis/`严格、thin_fill与processed_upper分立回执；构造器86554d2a…07ad3f55，21项CPU通过及独立正例/反例复核。观察域必须包含known-safe中未获GT正监督资格的旧响应，否则会漏检旁边已有线；仅看缺段中点也会漏掉端部偏移线。
+- reuse_hypothesis: 构造GT纠错时，分别统计像素/边界/实际修复/有效分隔分母，并用不改变其它条件的来源对照判断是支持域排空还是已拟合监督缺新信息。不要用重复裁少数已见短段充当多源新监督，或关闭防双线检查凑数据。连通检查应绑定补线核心而非任意提亮尾部；核心与两锚同网络仍可能只是单端附接原网络，要先报两锚原本是否已连、再看两侧区域是否真正分开，不能把同网络算新增双端补通。
+- verification_gap: 当前计数依赖短段长度、锚点与阈值，不能推出GT或所有补边方案无效；processed-known对照会改变路径分段，不是候选数量的数学上限。三探针仍连通也不能证明局部增补全错。没有新训练、测试准确率或官方收益；不晋升AGENTS，不替换N0。
+
+## 20261025-cuda-resume-exact-probe
+
+- status: observation
+- last_verified: 2026-10-25
+- scope: Torch2.8 CUDA、RGB补边器、FP32及旧TF32设置下的两更新后第三步续训检查。
+- finding: 相同初态/输入的前向与loss逐值相同，CUDA反向更新自身重复仍可能使参数SHA不同；先比较自身重复本底，再判断是否恢复错误。本次继续/重载权重maxdiff1.669e-6，与两个重载分支自身重复1.738e-6相近，梯度分别7.02e-8/7.49e-8。仅在第三步核验临时启用确定性算法后两路梯度/权重逐值相同，允许保留严格SHA门禁而不改变正式训练数值模式。
+- evidence: `docs/BOUNDARY_CONTEXT_20261025.md`；私有`output/boundary_context/diagnosis/resume_probe.json`、`deterministic_probe.json`及原失败smoke现场。实际48参数/优化器状态完整、更新前SHA及前向exact；29项CPU回归及独立AST审计证明修复只作用于短测第三步、正常/异常均恢复enabled与warn_only，不改TF32或正式训练。
+- reuse_hypothesis: 严格续训验收须分清状态加载、前向、反向和优化器更新。未经重复基线诊断，不直接放宽容差或单凭SHA不同指控checkpoint损坏；若仅核验需要确定性，scope退出必须恢复设置，避免污染控制实验。
+- verification_gap: 当前证据没有定位唯一非确定算子，不保证任意设备/算子均支持确定性模式，也不证明正常正式训练逐位复现。这不是D5a推理噪声的消融或解决证据；不晋升AGENTS。
+
+## 20261025-auxiliary-gradient-conflict
+
+- status: observation
+- last_verified: 2026-10-25
+- scope: 随机初始化RGB补边器的连续路径附加监督，五轮；固定16个已见源、两种输入、八批e5冻结参数梯度，不涉及测试GT。
+- finding: 附加目标非空、总loss下降和人工损伤恢复改善，不足以证明新增纠错目标有效。此次约98.5%的已满足路径位置仍进分母；防泛亮项的loss系数虽只有0.05，其实际参数梯度在八批均更强且与补线路径反向，合计附加梯度也反向。全局LR、同乘的梯度裁剪或整体放大附加权重不能修复内部相对方向。应先分解真实参数梯度，再选择单变量配比，而非仅看loss标量大小或继续加epoch。
+- evidence: `docs/BOUNDARY_STRUCTURE_20261025.md#五轮完成后的分析`；私有`output/boundary_structure/mechanism_report.json`和`mass_calibration.json`。31,334位置中477个未达0.70；八批合计附加/path余弦-0.467至-0.205，mass系数0.005的已存梯度校准为0.942至0.996。64同目标配对人工gap误差按源等权0.10909→0.09730，但116自然缺口完整GPU读出仍未分开；七图热图与原monitor逐值兼容。
+- reuse_hypothesis: 辅助损失没有明显改变目标行为时，分别记录有效纠错分母、各项参数梯度范数及方向、损伤任务与天然错误的变化；只改被证实竞争的相对系数，保留原控制，不将局部梯度校准当作新模型收益。
+- verification_gap: 冻结位置的普通梯度一阶分析不是Adam真实更新重放，不证明所有训练批次均竞争，也未由该校准验证0.005的训练收益。未隔离分母稀释的最终因果份额，开放链也不保证完整分隔。没有独立准确率或官方增益，不晋升AGENTS或替换部署。
+- followup_mass005: 同随机e0／同320步的0.005单变量五轮确使新e5八批结构/path恢复同向（0.920–0.998），64配对人工gap约降12.9%，七图双峰／低值抬亮和F小片减少；但原样训练图359弱位置的e1改善到e5回落，116实读出仍未分开。新e5原样输入四批base/path反向且base范数大得多，说明修复一个辅助项内部竞争不足以保证原始纠错任务学会；后续须同时审查主任务共享参数竞争、有效监督分母及真正分隔。训练clean强线MAE增加而测试原强线掉阈反减（18→4），也说明到教师的无符号偏移不能代替方向／阈值／最终读出。证据`docs/BOUNDARY_MASS_20261025.md#五轮完成后的分析`与私有paired/mechanism/native_gpu回执；未作全过程Adam因果重放，没有GT或官方收益，不能把未迁移唯一归为测试域差，不晋升AGENTS。
+- followup_naf_gan20261026: 真实N1骨架→处理后GT的NAF固定16批512步中，BCE＋GAN在已有线/漏线上退化并出现点阵；失败权重的瞬时全局BCE/GAN梯度余弦仍为+0.169，合计BCE投影为纯BCE的1.126倍。保持同初态、同批次、LR及预算，仅关GAN后原三类门槛全过，GT中心响应约0.999996、背景约7.1e-8、深部输入线r1响应约3.1e-8；64次正常换批也数值稳定。说明单时刻梯度同向不能排除对抗训练耦合动态造成拟合失败，固定批GAN失败不能直接否定容量/可学性；需实际单变量干预，而非仅数学缩放梯度。邻域max也不能单独证明线连贯，应同步检查精确GT像素和图样。固定批只训练draw0–15，monitor里更大索引不能当同批拟合图。证据`docs/BOUNDARY_NAF_REAL_20261026.md`及私有`output/boundary_naf_real/{g0_smoke,warm_complete,gradient_probe_complete}.json`；只支持本种子/批次，不证明GAN普遍有害或测试收益，不晋升AGENTS。
+- followup_naf_real_final: 随后同GAN0配置的6000步正式训练数值稳定，却使四图最终全部1实例；32源GT-r4峰从旧同N1的0.977降为0.285，精确GT像素BCE却从0.355降为0.0469，31源>.65全空。固定16批拟合与换批64步稳定不是最终幅值/分隔验收，精确薄线loss更低也可能伴宽弱平均响应。GT正线虽仅1.76%，正loss对全域贡献仍约2/3，不能由像素比例直接推断无有效正梯度。预定两源的GT4px附近输入骨架中75%–79%落于精确背景目标，支持位置差异解释但未证明因果；五档单调校准恢复部分test116分区而仍未补既定缺口，排除“简单调亮即已可用”。证据同专题完整训练分析、私有`analysis/{geometry_summary,probability_summary,calibration116,positional_probe}.json`。不据此否定所有真实输入纠错，不晋升AGENTS；下一步先检验位置容差监督候选，而非盲目增加epoch、正类权重或全测试推理。
+
+## 20261025-boundary-training-timing
+
+- status: observation
+- last_verified: 2026-10-25
+- scope: RGB结构补边小网络、FP32、有效batch4／microbatch4；只读已有320步日志与过程图文件时间，不改变正在运行的mass消融。
+- finding: GPU显存闲置不能直接推出扩大有效batch会等价提速。此循环的step_seconds在同步构造batch之后才开始，漏掉逐窗界面／骨架／候选几何；每条路径还重复校验整张预测／目标，normalizer与loss重复检查固定几何，预测依赖的选路需CPU/GPU同步。monitor保存缩略图但实际仍推理七张整图并做CPU读出，不能用JPEG尺寸判断其成本。
+- evidence: `docs/BOUNDARY_MASS_20261025.md#下一轮的速度优化候选`；`train_boundary_context.py`的`_batches`与计时起点、`models/boundary_structure_loss.py`的`_validated_map/select_path/_support`、`tools/boundary_context_monitor.py`的逐tile推理。已完成控制总1224.29秒，已计step合计371.55秒，四次monitor时间差合计322.27秒，剩余530.47秒未细分。
+- reuse_hypothesis: 先覆盖数据准备／CPU动态选路／前后传／monitor／保存的完整计时，再尝试静态校验复用、确定性预取和monitor批量tile；保留随机流、有效batch、更新预算与数值模式，验证输入／选路／更新和最终读出，不先用更大batch或AMP改变对照。
+- verification_gap: 文件时间和已有日志不是精确profiler，未证明各个候选的独立耗时或加速收益；未实施任何提速或额外GPU基准，不把全部剩余时间归给几何，不保证并行batch推理逐位一致。不晋升AGENTS。
+
+## 20261026-complete-separator-feasibility
+
+- status: observation
+- last_verified: 2026-10-26
+- scope: 真实N1输入、随机NAF、原标可信内核的完整8邻接分隔选路；固定16视图128步短测。
+- finding: 内部平均响应很低仍可能有少数高点挡住静态种子，使完整分隔对被拒绝；只看均值会漏掉有效监督停止。保留静态种子和严格拒绝条件，将内部保持损失集中到未满足低响应条件的位置后，短测后段种子阻挡减少，60对固定关系分开17对。不能通过随预测删掉/换掉种子把失败改算成功。
+- evidence: `docs/BOUNDARY_REGION_20261026.md`；私有`runs/naf_region/{smoke,smoke_tail}`、固定关系明细及选路原因。另在32视图中，完整可编辑域都挡不住的固定绕行可先精确拒绝；10组落点不变，选路从73.69秒降至9.36秒。
+- reuse_hypothesis: 关系监督需同时记录静态身份、被拒绝原因、实际有效梯度和稀有冲突位置；保证完整分隔时不得删除未知节点或拿裁框封口。优化选路应先证明位置不变，再报速度。
+- verification_gap: 这是固定批可行性，不是测试准确率或完整晶粒分隔收益；短测test116关注缺口仍未闭合。全图marker/WS读出还需正式阶段检查，不能据热图和关系计数晋级，不晋升AGENTS。
+- followup_formal1000: 1000步/32源均衡访问结束，未塌陷但固定116仍未分开；新输出骨架为输入99.9826%、强线面积4.6687倍，普通3×3膨胀已解释大部分GT邻域覆盖增量。四图实例1027→1191→1203分别对应N1/仅骨架/网络，不能将适配变化全部归给模型；raw8诊断的数万微片也被纯加粗复现。先隔离输入表示、线宽与最终marker/WS，再讨论补结构收益。固定训练缺失559位置过阈率s250的64.22%到s1000的24.33%，409个记录GT深部输入位置仍全过阈；静态种子/完整割可行性不能保证足够补边监督或清除旧假线。详见同专题完整分析及私有geometry/width_control、ferrite_splits、target116回执；GT已见、可漏标，没有官方新分数，不晋升规则或部署。
+- followup_seed_ancestry: 用户指出101强边界旁小块。一个seed的anchor到膨胀阶段才落入封闭背景，不能证明整颗空腔由该阶段创造；需全种子映射各阶段全图背景祖先。169的55个原N1零低支撑seed中，52在强阈值时已有封闭祖先，细化时却均并入触边共享祖先，再膨胀/封边恢复；“此前未闭合＋零支撑”只选3且偏向图边，不宜直接作硬门槛。NAF为全部428个seed生成了低谷，不能用其自身低谷证明可靠；零原支撑与较大原内核应区分，101的2030px定位块有1175px原低核心，不能靠同一去微洞规则删。作用于内核的50px即便复用已有数值也是新语义门槛，需独立验证。证据同专题出包与整种子诊断、私有`output/naf_submit/receipts/`。没有测试GT、过滤后得分或通用安全证明，不晋升规则。
+- followup_zero_support_filter: 8源四臂（N1/NAF×滤前后）在真实reflect seed上撤销原N1≤.45像素为0者，WS高度/语义/raw分别固定，基线最终全exact。六测试小F为N1 40→38、NAF 62→38；无整片旧实例变0，新增0半径≤1，但101大F2030→2058仍保留。已见GT两处新共享仅15/10px与7/15404px，不能夸成主体误并，也不保证细通路安全。说明读出须与重建表示一起做隔离对照，撤种子与末端删实例不同；小块减少不等于准确率、相同总数不等于相同对象。证据`docs/MARKER_SUPPORT_20261026.md`及私有`output/seed_filter/review/`；35项CPU、实际32次小样本读出，未做官方验证，不改默认或晋升规则。
+- followup_official_unfiltered: 用户报告同赛段未滤Region s1000 mIoU/面积0.7403/0.8821，比N1总分低1.235，净TP−74/FP+2750；平台预测总数20455与原ZIP吻合，未核平台提交哈希。150图重读显示F像素仅−0.204%、F数+3.35%，127图预测F均面积下降，符合微分区风险；不能把净增FP逐个归给新碎片，也不能用池化均值反推逐图面积分。正式结果不支持把响应增强/变细当有效补边，先等独立filtered回分、降低本版NAF密扫优先级。只胜过较差原NAF不足晋级，须同时对N1；filtered尚无官方分，不否定所有补边方法或升级为全局规则。证据`docs/SEMIFINAL_NOISE_SCORES_20261026.md`及私有`output/naf_submit/score_20261026.json`，原包不变。
+- followup_positive_gate_audit: 2026-10-27复核最后S2及旧/H05/L2实际回执，四组1000步均关闭精确GT BCE/GAN/PH；保线只覆盖原输入骨架附近的GT支持点，天然缺口只有被动态选入活动分隔才获直接正监督。GT允许走廊不是完整正标签，合法raw8分隔也不证明最终WS原先未分开。后100步每16样本仅平均选中1.27–1.81对，不能将此比例当缺口覆盖或梯度占比；损失独立归一且全程裁剪，未测逐损失梯度归因。RGB增加信息不能自动弥补监督入口限制；改输入表示/监督后须单列归因，再做同目标RGB对照。证据`docs/NAF_TRAIN_SWEEP_20261026.md`审计节及私有`output/naf_sweep/rgb_preflight_audit.json`；未新训/前向、未证明各因素因果，不晋升全局规则。
+- followup_tolerant_degeneracy: 2026-10-27新RGB截面目标的纯合成反例显示，单直线、带内附着两环和64个横向交替离散点，均58/58覆盖且重建loss同为4.1223e-9（不含GAN）；逐截面max及带外负项不保证峰间连接或带内单线。正式RGB末100步全部正点覆盖97.333%，天然缺失点加权覆盖仅201/15329=1.311%；缺失点只占共同正分母0.9623%。提醒区分监督入口、困难子任务预算、覆盖与结构可辨识性；不能由标量覆盖或固定批过拟合宣称闭合。证据`docs/BOUNDARY_RGB_NAF_20261027.md`末节及私有`output/naf_rgb/analysis/{cached_audit,tolerant_degeneracy}.json`；未证实际所有伪影唯一原因，控制仍待完成、无官方分，不晋升全局规则。
+- followup_rgb_pair_raw: 随后同配方T-only1000完成，逐步data/LR/目标及源码均配对。4缓存×2NAF重算热图SHA/实例数exact，原始数值2×2相位均值极差RGB0.6085–0.6402、T0.2003–0.2483，N1仅0.00056–0.00179；点阵不只是JPEG。T的0.65原生微暗腔更多，最终小F却44而RGB143（N1为26），说明数字孔洞、周期性、最终实例必须分开评估。T更保守但两组116预登记内外仍同ID3，均无稳定补缺证据；据此选择T作作者式输入表示试验控制，不推广为RGB普遍无效。证据同专题完整横向节、私有output/naf_rgb/pair_analysis/{comparison,raw_complete}.json；无测试GT/官方分，未隔离PixelShuffle/GAN因果，不晋升全局规则。
+- followup_width_final: 作者式输入T1000的4缓存终态exact，小F44→29但共同raw缺口仍0/161、116未补开。总实例1085→1011中P少65、F只少9，提醒按目标类别拆分后才能讨论面积风险。新2×2相位均值极差更大、同格局部棋盘对比更低，周期伪影的不同指标可反向变化，不能挑一项判全面改善。分区叠加也见较大区域合并/拆分与改类，少分区不自动等于少误切。证据docs/NAF_WIDTH_TRIAL_20261027.md终态节与私有output/naf_width/evaluation各回执；固定4图无GT/官方分，仅保留整形研究候选，不晋升规则或部署。
+
+## 20261026-runtime-config-parser-identity
+
+- status: observation
+- last_verified: 2026-10-26
+- scope: 使用冻结`utils.config.load_config`读取完整JSON运行配置、再与训练identity核对的独立NAF队列。
+- finding: JSON文件经该YAML解析器读取时，`5e-05`与`1e-08`在此环境变成字符串，`json.loads`则保留float。直接将原始JSON对象与训练器实际解析后的配置逐值比较，会在训练正常完成后误报配方改变。H05仅两处有此差异；实际run/config与冻结解析器输出、identity.recipe完全一致，Adam eps消费者显式float转换且与控制相同。
+- evidence: 私有`runs/naf_sweep/failed.json`保留原核验错误；`recovery_formal_check.json`通过修正后的解析身份及其余全部旧门槛，含1000步采样/LR、严格权重重载、六阶段monitor和四图基线exact；专题`docs/NAF_TRAIN_SWEEP_20261026.md`。
+- reuse_hypothesis: 同时保留声明配置的单变量检查与“用训练器同一冻结解析器解析后的完整配置/identity”检查，不全局放宽字符串/数值比较，也不改旧训练器来迁就核验。完成的训练经全部原门槛复核后再接续，不因元数据误报重训控制。
+- verification_gap: 这里只核实该解析器版本和两字段；其他数值消费者不保证自动转换，不能把任意字符串差异视为数值等价。不晋升AGENTS或改解析规则。
+
+## 20261027-seed-core-final-filter
+
+- status: observation
+- last_verified: 2026-10-27
+- scope: 冻结N1原生reflect种子、真实OpenCV分水岭及最终面积50的8源缓存候选。
+- finding: 降低种子核心门槛但保持最终面积门槛不变，并不自动保护输出。25/50候选纳入23个小核心，21个终态仅52–123px；另两个先竞争分走像素，再因面积45/47被最终过滤，可能留下0而非让邻居接管。两张已见GT的可信内核新增18个0像素和1次碎分，未恢复原0内核。种子数量变化不能直接解释为有效实例召回。
+- evidence: docs/SEED_CORE_20261027.md；私有output/seed_core/complete.json及integrity.json，原50/50种子及最终PNG/classes在8源exact，实际WS高程哈希相同，16份终态均通过最终面积50及uint16契约。
+- reuse_hypothesis: 改种子生成时追踪过滤前watershed面积和过滤后核心去向，检查临时种子是否先侵占旧实例后被删除；不能只看最终仍有最小面积过滤或仅在post_process普通分支改参数，遗漏生产reflect替换。
+- verification_gap: 仅6张无标签测试及2张已见不完整GT；未运行官方评分、训练或全量推理，不证明每个微块都假、不否定其他种子策略，不晋升AGENTS。
+- followup_dense_marker_constraint: 只读同8源既有N1 core_audit与原尺寸，内部正marker覆盖全图93.11%–97.59%，像素合计31324915/32566016=96.19%，占最终正区域97.43%。原CV分水岭只把未标记像素入队；因此保留整片marker而只更换高程，大部分像素不会获得重分配自由。本批正marker已避开被CV强制清空的外框。后续应区分seed数量／身份、占地与读出方案；同数量收缩时至少保留最终50门槛所需的核心，否则会混入成品过滤。证据docs/MARKER_SIMPLE_20261027.md“后续定位”、私有output/seed_core/complete.json与既有capture manifest；此为几何自由度诊断，不是准确率，也不保证少量边界变化不能翻转整块类别。新的2x2方案尚未运行，不晋升AGENTS。
+- followup_fixed_final_area_preview_20261029: 现有共享min_area同时筛核心和成品，不能为去微块直接整体调高；最终PNG又按面积重排ID，不可直接当WS marker ID。仅有终态PNG时，原0分界会让简单同ID重标留下孤岛；本次固定200的局部邻接合并显式回填同root接缝并保留其它大区正像素，8项合成和18真实候选契约通过，但无GT/官方增益。旧cap合并器会按数量停止、孤立区置0，不能直接拿cap替代面积下限。最外行不触边也不排除bbox距边1px的残片。证据`docs/FINAL_AREA_FILTER_20261029.md`及私有`tiny_filter/`；类别继承与同高程WS重票是两种读出，阈值分离与处理策略变更应分别说明，不据微块清理假说晋升AGENTS。
+- followup_deferred_cleanup_contract_20261029: 若末端候选要合并并继承目标类别，就不能先在WS把这些小区删成0，也不能在合并后无声明地重新作raw投票。需保留旧drop缺省、显式延期到最终语义票之后，并验证marker/reflect/S0真实调用链，而非只看普通API张量。现有最终ZIP可用于同上游终态变换，不能借此声称重算种子或恢复源流程已删除的小区。真实169旧/拆分50/50/延期合并50三种最终ID与类别exact，18张T200与旧预览exact，证据同专题及私有`output/area_floor/bridge/compatibility.json`；只证明兼容与范围，尚无新官方分数。
+- followup_official_area_tradeoff_20261030: 用户报告同8eb/S0的100→200净TP−6/FP−1513，200→500净TP−137/FP−2248；500虽为新族最高81.840，仍被旧20a59/S0的.7467/.9058两项同时超过。按半决赛专项公告FP不直接扣实例项、面积为逐图全部F均值误差，不能因P碎片骤减/Precision上升晋级。500全局F10383近旧10345、池化均面积仅低.258%，但逐图F数69多/55少相互抵消，官方面积仍低.0097；这验证池化接近不能替代逐图官方分。只支持本配方统一门槛的匹配代价和诊断边界，不证明所有小区是假或物理倍率不同。证据同专题及私有`score_20261030/`；旧部署保持，不把新旧上采样/擦断/ridge/GAN多变量比较归因单一GAN，支撑比例候选尚未执行，不晋升AGENTS。
+- followup_support_ratio_risk_20261030: 旧20a59五例完整缓存的5%支撑门槛撤17核心；169同一函数比例0最终对原包exact，所检r4高覆盖GT内核对无新共占、预测F连通复核无新割断，却仍有train557小P289px在撤seed211px后部分被F接管：151个GT P像素中38原标/113filled。说明‘内核无新合并’或‘大主体不翻类’不能排除小结构相别损伤；r4侵蚀亦会排除细通路，需另查未侵蚀known区/通路及标签来源。train001的30个thin F→P全filled、29为填补P，不能仅凭亮色或填补GT认定全改对/全误伤。支撑少是原预测冲突而非假实例真值，撤种后的归属/投票同样重要；比例与面积不等价，5%不直接推广。证据`docs/SUPPORT_RATIO_20261030.md`与私有`output/support_ratio/`，两已见不完整训练GT/一个本赛段无标签及两历史图范围有限，不晋升AGENTS。
+
+## 20261027-skeleton-connectivity-contract
+
+- status: observation
+- last_verified: 2026-10-30
+- scope: 将连续边界B经0.5阈值、整图细化S后，接完整8邻接分隔监督和原冻结marker/WS读出的NAF支线。
+- finding: 细化保持某种数字拓扑不等于保持另一种背景分隔。32源8前景组件数和4背景闭环数保持，但8背景闭环数均改变；闭环要排除触框组件，总背景组件数未必相同。完全不经过网络，B/二值T/S在冻结最终读出已产生不同分区（116为391/431/451、169为365/391/429）。因此先分开幅值阈值化、线宽/位置变化、原生连通和实际读出，不把适配效果全部归给恢复网络。
+- evidence: `docs/NAF_LIMITS_20261027.md`及私有`output/naf_limits/{weak,adapter}/`；B参照与S既有monitor均exact，原语义/raw投票/reflect固定，无模型前向或训练。原标524169个GT线点中阈值缺失2.590%、细化位置偏差7.229%，后者不是原幅值本来弱。
+- reuse_hypothesis: 接入骨架或拓扑损失时，显式记录前景/背景4/8邻接及边界处理，验证原生图与完整marker/WS链；先保留连续信息，再评估是否值得扩大负标签或新增恢复模块。
+- verification_gap: raw闭环计数不是实际watershed或准确率，未证明数字邻接差异占用了多少梯度/正式失分；训练GT已见且可漏标，两测试图不能代表全150。10月27日该NAF支线封存不等于该网络架构普遍无效，不晋升AGENTS。
+- followup_original_representation: 2026-10-27已核对Dual-CGB公开官方代码（n-okt/Dual_CGB的readme.md、config/train_res/316L_Grains.yaml、test.py、utils/image_processing.py）。恢复器输入确为1通道；作者训练/推理有细化后再恢复受控线宽，并非直接1px骨架。RGB进入前端检测器，用户提出RGB＋二值T→NAF→GT属于新条件扩展，不是恢复器原样复现；作者tau为二值票比例而非直接概率阈值。输入线宽、目标、极性和最终读出必须分别核对，不能凭发现差异断言旧失败主因。细节与新候选保存在docs/BOUNDARY_NAF_20261026.md末节，未训练，不改变旧封存状态或晋升全局规则。
+- followup_width_cohorts: 2026-10-27核官方推理ellipse核316L=8、TBM=3、4340=4/指定5图11；训练按GT前景EDT70分位估厚，不可称作者统一1px或训练恒8px。同N1合同32训练/4固定测试中央原生1024的T>=.5典型2EDT宽10/11.83、P90为12.65/16.25、>16骨架点2.06%/11.18%；.65典型均8.25但尾部仍不同。提示实际二值入口阈值、肩部与宽尾需分开检查，骨架剔叉口后另查交汇尾部；核边长不等于宽度代理，ellipse8在轴向/斜向为8/10。N0历史24额外训练/24旧测试及4新测试另层同向，不与N1混池。证据docs/NAF_WIDTH_20261027.md及私有output/naf_width/各回执；固定测试不是150随机总体，未作模型线宽因果干预、无新推理/训练/官方分，不晋升全局规则。
+- followup_actual_cut_gate: 回原affinity的同64视图预检中，静态seed从dS>4换为固定原B<=.45后，合法割2→16、raw8新增分隔1→11，说明dS距离不能冒充连续B低响应资格；旧政策85次被挡中两seed墙像素比例中位仅0.1999%。但按顺序预封的171实际原WS已分开，27px理想cut没有目标收益、却新增252px P片（232px落记录core），触发保持门槛。现有处理已修好的raw8漏路不能直接作为新的待补边目标；先以真实最终实例错误取得资格，再看理想干预和head梯度。此例不证明物理假边或官方扣分，原GT可漏标；完整理想割证书也不能直接授予开训资格。证据`docs/AFFINITY_GAP_20261027.md`、私有`output/affinity_gap/ideal_v2/final_gate/`；按规则早停而非异常，没有C/A或过滤网络训练。
+- followup_iterative_readout_20261030: 两step1000恢复器各五例1/2/3轮、固定语义及原N1 S0，十例一轮概率与缓存exact且169终态各对正式包exact。直接递归使旧组小F<200由7升至2130，NoGAN16升至188；纯T8空循环不幂等，但三张测试图闭孔略减，不能独立解释碎区膨胀。169第三轮旧高阈值背景8连通无闭孔、4连通却有密集微孔，经bridge及细化后扩宽产生大量可存活小腔，重建S0 markers与保存结果exact。提示固定读出并不意味着它不会放大新输出的微结构；必须分别核输入规范化、数字邻接、读出阶段和最终实例。新增小F均有实际原N1低响应种子支撑，S0支撑不能验证围边正确。证据`docs/NAF_ITERATION_20261030.md`、私有`output/naf_iter/{verified,trace}.json`；仅五例且GT已见/不完整，无官方新分，169第三轮不能推广为单轮全150根因，不晋升AGENTS。
+- followup_marker_dilation_20261030: 同旧20a59单轮、S0原N1与末端200的五例实际干预中，只将种子细化后扩宽1→0，真实WS障碍哈希与控制相同，过滤前仅7区、过滤后每图各1区；不能把扩宽当无关修饰直接删除。D0同时得到“无小F、无GT核多分、薄F覆盖保持”，却显然全图粘连，说明这些代理须与实际分隔和粘连风险联合解释。扩宽2仅有较小变化，.45／.55输入阈值会交换新增碎分和丢失分隔，未修开116登记缺口。证据`docs/READOUT_SCAN_20261030.md`、私有`output/readout_scan/received/`；只覆盖五例、GT已见且不完整，不证明所有模型都必须使用同一扩宽值，不晋升全局规则。
+- followup_finite_weak_growth_20261030: 固定20a59/S0/200，仅marker生长8→4步在当前9图重建mask完全相同，历史101只少4px，最终13例pre/final ID与类别均逐SHA完全相同；应先验干预是否真的改变信号，不能把无有效扰动解释成“训练或纠错无收益”。低阈值.45→.50去掉当前图额外重建弱像素的25.25%，只小幅移边，未稳定去环；新8图F<500少1来自跨500档而非删除实例，需按空间身份跟踪，不能把分档计数下降当去碎。证据`docs/WEAK_READOUT_20261030.md`与私有`output/readout_weak/received/`；已见不完整GT仅诊断，九图不代表全150，不将该饱和范围推广为所有恢复器的规律。后续保留原生ID连通性检查，116仅作历史案例，不设为普遍晋级门槛。
+
+## 20261027-naf-phase-mechanism
+
+- status: observation
+- last_verified: 2026-10-29
+- scope: 作者式线宽T-only NAF step1000，固定权重、严格二值合成输入、CPU单窗诊断；不涉及训练或测试GT。
+- finding: 初态至训练后，8px竖线2×2局部交替幅度0.01865→0.36871；输入平移1px的逆对齐线带MAE0.407–0.546，而16px为0.00168。临时平均最后/倒数第二/全部四级PixelShuffle的四相位激活，交替幅度降为0.11609/0.09054/0.01032，定位多级相位自由度被训练放大；输入标准化、拼接、JPEG并非必要原因。现行容差重建目标给连续48点线与48个孤立侧移点完全相同loss4.1223e-9，覆盖不保证连续。
+- evidence: `docs/NAF_CHECKER_20261027.md`及私有`output/naf_checker/{cpu_complete,loss_counterexample}.json`；同seed初态、原始float概率、单次前向、位移及激活干预，模型state与checkpoint文件SHA前后相同，CUDA未初始化。无损合成示意`synthetic_phase.png`，脚本哈希记录于专题文档。
+- reuse_hypothesis: 遇到周期伪影时，先以原始float、单窗、初态对照、平移协变和局部激活干预定位，再选单变量训练消融；不得只因含PixelShuffle就断言唯一原因，也不能用逐截面覆盖率证明边界连通。
+- verification_gap: 激活平均也改变内容/幅值并丢失子像素信息，不是正式修复；原PixelShuffle分支GAN贡献未独立消融，后继bilinear/ridge配方的GAN对照见下；GPU精度或官方增益未由本探针验证，合成输入不是实际准确率验证，不晋升AGENTS或替换部署。
+- followup_real_RGB_phase_20261029: 冻结D5a恢复RGB＋T8擦断组的两块真实干净256窗口，原输出SHA与固定monitor相同；RGB/T同步移位后只比较中心valid，GT±8带内移1px逆对齐概率MAE0.163–0.230，移16px仅0.0014–0.0036。该模型的2×2棋盘项下降，规则竖向多轨仍在，空间均值RGB也未消除网格；因此单个棋盘统计改善不等于相位稳定或线条更规整。证据`docs/NAF_RGB_ERASURE_20261028.md`终态与私有`output/naf_rgb_erasure/analysis/natural_probe/{complete,phase}.json`。只定位现象，不唯一归因PixelShuffle，也不把均值RGB下缺口峰值增加当真实补边；不晋升AGENTS。
+- followup_width_occupancy_and_multistage_phase_20261029: 同GT法向剖面应拆开高响应占地、外包跨度和分离段数。无RGB平移约束终态的固定train173窗口中，N1占地/跨度均5.96离散采样格；NAF占地2.51、跨度6.41，297/359高度相邻位置为多轨。量化对角法向步长sqrt(2)，不能把采样格称欧氏像素宽。单窗绑平均最后up相位几乎无效，绑全部四级多轨降至86/359，但自然缺口强点3→0；参数SHA不变、移除hook后原前向exact。支持多级相位参与，不支持直接平均部署或唯一归因PixelShuffle；完整B1又把多轨组织成微环，四缓存小F30→81。复用时同步核原浮点输出、位置/方向、GT可信域、共同平移内域及最终读出，不能只比较线宽或棋盘项。证据`docs/NAF_SHIFT_20261029.md`终态、私有analysis/{phase_probe,phase_profile_supplement,stages_shift,complete}.json；已见不完整GT和固定无标签测试不代替官方成绩，不晋升AGENTS。
+
+- followup_bilinear_control_20261029: 同原T8擦断1000更新、数据/GT/LR逐步配对，仅四级up换投影＋bilinear，两个真实原生窗的1px逆对齐MAE0.312→0.052、0.112→0.013，棋盘项同步下降；但359同截面多轨308→302，平滑平行轨经原B1变成狭长碎实例，四固定测试小F30→958。自然缺口2→0/161，原强点支持基本保持，四个指定人工分隔仍保住但另一批176点强响应176→165。冻结实际重建项的合成核对中，单线/中间留黑双轨/实心带同loss4.1223e-9；仅证明重建项不约束单连通，不代表GAN总目标等价。上采样能改善相位却不保证唯一主脊及最终拓扑，应分开验收相位、多轨、弱线和完整实例。证据`docs/NAF_RESIZE_20261029.md`及私有`output/naf_resize/analysis/{complete,training_audit,phase_probe,stages_resize,loss_counterexample}.json`；GT不完整/已见、测试无GT且阶段探针仅101，无官方新分，不晋升AGENTS或部署。
+
+- followup_ridge_supervision_preflight_20261029: 原pointwise容差不删任何正点，额外用处理后GT实例走廊筛单A/B界面，再在±4预测剖面构造停止梯度的区间上包络，只监督中央±2。深暗谷采用稳定KL值和融合BCE解析p-q反向，避免概率平方饱和或log-sigmoid微小舍入反向推峰；单线偏移/弱单峰/实心带零新项，双/三轨只抬谷不压峰。轴向3/斜向5条完整整数射线排除A-B-A、A-B-C和交叉，额外17×17全known，仅限制新项；32源前128 draw资格83.74%，两已见实际多轨缓存有有限独立填谷梯度，固定128短测保住174/174人工缺口及约99.9%原支持。证据`docs/NAF_RIDGE_20261029.md`、`tests/test_boundary_ridge_loss.py`及私有cache_check/audit/smoke回执；这是设计及可学性证据，正式泛化/最终B1未知，不晋级或晋升AGENTS。未标出的界面仍无保护保证，外围错轨仍依赖原negative。
+
+- followup_ridge_supervision_final_20261029: 同1000更新配对终态中，GT资格中央±2多轨64→2，但全±8三轨及以上136→151，.45弱阈值同样有外轨残留；只验中央目标会漏掉外围结构。原生四人工分隔保留、强点165→176/176，四测试小F958→800但仍明显碎分，已见GT内核出现新显著共用实例及内部响应增加。外轨大多已属原negative，不能简单当无监督灰区或扩大填亮半径。两已见固定窗、D eval且无更新的完整G梯度显示GAN/ridge余弦−.9305，直接谷上多数GAN压暗、新项填亮，全目标仍多数填谷；支持单独GAN消融，不足以断言GAN唯一致因。证据`docs/NAF_RIDGE_20261029.md`和私有analysis/{complete,phase_scope_supplement,weak_threshold_probe,gradient_competition,core_summary}.json；高度相邻剖面/已见不完整GT/无标签测试均非官方精度，不晋级或晋升AGENTS。
+
+- followup_readout_threshold_20261029: 固定ridge概率只升高阈值.65→.75或低阈值.45→.55，两个测试的附着细轨/小环确有减少，但不是只去外围弱轨：小F424→263/280，大F377→332/333，原N1弱marker相对原已覆盖点额外丢125/42；116登记断口仍未分开。较强并行响应在.75下仍残留。提高读出阈值应同时查弱边支持、粘连与类别投票，不能只以碎块减少判好；低阈值单独提高仅保留为较温和候选。证据`docs/NAF_NOGAN_20261029.md`和私有`output/naf_threshold/complete.json`，N1参考非GT、已见GT不独立，无官方新分，不替换部署或晋升AGENTS。
+
+- followup_zero_GAN_and_input_edges_20261029: 同bilinear＋ridge、完整随机初态/GT/16000draw/LR及B1不变，仅GAN.01→0，1000步后同379剖面全±8多轨253→2、三轨151→0；高响应占地反增而外包跨度/暗缝下降，是分离细轨变实带，不是整体压暗。四测试最终小F800→34（冻结N1为26），116登记点对实际分开；原强支持8375→8277/8428，仍有局部偏移/弱边代价，无官方增益证据。末端分解定位外峰已在learned ending中；20次固定相位横/竖直线宽度反事实显示旧外轨随二值带两侧跳变移动（竖线宽6–12的外峰始终在边缘外1.5px），去GAN在.65下全单段。支持该配方GAN与输入边缘偏置参与，不能归罪读出、只靠填谷中央统计验收，或推断所有GAN/所有相位都无效。微孔增多与最终碎块减少同时发生，概率孔不可当最终种子/FP。证据`docs/NAF_NOGAN_20261029.md`、私有analysis/{training_audit,gan_onset}.json、phase/{complete,summary,width_probe}.json及固定读出；仅2已见窗/4无标签测试/有限合成线，不晋升AGENTS，不证明填谷可删或替换部署。
+
+- followup_plain_factorial_20261029: 补齐同初态1000预算的GAN×ridge四格，CPU同379剖面全±8多轨(G1R0/G1R1/G0R0/G0R1)=306/253/120/2，四测试小F958/800/189/34。GAN不是多轨必要条件，去GAN和填谷在此配方互补；去填谷原coverage/interior更低、部分弱支持略好，却恢复外围轨/碎块，并让已见GT69/115主要内核重新显著共用实例。116与四人工两组仍分开，不能把填谷收益泛化成所有断口都更强。同379中央±2均无多轨，外围变化不能全解释成这些中央位置被直接填平；更完整合格目标的诊断loss/梯度和共享参数作用应区分。raw微孔少也可能对应更多可成种子的较大暗域，不能以微孔总数替代最终拓扑。证据`docs/NAF_PLAIN_20261029.md`及私有analysis/{complete,training_audit,core_review}.json、phase/{complete,summary,width_probe}.json；当前保留G0R1，不证明0.1最优、任意预算下R0都无效或官方增益，不晋升AGENTS。
+- followup_official_and_cohort_20261029: 新NoGAN无S0官方.7489/.8609，虽相对病态GAN＋ridge四图大幅去碎，却相对真正最高旧20a59＋S0净多2487FP、面积−.0449。同none仍退化，不能只归因缺S0；新旧还含上采样/擦断/ridge差异，不能单归GAN。全150 F覆盖近似不变而数量+7.67%、预测汇总均面积−7.28%；微块档只解释部分计数净增，正常尺寸分区/投票也会改变面积分布。更关键的是固定101/116/166/169只有169属于当前169–318评分集。机制对照应同时锚定真实部署，并核诊断样本与当前评分集的交集；出包后的全量类别/面积分布可作风险检查，不能代替GT或按基线数量校准答案。证据`docs/NAF_NOGAN_20261029.md`官方节及私有`score_20261029/`；新S0待分，无新训/推理，不退休原多轨机制结论或晋升AGENTS。
+- followup_area_histogram_20261029: 进一步拆分逐F面积后，268仅新增87/150px两个小实例，就令全均值/中位数低11.23%/27.81%，而>=500档数量和大面积加权CDF近乎不变；312的残余变化也主要落在500–10000档。不能把“>=500档均值下降”自动命名为大晶粒主体普遍缩小。输出诊断宜并列绝对数量直方图、按实例计数CDF与按F像素面积加权CDF，并按图像尺寸分层；均值/中位/分档不是同对象面积追踪，也不是GT误差。原说明中的“正常尺寸”仅指超过500px分档，不具有物理或标注正确性含义。证据同专题面积直方图节及私有`area_hist/{areas,summary,tail_decomposition}.json`；没有应用面积过滤或新增模型实验，不晋升AGENTS。
+
+## 20261028-naf-stage-to-instance
+
+- status: candidate; last_verified: 2026-10-30.
+- scope: 冻结N1后接作者式输入T-only NAF s1000，再使用既有bridge/reflect/core50的完整读出。
+- finding: 高阈值热图的海量碎组件未必进入最终实例。四缓存NAF的313939个高阈值8组件在bridge后为126，178个微核心被已有核心50门槛排除，最终1011种子与缓存最终实例数相同。与此同时，全150图总实例较N1净少409，F却净多290、P净少699；全类别去碎不等于面积目标改善。
+- evidence: `docs/SEMIFINAL_NOISE_SCORES_20261026.md`的2026-10-28回分节、`docs/NAF_COHERENT_20261028.md`；私有`output/naf_followup/{scores,readout_report}.json`。用户回分mIoU提高0.0032但面积下降0.0076，综合尚未晋级；17370个输出与TP+FP一致，未核平台提交ID。
+- reuse: 设计新过滤前先沿实际threshold→bridge→thin→seed→final追踪变化，并按目标类别拆分计数；不能用像素孔洞或全类别实例数替代FP/官方面积。
+- verification_gap: 四缓存无GT，未证明被过滤者全部为物理噪声，也未识别全部净TP变化对象；保ID种子收缩只有计数未实际读出，不把其像素释放当准确率增益。本候选不晋升AGENTS，也不支持按基线F数量/均面积拟合阈值。
+- followup_coherent3: 后继同初态/同1000计划的三点共同偏移目标减弱局部点阵，却在四缓存将小F29→236；原始概率已出现平行轨和横杆。合成证明单线、带内宽带、双峰/梯形环仍可同样低loss，短段共同offset不是整条唯一主脊约束。实心宽带的细化并未凭空生环，不能只因宽就归罪thin。101/116固定新热图、真实WS高程和raw投票，仅marker bridge1→0减少部分附着小环，但伴随其它拆合且116目标未补通；这支持读出适配有空间，不证明准确率。证据`docs/NAF_COHERENT_20261028.md`终态节及私有`output/naf_coherent/evaluation/`；不按环数/基线均面积选参数，不直接晋级、扩训或扩大三点为五点。
+- followup_same_ID_cooccupancy: `compare_marker_atoms`的a/b_shared_pixels分别对全部共同新ID求和，
+  不代表同一对象内双方主体混合。实际A在两个新ID内8666/6px、B为2/6885px，
+  并集量8672/6887看似很大，主体仍分别占据不同ID，仅有6/2px交叉。
+  后续量化主体误并需逐新ID并列双方像素/比例，同时保留微接触与旧正core分裂统计；
+  不能把严格零接触门槛产生的pair数或并集量写成整粒合并数。
+  证据`docs/NAF_READOUT_20261028.md`及私有`output/naf_readout/seen_risk/refined/complete.json`。
+  此为诊断量解释，未修改公共函数历史口径，也不将已见不完整GT当独立准确率，不晋升AGENTS。
+- followup_local_marker_change: 固定20a59和真实WS高程取消前bridge可清理登记小环，却会重塑其它seed占地，
+  两已见源之一出现48796px旧原标core的4914px切出；同高程不等于仅局部去块。
+  改为保持原B1种子，仅撤销零原N1低响应内部支撑的seed，四测试14登记小块全部接管，
+  两源旧正core无碎分/归零，仍有最多15px次要支微接触。这只支持局部候选，不证明所有撤销者错误或官方增益。
+  证据`docs/NAF_READOUT_20261028.md`、私有`output/naf_readout/{readout,seen_risk,support}/`；
+  helper以哈希绑定的私有副本加载，不补写缺失模块到旧R8快照，不将本例晋升全局筛选规则。
+- followup_marker_threshold_20261030: 固定同一20a59／真实WS场，仅marker强起点.65→.60仍可造成非单调的空间重组；当前9图种子与pre200都净增1，final却净增21，实际由末端200少合并20放大，F／P需再拆开。阈值后的细化、反射、连通、面积与S0使“降低阈值只会多切”不成立；种子、pre200与最终数量相等也不是数组别名。应追踪空间身份及各阶段候选／成功合并数，不能把净增实例当新增TP，或将未能单父归属的种子叫新增晶粒。证据`docs/MARKER_HIGH_20261030.md`及私有26份终态／seed详情；只支持机制解释，已见GT方向不一致，无P060官方增益，不晋升AGENTS。
+- followup_S0_official_20261029: 用户补报完整20a59＋S0包.7467/.9058、平台82.62，ZIP SHA939cccb59175…及16863预测=TP+FP一致；相对同G无S0，mIoU−.0004/面积+.0102/综合+.490、TP−5/FP−502。支持该固定模型读出适配的面积/综合收益，而非额外净检出，也不证明所有撤销seed为假。新NoGAN＋ridge/双线性/擦断包读出仍none，不能继承本分数或把跨读出变化全算给训练；应按完整旧S0方案留基线，新G按同读出另验。证据`docs/NAF_SUPPORT_PACKAGE_20261028.md`、`docs/SEMIFINAL_NOISE_SCORES_20261026.md`和私有score_20261029.json；未核平台提交ID，无新实验，不晋升全局筛种规则。
+- followup_RGB_peak_vs_partition_20261029: 同GT/擦断任务加入恢复RGB后，四个人工案例176个缺口点仍全>.65，原B1无显著两GT原标core共享却从4/4降为1/4（两例主体合并、一例B的72.9%与A主体共ID）；其中两例clean输入已混合，不能把退化全部算给人工擦断。101/166骨架孔数下降，但后继belt<500px孔332→2153/337→2377，四测试最终小F30→163。需要同时保留输入clean/damaged、局部峰值、同一新ID内双方core像素及最终形态；峰值或骨架阶段单项好转不能当完整分隔增益。证据同`docs/NAF_RGB_ERASURE_20261028.md`与私有analysis/{complete,stages_rgb,belt_hole_bins}.json；已见不完整GT和无标签固定测试均不替代官方评分，不将孔数当误检数，不据此否定所有RGB方案。
+
+## 20261028-input-kernel-anchor-and-connectivity
+
+- status: observation; last_verified: 2026-10-28.
+- scope: NAF整图细化→OpenCV离散椭圆膨胀的输入表示；本次CPU合成环境OpenCV4.12.0。
+- finding: k8/6/4的实际离散核不是连续等比缩放；缩核既可分开相邻线，也可撤销输入级补口。偶核anchor相对外接框中心的+.5元数据不等于整体预测平移(.5,.5)：单点k8实际质心约(.226,.075)，k6约(.310,.103)。因此保持偶数/默认anchor只能减少混杂，不能声称几何偏置完全相同。
+- evidence: `docs/NAF_WIDTH_TRIAL_20261027.md`末节；私有`output/naf_coherent/evaluation/input_kernel_cpu/{analysis.md,complete.json}`。真实历史raw T→骨架+ellipse8支持一定去碎但闭环/栅格转角混合，不能把新核越小越好当结论。
+- reuse: 核尺寸、NAF输出形态、GT容差分别消融，训练/推理共同改变输入核；若研究更准定位，不把收紧GT容差与输入缩核混为一项。
+- limits: 初始证据仅CPU形态与历史4缓存；后续k6证据见下条，k4仍未训练。实际精度需按原生像素/源码版本复核，不由质心或闭环计数代替。不晋升AGENTS。
+- followup_kernel6: 同初态/源码/1000步数据计划、训练推理共同8→6后，四缓存局部交替和部分附着环减少，
+  但共同raw缺口终态仍0/161、116未分开；F585→586、小F29→35、小P197→263。
+  原N1弱响应共同骨架17559点的r2强响应保留16887→16499，说明局部去环可伴随弱响应代价和其它位置碎分增加。
+  不能用变化后的normalized缺口分母、局部环或总数代替完整分区；也不能以s500短暂16/161择优代替统一终态。
+  证据`docs/NAF_KERNEL6_20261028.md`及私有`output/naf_kernel6/evaluation/`；四测试图无GT、七训练pair已见，
+  没有k6官方分或架构普遍失效结论，不直接晋级/扩训或推广为缩核定律。
+
+## 20261028-pythonw-child-console-flash
+
+- status: observation; last_verified: 2026-10-28.
+- scope: Windows本机以pythonw运行的服务器队列等待/下载器；不涉及模型或服务器任务变更。
+- finding: 隐藏Python主程序不保证SSH/SCP子进程也隐藏。19:27:21直接捕获本机等待器启动SSH状态查询及其conhost；同秒启动Windows Terminal，随后确认窗口可见。脚本的两处subprocess.run仅capture_output，未指定禁止创建窗口的creationflags或隐藏startupinfo，成功等待间隔为60秒。
+- evidence: 私有`output/diagnostics/console_flash_20261028_192721.json`保留进程父子关系、可见窗口时间及脚本SHA256；源为`output/naf_support/deploy/pull_when_complete.py`。采用无需管理员权限的短时进程轮询和窗口枚举；Terminal直接父进程为系统服务，因此其与SSH的联系按时间关联记录，不伪装成直接父子链。
+- reuse_hypothesis: Windows后台等待器应在SSH/SCP等每个外部命令处设置适用的无窗口参数，并实际观察子进程启动时是否出现可见窗口；只验证主进程pythonw存活或日志quiet字段不足以证明静默。
+- verification_gap: 本次只定位，未修改/重启下载器、未终止服务器任务，也未实测修复后的无窗口行为；不能据此排除其它时刻存在其它闪窗来源。不晋升AGENTS。
+
+## 20261028-naf-gap-cohort-identity
+
+- status: observation; last_verified: 2026-10-28.
+- scope: BoundaryRGBNAF跨旧真实输入monitor、新erasure cohort和原生整图机制评估。
+- finding: “缺口”同名不等于同分母。旧`real_pair_metrics`按raw T到GT欧氏距离>4选161点，新erasure cohort按r2方形邻域缺失选185点；两者输出都取r2峰值，不能因此混比。另固定七pair人工缺口与四个原生人工断口恰好都为176点，但坐标集合不同，总数相同也不能当配对证据。
+- evidence: `docs/NAF_ERASURE_20261028.md`终态口径节；私有`output/naf_erasure/evaluation/{monitor_audit,clean161,complete}.json`。首次严格断言在GPU前向前拦下混比，保存现场后，仅重建旧161点所在两块clean输入；source/box/D4/GT/valid与cohort SHA绑定，得到旧0/161、新2/161。训练和冻结代码未改。
+- reuse_hypothesis: 对缺口/保留/假线指标同时记录选择器距离定义与半径、评估响应邻域、输入参考版本、有效域与坐标集合身份；同总数仍须核mask/坐标哈希。新添人工破坏与天然缺口、局部峰值与最终分隔分别报告。
+- limits: 这些是已见不完整GT的机制诊断，不是独立准确率或测试答案；本观察不改变原历史指标、训练配方或AGENTS，不将161/185推广为其它配置固定常数。
+
+## 20261029-frozen-monitor-entry-coverage
+
+- status: observation; last_verified: 2026-10-29.
+- scope: 从旧控制运行导出冻结代码、再叠加少量训练修改的RGB条件NAF实验。
+- finding: 本地测试和冻结快照的GPU固定批短测都通过，仍可在正式monitor0失败；两者不能证明最终训练入口完成了首次更新。此次导出只叠加训练兼容文件，遗漏工作树已有的RGB monitor支持；旧monitor将B1 clean边界传入B4模型，并且尚不支持恢复float32 RGB缓存。
+- evidence: `docs/NAF_RGB_RETRY_20261029.md`的启动故障与恢复节；私有`naf_color/train/train.log`在`save_monitor`报`Expected nonempty floating B4HW input`，正式steps/initial/latest均未生成，旧GPU128回执通过。工作树与冻结monitor源码SHA不同。
+- reuse_hypothesis: 按最终冻结快照核验实现与测试版本，并执行正式monitor0和首步保存路径；收到子进程PID与模型可学性短测，应分别标为“已启动”和“训练推进已确认”。新增输入模式还需检查clean/erased与整图monitor是否使用同一输入合同。比较展示元数据时，先声明输入模式迁移，只归一已明确核对的字段，避免把预期的模式名变化误判为训练差异。
+- limits: 这是部署与观测入口覆盖缺口，不是模型学习或RGB方案无效的证据；旧数据/初态/短测可在明确绑定源码差异后复用。恢复验证结果另记实验文档，不直接晋升AGENTS。
+
+## 20261030-random-initialization-portability
+
+- status: observation; last_verified: 2026-10-30.
+- scope: 新关系分类CNN，Windows／Linux同Torch2.8.0+cu128、seed、float32及完整架构的初态与训练权重加载。
+- finding: 原始uniform流SHA相同不保证最终初始化tensor逐位相同；22个tensor中9个字节不同，抽样首值最大差约7.45e-9，同服重建则exact。若推理loader用本平台重新随机初始化的SHA验证保存权重，会误拒架构与实际state均合法的跨平台checkpoint。
+- evidence: `docs/BOUNDARY_RELATION_20261030.md`；两组真实GPU重载／下一AdamW更新exact，新增模拟跨平台CPU回归验证合法权重及预测exact、坏架构／state SHA／冲突来源仍拒绝；冻结v2服务器13项测试通过。共同初态文件保持未改，两组正式读取同一文件。
+- reuse_hypothesis: 成对训练复用完整初态文件；推理校验实际保存state、架构和来源元数据自洽，将当前构造器随机初态作为审计信息而非跨平台加载必要条件。训练初态／续训防混用合同单独保留，不能为移植盲目strict=False。
+- limits: 只证明此CNN与这对平台存在末位差及旧检查误拒，不证明所有初始化／硬件均如此，也未将具体CPU指令归为唯一原因；不改AGENTS，不等同扩散GPU噪声问题或官方增益。
+
+## 20261030-reliable-pair-selection-bias
+
+- status: observation; last_verified: 2026-10-30.
+- scope: 不完整GT上原生相邻预测区域的keep／merge可靠监督筛选。
+- finding: 可靠性过滤也会制造目标捷径。两源pilot中仅凭“两侧都大”规则的平衡召回达92.83%；不改筛选阈值扩到32源后降至72.35%，说明早期少源总体拟合可能主要反映筛选与尺寸相关，而非RGB边界识别能力。原标像素覆盖与可标邻接对覆盖也是不同分母。
+- evidence: `docs/BOUNDARY_RELATION_20261030.md`；全32为21446候选→2746可用，2225 keep／521 merge，两类均32源；共同大面积FF及PP有两类支持，但小F正例极少。人工GT核只产生label／审计元数据，不进入输入；独立NPZ头及monitor valid检查通过。
+- reuse_hypothesis: 同源序、同初态的无RGB控制及面积／相别／响应强度共同支持组应一并保留；不能凭总体训练准确率判断上下文增量，也不为凑数降低可信监督门槛。固定monitor的采样覆盖应明确，不能用少量靠边样本替代全量分组分析。
+- limits: 事后面积规则仅审计标签偏差，不是新后处理或竞赛代理分数；本轮训练尚无泛化或官方增益证据，不晋升AGENTS。
+- followup_fixed_scores_20261030: 固定e5已见参照上RGB总体净少28错，却在大F/F的未校准.5工作点把keep误合43增到133；全F/F AUC近同、大F/F排序略好，等7个keep参照受损的保守预算下merge命中70→88，而等35错误预算为134→132。跨相可分性、组内排序与分数校准应分开；同阈值不等于同风险，总体拟合也不能认证物理假边。两已见细线窗标签相反仅提示监督歧义，不据图重标。证据`docs/BOUNDARY_RELATION_ANALYSIS_20261030.md`及私有fixed_eval；无实际合并或官方增益，不晋升AGENTS。
+- followup_long1000_20261030: 同初态／数据的1000更新配对显示短训单阈值退化不应被当作RGB内在有害：固定.1大F/F maps误合6／命中78，RGB6／110，AUC .96536→.98088；四个预定阶段均有组内排序增量，但固定阈值的错误不随训练单调变化。净增32中前三源占26，小侧200–499仍误合4／11 KEEP；同错误数也会交换错误对象并涉及更大区域。源级自举支持AUC增量，极低错误预算检出差的区间仍跨0；只能支持小样本最终读出诊断，不能认证安全合并或泛化。旧五轮与新长训学习率日程不同，不归因于单独多训785步。证据`docs/BOUNDARY_RELATION_LONG_ANALYSIS_20261030.md`及私有scores／ranking／risk_notes；无实际合并或官方分数，不晋升AGENTS。
+- followup_actual_readout_20261030: 相同.1固定13源实际合并后，当前9图F733→maps565／RGB564，F总像素变化<.05%，聚合均面积约+30%主要来自少实例，不能当赛题面积项改善。已接受GT仅支持两训练图中3／4个MERGE，余者IGNORE／无标签，故训练排序增量不覆盖实际应用的大量未知关系。全缝未见仅各1次，观测范围不足不是这轮大幅合并的主要解释；不应把合理架构风险直接当实测归因。真实patch tensor／零操作／ID类别／safe-fill工程合同通过仍不构成净收益认证；保留显式推理候选而默认不晋级。证据`docs/BOUNDARY_RELATION_READOUT_20261030.md`及私有actual_summary／context_risk／全缝图库；无官方增益证据，不晋升AGENTS。

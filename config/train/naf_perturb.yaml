@@ -1,0 +1,15 @@
+# -*- coding: utf-8 -*-
+# 只改变训练热图的输入来源：原清晰源与受扰RGB经固定D5a/N1得到的热图混合。
+# 正式配方仍沿旧20a59，1000更新、有效batch16、共同随机初态；不加载旧训练权重。
+_base: boundary_width.yaml
+boundary_naf:
+  output_dir: outputs/naf_perturb
+  input_perturbation:
+    manifest: outputs/naf_perturb/cache/manifest.json
+    clean_probability: 0.5
+    variant_seed: 20261030
+  training:
+    minimum_free_gib: 10.0
+  monitor:
+    # 训练期间只保存固定热图缩略，不调用旧读出或自动150图推理。
+    full_readout_steps: []

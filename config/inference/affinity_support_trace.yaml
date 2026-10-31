@@ -1,0 +1,6 @@
+# -*- coding: utf-8 -*-
+_base: affinity_interior_trace.yaml
+affinity_support_trace:
+  output_dir: outputs/interior_support
+  trace: outputs/interior_trace/report.json
+  trace_sha256: 2d7d69c03c4ff28a59ce52c9ccce4ec966da72b6ed9bbb156b0e10b55944492e

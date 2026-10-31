@@ -1,0 +1,10 @@
+# -*- coding: utf-8 -*-
+# 固定新native/mixed balance在同一原生1024视野上融合；不训练或扫描比例。
+_base: ../train/affinity_balance_mixed.yaml
+affinity_balance_fusion:
+  output_dir: outputs/balance_fusion
+  native_checkpoint: outputs/affinity_balance/native/final.pt
+  native_sha256: 2bbae197f4716ced694309b9c5d49b5e24a4154f74755d4652d2beb0e1318d5b
+  mixed_checkpoint: outputs/affinity_balance/mixed/final.pt
+  mixed_sha256: 43da103c95c7f85149bd0533fd116d26f0a81c91d793db7e8938b7d4ae80e434
+  mixed_weight: 0.5

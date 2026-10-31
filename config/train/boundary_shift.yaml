@@ -1,0 +1,15 @@
+# -*- coding: utf-8 -*-
+# 单变量：同一T8擦断输入平移后逆对齐，输出应一致；不加RGB、不改原监督/读出。
+_base: boundary_erasure.yaml
+boundary_naf:
+  output_dir: outputs/naf_shift/candidate
+  shift_consistency:
+    enabled: true
+    version: integer_shift_v1
+    weight: 0.1
+    margin: 32
+    band_radius: 8
+    shift_seed: 20261029
+  monitor:
+    # 固定原七pair保持；只为其中两块增加1px/16px的单窗诊断图。
+    shift_pair_indices: [29, 63]

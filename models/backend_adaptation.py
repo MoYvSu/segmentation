@@ -22,6 +22,7 @@ from train_affinity_geometry_g1 import (
 )
 from train_offset_geometry import file_sha256
 from utils.config import project_path
+from utils.restoration_noise import LEGACY_MODE, NOISE_MODE, restoration_noise
 from utils.semantic_challenger import build_semantic_challenger
 
 
@@ -160,18 +161,28 @@ def load_backend(path, config, device):
 
 @torch.no_grad()
 def restore_first(restorer, image, seed, strength=1.0):
-    """原 T 步 schedule 的首个 x0 估计；独立随机数，不修改默认完整采样。"""
+    """原 T 步 schedule 的首个 x0；旧训练默认原噪声，独立推理显式指定固定映射。"""
     strength = float(strength)
     if not 0.0 <= strength <= 1.0:
         raise ValueError("strength must be in [0, 1]")
     if strength == 0.0:
         return image
     restorer.eval()
-    generator = torch.Generator(device=image.device).manual_seed(int(seed))
+    # 普通属性不进入 state_dict，因此不改旧权重，也不影响未启用此策略的训练。
+    noise_mode = getattr(restorer, "inference_noise_mode", LEGACY_MODE)
+    if noise_mode not in (LEGACY_MODE, NOISE_MODE):
+        raise ValueError(f"Unknown restoration noise mode: {noise_mode!r}")
     with torch.autocast(device_type=image.device.type, enabled=False):
         condition = image.float()
         step = torch.full((condition.shape[0],), int(restorer.num_steps),
                           dtype=torch.long, device=condition.device)
-        state = restorer.q_sample(condition, condition, step, generator=generator)
+        if noise_mode == LEGACY_MODE:
+            generator = torch.Generator(device=image.device).manual_seed(int(seed))
+            state = restorer.q_sample(condition, condition, step, generator=generator)
+        else:
+            # 固定4090时期的像素/随机序列对应关系，不随当前显卡的核心数改变。
+            # 不可用时直接报错；禁止悄悄回退到显卡相关的 torch.randn。
+            noise = restoration_noise(condition.shape, seed, condition.device)
+            state = restorer.q_sample(condition, condition, step, noise=noise)
         clean = restorer.denoise(state, condition, step).float()
         return (condition + strength * (clean - condition)).clamp(0.0, 1.0)

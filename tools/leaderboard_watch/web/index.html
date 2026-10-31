@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>AIC · 排行终端</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/chart-core.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="terminal">
+    <header class="topbar">
+      <a href="/" class="brand"><span class="brand-icon" aria-hidden="true"><i></i><i></i><i></i></span><span>AIC<span class="brand-divider">/</span><b>TERMINAL</b><small>竞赛行情分析终端</small></span></a>
+      <span id="competition-title" class="competition-title">低碳钢金相图像无监督相区分割</span>
+      <div class="top-actions"><span class="connection"><i id="status-dot" class="dot"></i><span id="status-label">连接中</span></span><button id="notify-button" class="quiet">变化提醒</button><a id="source-link" target="_blank" rel="noopener noreferrer">官方榜单 ↗</a><span id="terminal-clock" class="terminal-clock">—</span></div>
+    </header>
+    <div class="phase-bar"><nav id="stages" aria-label="比赛阶段"></nav><div class="phase-meta"><span class="local-tag">LOCAL / PRIVATE</span><span id="freshness">等待有效数据</span><button id="refresh-button" title="重新读取官网，至少间隔 60 秒">检查 ↻</button></div></div>
+    <div class="quote-strip" id="quote-strip" aria-label="榜首队伍行情"></div>
+    <div id="error-banner" class="banner" role="status" hidden></div>
+    <main class="workspace">
+      <aside class="market-panel panel">
+        <div class="panel-title"><h1>市场观察 <span>MARKET WATCH</span></h1><span id="team-count" class="counter">—</span></div>
+        <div class="market-tools"><input id="watch-search" type="search" aria-label="搜索行情队伍" placeholder="搜索队伍 / 参赛编号"><button id="watch-filter" class="quiet" aria-pressed="false" title="只看关注">☆</button></div>
+        <div class="market-columns"><span>队伍 / 公开分数</span><span>名次</span></div>
+        <div id="market-list" class="market-list"></div>
+        <div class="market-summary"><span id="scored-count">等待榜单</span><div><span>榜首 <b id="leader-name">—</b></span><strong id="leader-score">—</strong></div><div><span>前两名分差</span><strong id="leader-gap">—</strong></div><div><span>今日榜单变更</span><strong id="change-count">—</strong></div><small id="observation-count">历史从首次观测开始</small></div>
+      </aside>
+
+      <div class="center-column">
+        <section class="panel chart-panel" id="chart-panel">
+          <div class="instrument-bar"><div class="instrument-heading"><span class="instrument-mark" aria-hidden="true">◈</span><div><h2 id="instrument-name">等待队伍数据</h2><span id="symbol-code">AIC / SCORE</span></div><span id="instrument-rank" class="rank-badge"># —</span></div><div class="instrument-quote"><strong id="instrument-score">—</strong><span id="instrument-change">区间变化 —</span></div></div>
+          <div class="chart-controls"><div class="segmented" id="metric-controls"><button data-metric="score" class="active">分数</button><button data-metric="rank">名次</button><button data-metric="gap">距榜首</button></div><select id="basis-select" aria-label="纵轴比较方式"><option value="change">区间变化 Δ</option><option value="absolute">原始数值</option><option value="percent">区间涨幅 %</option></select><div class="timeframes" aria-label="时间范围"><button data-range="3600000">1H</button><button data-range="21600000">6H</button><button data-range="86400000">1D</button><button data-range="604800000">1W</button><button data-range="0" class="active">ALL</button></div><div class="chart-actions"><button id="zoom-in" title="放大时间轴（+）" aria-label="放大时间轴">＋</button><button id="zoom-out" title="缩小时间轴（-）" aria-label="缩小时间轴">−</button><button id="auto-scale" class="active" aria-pressed="true" title="纵轴随可见区间自动缩放（A）">自动 Y</button><button id="live-button" class="active" aria-pressed="true" title="跟随最新观测（R）"><i class="dot good"></i>最新</button><button id="expand-chart" title="展开图表；Esc 返回" aria-pressed="false">⛶</button></div></div>
+          <div class="chart-readout"><span id="readout-label">可视区间</span><span>始 <b id="range-open">—</b></span><span>高 <b id="range-high">—</b></span><span>低 <b id="range-low">—</b></span><span>末 <b id="range-close">—</b></span><span class="range-duration" id="range-duration">—</span></div>
+          <div class="legend-row"><div id="legend" class="legend"></div><button id="solo-focus" class="text-button" title="只显示当前队伍，更容易看清微小变化">单队聚焦</button></div>
+          <div id="chart-wrap"><svg id="trend-chart" viewBox="0 0 900 440" role="img" tabindex="0" aria-label="走势交互图；滚轮缩放，拖动平移，加减键缩放，方向键平移，0键重置"></svg><div id="chart-tooltip" class="chart-tooltip" hidden></div><div id="chart-empty" class="chart-empty">等待有效观测</div><span class="chart-watermark" aria-hidden="true">AIC / OBSERVED</span></div>
+          <div class="navigator"><span class="navigator-label">时间导航</span><svg id="range-chart" viewBox="0 0 900 56" role="img" aria-label="完整历史概览；拖动选区或两侧边缘调整时间范围"></svg></div>
+          <div class="chart-bottom"><span id="chart-note">滚轮缩放 · 拖动平移 · 拖动右轴调整尺度</span><button id="reset-chart" class="text-button" title="显示全部历史并恢复自动纵轴（0）">重置视图 ↺</button></div>
+        </section>
+
+        <section class="panel blotter-panel">
+          <div class="blotter-bar"><nav class="blotter-tabs" aria-label="数据面板"><button data-tab="rankings-view" class="active">全量排行 <span id="table-count" class="counter">0</span></button><button data-tab="events-view">榜单动态 <span id="event-count" class="counter">0</span></button><button data-tab="analysis-view">区间分析</button></nav><div class="table-actions"><input id="search" type="search" aria-label="搜索完整排行" placeholder="搜索排行"><a id="export-link" title="导出当前阶段的观测记录">导出 ↓</a></div></div>
+          <div id="rankings-view" class="blotter-view"><div class="table-scroll"><table><thead><tr><th aria-label="关注"></th><th><button data-sort="rank">名次 ↕</button></th><th>队伍</th><th class="numeric"><button data-sort="score">分数 ↕</button></th><th class="numeric">分数变化</th><th class="numeric">名次变化</th><th class="numeric"><button data-sort="gap_leader">距榜首 ↕</button></th><th>打分时间</th></tr></thead><tbody id="rankings"></tbody></table></div><div id="table-empty" class="table-empty" hidden>没有匹配的队伍</div></div>
+          <div id="events-view" class="blotter-view" hidden><div id="event-list" class="event-list"></div></div>
+          <div id="analysis-view" class="blotter-view" hidden><div class="analysis-description">按当前可视时间区间统计实际观测值。缩放或拖动图表后，这里的变化与波动范围会同步调整。</div><div id="range-analysis" class="range-analysis"></div></div>
+          <div class="blotter-foot">排行变化相对上一版不同的榜单 · 并列顺序以官方为准<span>真实观测 / 无历史回填</span></div>
+        </section>
+      </div>
+
+      <aside class="detail-panel panel">
+        <div class="panel-title"><h2>队伍分析 <span>TEAM DETAIL</span></h2><span id="focus-rank" class="rank-badge"># —</span></div>
+        <select id="focus-select" aria-label="选择分析队伍"></select>
+        <div class="detail-price"><span>当前公开分数</span><strong id="focus-score">—</strong><small id="focus-delta">较上一版 —</small></div>
+        <div class="spread-boxes"><div><span>距前一名</span><strong id="focus-ahead">—</strong></div><div><span>距榜首</span><strong id="focus-gap">—</strong></div></div>
+        <button id="focus-watch" class="watch-button">☆ 加入关注</button>
+        <dl class="detail-stats"><div><dt>区间最高观测分</dt><dd id="focus-best">—</dd></div><div><dt>区间分数变化</dt><dd id="focus-period-delta">—</dd></div><div><dt>区间有效观测</dt><dd id="focus-observations">—</dd></div></dl>
+        <div class="section-label">相邻竞争队伍 <span>NEAREST RIVALS</span></div><div id="rivals" class="rivals"></div>
+        <div class="section-label">竞争态势 <span>READOUT</span></div><ol id="insights"></ol>
+        <p id="focus-time" class="focus-time">等待队伍数据</p>
+      </aside>
+    </main>
+    <footer class="statusbar"><span><i class="dot good"></i>本机采集 · <b id="next-check">等待检查</b></span><span id="footer-history">历史从首次观测开始</span><span>滚轮缩放 · 拖动平移 · 右轴调尺度</span></footer>
+    <div id="toast" role="status" class="toast" hidden></div>
+  </div>
+</body>
+</html>

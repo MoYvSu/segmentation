@@ -14,6 +14,7 @@ import torch
 from tools.semantic_instance_metrics import instance_bands
 from utils.affinity_deployment import probability_to_logit
 from utils.post_process import _boundary_skeleton_belt, reconstruct_marker_boundary
+from utils.instance_area_policy import has_explicit_area_policy, resolve_instance_area_policy
 
 
 def marker_stages(boundary: np.ndarray, config: dict) -> dict:
@@ -40,7 +41,8 @@ def marker_stages(boundary: np.ndarray, config: dict) -> dict:
     high = float(infer['boundary_threshold'])
     bridge = int(infer.get('bridge_width', 1))
     dilate = int(infer.get('watershed_dilate_width', 1))
-    minimum = int(infer.get('min_instance_area', 50))
+    area_policy = resolve_instance_area_policy(infer)
+    minimum = area_policy['seed_min_area']
     seal = max(0, int(infer.get('marker_border_seal_width', 0)))
     low = infer.get('marker_boundary_low_threshold')
     steps = int(infer.get('marker_boundary_reconstruction_steps', 0))
@@ -79,10 +81,12 @@ def marker_stages(boundary: np.ndarray, config: dict) -> dict:
         'marker_count': count,
         'resolved': {
             'boundary_threshold': high, 'bridge_width': bridge,
-            'watershed_dilate_width': dilate, 'min_instance_area': minimum,
+            'watershed_dilate_width': dilate,
+            'min_instance_area': int(infer.get('min_instance_area', 50)),
             'marker_border_seal_width': seal, 'marker_boundary_low_threshold': low,
             'marker_boundary_reconstruction_steps': steps,
             'probability_roundtrip': 'native -> probability_to_logit -> CPU sigmoid',
+            **(area_policy if has_explicit_area_policy(infer) else {}),
         },
     }
 
@@ -116,7 +120,8 @@ def anchored_marker_stages(stages: dict) -> dict:
     marker_labels = np.zeros(source.shape, dtype=np.int32)
     count = 0
     for label_id in range(1, num):
-        if int(stats[label_id, cv2.CC_STAT_AREA]) < int(resolved['min_instance_area']):
+        if int(stats[label_id, cv2.CC_STAT_AREA]) < int(
+                resolved.get('seed_min_area', resolved['min_instance_area'])):
             continue
         count += 1
         marker_labels[core_labels == label_id] = count

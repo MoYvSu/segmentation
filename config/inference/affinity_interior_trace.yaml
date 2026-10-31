@@ -1,0 +1,14 @@
+# -*- coding: utf-8 -*-
+# 两处已知失败的冻结诊断；每个头独立重算全部原生窗，不训练或提交。
+_base: ../train/affinity_balance_mixed.yaml
+affinity_interior_trace:
+  format: affinity_interior_trace_v1
+  output_dir: outputs/interior_trace
+  fit: outputs/interior_fit/report.json
+  fit_sha256: d4c37e300901e2430b94a857cdde43bf9331d469ce76f4aa88f7f80e7f1dd885
+  plan: outputs/trace_plan/plan.json
+  plan_sha256: 145fd6cb727794c3ce2b02739a58dc13c7a40895d44c9afad0d302211fcff638
+  structure: outputs/geometry_structure/report.json
+  structure_sha256: fa5273b273abb808bb663c756b80dcbf4d7dc75674ffdc8c8f2084fbadcbb639
+  receipt: outputs/affinity_weak/capture.json
+  receipt_sha256: ba4ec97a187a766185e60854978562a62397bdcd2aa83120389778aae78aa995

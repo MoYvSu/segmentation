@@ -19,9 +19,15 @@ import time
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-NAMES = tuple(f'test_{index:03d}' for index in range(69, 169))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from utils.submission_stage import dataset_contract
+
+NAMES = dataset_contract().names
 MODEL_NAMES = dict(backend='backend.pt', restorer='restorer.pt', terminal_semantic='semantic_s64.pt')
+LOCAL_RESTORER_NAME = 'local_restorer.pt'
 SOURCE_DIRS = {'models', 'tools', 'utils', 'data', 'losses', 'segment-anything-2', 'config'}
+NOISE_RESOURCES = {'utils/cuda/restore_noise.cu', 'utils/cuda/restore_noise.ptx'}
 FORBIDDEN_PARTS = {'.git', '.github', '__pycache__', 'output', 'outputs', 'checkpoints',
                    'weights', 'cache', 'raw', 'test', 'unlabeled', 'node_modules'}
 REQUIRED_PACKAGES = ('torch', 'torchvision', 'numpy', 'Pillow',
@@ -163,10 +169,11 @@ def export_checkpoint(source, destination, kind, *, base_sha=None, base_head_sha
     return dict(kind=kind, file=destination.name, original_sha256=original_sha, sha256=sha(destination),
                 original_bytes=source.stat().st_size, bytes=destination.stat().st_size,
                 state_sha256=original_digest, tensor_count=len(original),
+                tensor_elements=sum(value.numel() for value in original.values()),
                 fp32_exact=True, optimizer_rng_training_records_removed=True)
 
 
-def build_models(code_model, backend, restorer, terminal=None):
+def build_models(code_model, backend, restorer, terminal=None, *, local_restorer=None):
     import torch
     code_model = no_symlink(code_model)
     require(not (code_model / 'inference_export.json').exists(), 'Model export receipt already exists')
@@ -190,12 +197,24 @@ def build_models(code_model, backend, restorer, terminal=None):
     if terminal is not None:
         rows.append(export_checkpoint(terminal, model_dir / MODEL_NAMES['terminal_semantic'], 'terminal_semantic',
                                       base_sha=original_backend_sha, base_head_sha=base_head_sha))
+    models = {row['kind']: row for row in rows}
+    extra_restorer_elements = 0
+    if local_restorer is not None:
+        # 路径职责是 local_restorer，checkpoint 的严格加载格式仍是 restorer。
+        local_row = export_checkpoint(local_restorer, model_dir / LOCAL_RESTORER_NAME, 'restorer')
+        models['local_restorer'] = local_row
+        # 包含 buffer 的状态元素总数是保守上界，避免遗漏第二份恢复器。
+        extra_restorer_elements = local_row['tensor_elements']
+    conservative_total = (91253055 if terminal else 84951045) + extra_restorer_elements
+    require(conservative_total < 500_000_000, 'Model parameter constraint failed')
     receipt = dict(format='semifinal_model_export_v1', complete=True, floating_precision='FP32',
-                   models={row['kind']: row for row in rows}, original_base_head_sha256=base_head_sha,
+                   models=models, original_base_head_sha256=base_head_sha,
                    parameter_ledger=dict(fixed_deployment=84951045, additional_terminal=6302010 if terminal else 0,
-                                         conservative_total=91253055 if terminal else 84951045,
+                                         additional_local_restorer=extra_restorer_elements,
+                                         conservative_total=conservative_total,
                                          constraint='total < 500000000',
-                                         basis='Measured deployment models; additional copied terminal head counted separately'))
+                                         basis='Measured deployment models; terminal head counted separately; '
+                                               'optional local restorer includes all tensor-state elements'))
     write_json(code_model / 'inference_export.json', receipt)
     return receipt
 
@@ -215,18 +234,27 @@ def source_rows(manifest):
         require((len(path.parts) == 1 and path.suffix == '.py') or path.parts[0] in SOURCE_DIRS,
                 'Runtime source outside code directories: ' + str(path))
         require(path.suffix in {'.py', '.yaml', '.yml', '.json', '.txt'}
+                or str(path) in NOISE_RESOURCES
                 or (path.parts[0] == 'segment-anything-2' and path.name.startswith('LICENSE')),
                 'Unexpected binary/non-runtime source: ' + str(path))
     require('tools/infer_semifinal.py' in seen, 'Real standalone inference module missing')
     require(any(path.startswith('segment-anything-2/sam2/') and path.endswith('.py') for path in seen)
             and any(path.startswith('segment-anything-2/sam2/') and path.endswith(('.yaml', '.yml')) for path in seen),
             'SAM2 source and packaged Hydra configs missing')
+    if 'utils/restoration_noise.py' in seen:
+        require(NOISE_RESOURCES <= seen,
+                'Versioned restoration noise requires both CUDA source and PTX resources')
     return rows
 
 
 def copy_runtime_sources(source_root, manifest, code_model):
     source_root, code_model = no_symlink(source_root), no_symlink(code_model)
     rows = source_rows(manifest)
+    inference_source = source_root / 'tools/infer_semifinal.py'
+    if re.search(r'^\s*(?:from\s+utils\.submission_stage\s+import\b|import\s+utils\.submission_stage\b)',
+                 inference_source.read_text(encoding='utf8'), flags=re.MULTILINE):
+        require('utils/submission_stage.py' in {row['path'] for row in rows},
+                'Runtime inference requires utils/submission_stage.py in the source manifest')
     for row in rows:
         relative = safe_relative(row['path'])
         requested = source_root / str(relative)
@@ -268,6 +296,22 @@ def pinned_requirements(environment):
         name + '==' + str(packages[name]) for name in names) + '\n'
 
 
+def local_restoration_policy(config, models):
+    """只核对路径职责与文件存在，不改变推理模式或训练配方。"""
+    policy = config.get('submission', {}).get('local_restoration', {'mode': 'single', 'model': 'restorer'})
+    require(isinstance(policy, dict), 'Local restoration policy must be an object')
+    require(set(policy) == {'mode', 'model'}, 'Expected explicit local_restoration mode/model only')
+    mode, model = policy['mode'], policy['model']
+    require(mode in ('single', 'zero'), 'Unknown local restoration mode')
+    require(model in ('restorer', 'local_restorer'), 'Unknown local restoration model role')
+    require((mode, model) in (('single', 'restorer'), ('zero', 'restorer'), ('zero', 'local_restorer')),
+            'Expected N0 single/shared, N1 zero/shared, or N2 zero/local')
+    require(bool(models.get(model)), 'Referenced local restoration model was not exported: ' + model)
+    if model == 'restorer':
+        require(not models.get('local_restorer'), 'Unused local_restorer model would obscure candidate identity')
+    return mode, model
+
+
 def build_code(code_model, source_root, runtime_manifest, template_config, environment):
     import yaml
     code_model = no_symlink(code_model)
@@ -280,9 +324,9 @@ def build_code(code_model, source_root, runtime_manifest, template_config, envir
     environment['packages'] = {key: value for key, value in environment.get('packages', {}).items()
                                if key in {*REQUIRED_PACKAGES, 'opencv-python', 'opencv-contrib-python'}}
     pinned = pinned_requirements(environment)
-    rows = copy_runtime_sources(source_root, runtime_manifest, code_model)
     config = yaml.safe_load(Path(template_config).read_text(encoding='utf8'))
     require(isinstance(config, dict) and '_base' not in config, 'Standalone resolved config required')
+    contract = dataset_contract(config.get('submission', {}).get('dataset'))
     config.setdefault('paths', {})['project_root'] = 'auto'
     require(config.get('sam2', {}).get('sam2_repo_path') == 'segment-anything-2',
             'Portable SAM2 code path required')
@@ -290,7 +334,12 @@ def build_code(code_model, source_root, runtime_manifest, template_config, envir
     for kind in ('backend', 'restorer', 'terminal_semantic'):
         row = receipt['models'].get(kind)
         models[kind] = dict(file=row['file'], sha256=row['sha256']) if row else None
+    local_row = receipt['models'].get('local_restorer')
+    if local_row is not None:
+        models['local_restorer'] = dict(file=local_row['file'], sha256=local_row['sha256'])
     config.setdefault('submission', {})['models'] = models
+    local_mode, local_model = local_restoration_policy(config, models)
+    rows = copy_runtime_sources(source_root, runtime_manifest, code_model)
     config_path = code_model / 'config/inference/submission_reflect.yaml'
     require(not config_path.exists(), 'Generated portable config collides with runtime manifest')
     config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -300,7 +349,9 @@ def build_code(code_model, source_root, runtime_manifest, template_config, envir
     (code_model / 'requirements.txt').write_text(pinned, encoding='utf8')
     torch_version = str(environment['packages']['torch'])
     cuda = str(environment.get('cuda', '请见实测环境回执'))
-    readme = f'''# 复赛推理工程
+    stage_title = '半决赛' if contract.name == 'semifinal_150' else '复赛'
+    example_names = (contract.names[0], contract.names[-1])
+    readme = f'''# {stage_title}推理工程
 
 团队名、团队编号和队长姓名：待参赛者填写。
 
@@ -315,6 +366,12 @@ def build_code(code_model, source_root, runtime_manifest, template_config, envir
 不要将 CPU 构建当作 GPU 复现环境。SAM2 源码及 Hydra 配置已包含在
 `segment-anything-2/`，入口按相对路径导入，不下载用户缓存中的权重。
 
+正式 reflect 配置显式采用 `cuda_philox4090_v1`：固定恢复噪声与像素的对应关系，
+避免随机种子相同但显卡核心数量不同造成不同输入。随包 PTX 的最低目标为
+compute_70（Volta 及更新架构），需要支持 CUDA 12.8 的 NVIDIA 驱动；
+运行时由驱动加载，无需 NVCC、NVRTC 或 C++ 编译器。
+普通训练入口保留历史噪声方式，噪声策略不改变模型权重。
+
 ## 模型与流程
 
 - `model/backend.pt`：固定 R1 的完整 encoder/LoRA、语义与 affinity 状态。
@@ -322,7 +379,13 @@ def build_code(code_model, source_root, runtime_manifest, template_config, envir
 '''
     if models['terminal_semantic']:
         readme += '- `model/semantic_s64.pt`：64 次更新的末端语义头，只改变最终实例类别投票，几何仍使用固定 R1/reflect 路径。\n'
+    if local_row is not None:
+        readme += '- `model/local_restorer.pt`：可供局部 affinity 路径使用的独立恢复器；全图语义仍使用 `model/restorer.pt`。\n'
     readme += f'''
+局部 affinity 恢复策略为 `{local_mode}`，使用 `{local_model}` 模型；
+`single` 保留规定的首步注入噪声，`zero` 使用零注入噪声。
+该局部策略不改变全图语义路径的恢复模型与模式。
+
 所有模型从原 checkpoint 去掉优化器、随机状态和训练记录后导出，未做
 半精度/量化；逐张量数值、dtype、shape 和状态摘要均已精确核对。
 保守总参数量为 {receipt['parameter_ledger']['conservative_total']:,}，
@@ -337,11 +400,12 @@ def build_code(code_model, source_root, runtime_manifest, template_config, envir
 python infer.py --input-dir /path/to/test_images --output-dir /path/to/reproduced --config config/inference/submission_reflect.yaml
 ```
 
-输入为 `test_069` 至 `test_168` 的 100 张原图，文件名保留三位编号。
+本包数据阶段为 `{contract.name}`。输入为 `test_{contract.first:03d}` 至
+`test_{contract.last:03d}` 的 {contract.count} 张原图，文件名保留三位编号。
 输出的 `results/` 包含原尺寸、单通道 uint16 的实例 PNG 和 0/1 类别 JSON；
 `audit/` 保存来源、权重、精度、随机种子及输出检查回执，不参与评分。
-可使用 `--only test_101 test_116` 做小样本复现，原始编号所确定的种子不变。
-正式复现仍须跑完全部 100 图。输出目录与输入目录应分开。
+可使用 `--only {example_names[0]} {example_names[1]}` 做小样本复现，阶段内原始编号所确定的种子不变。
+正式复现仍须跑完全部 {contract.count} 图。输出目录与输入目录应分开。
 
 `manifest.json` 对推理代码、配置、依赖和模型逐项登记 SHA256。
 当前官方黑盒分数及独立复现证据由参赛者在选定最终版本后补充，
@@ -360,24 +424,29 @@ python infer.py --input-dir /path/to/test_images --output-dir /path/to/reproduce
     return result
 
 
-def validate_results(results, test_dir):
+def validate_results(results, test_dir, dataset=None):
     import cv2
     import numpy as np
+    from utils.image_io import read_image
+    contract = dataset_contract(dataset)
+    names = contract.names
+    cohort = f'test_{contract.first:03d}..{contract.last:03d}'
     results, test_dir = no_symlink(results), no_symlink(test_dir)
-    expected = {name + suffix for name in NAMES for suffix in ('_inst.png', '_class.json')}
+    expected = {name + suffix for name in names for suffix in ('_inst.png', '_class.json')}
     actual = list(results.iterdir())
-    require(len(actual) == 200 and {path.name for path in actual} == expected
-            and all(path.is_file() for path in actual), 'Results require exactly 100 pairs test_069..168')
+    require(len(actual) == 2 * contract.count and {path.name for path in actual} == expected
+            and all(path.is_file() for path in actual),
+            f'Results require exactly {contract.count} pairs {cohort}')
     originals = {}
     for path in test_dir.iterdir():
         no_symlink(path)
         if path.is_file() and path.suffix.lower() in {'.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp'}:
             require(path.stem not in originals, 'Duplicate original test image stem')
             originals[path.stem] = path
-    require(set(originals) == set(NAMES), 'Original test cohort must be exactly test_069..168')
+    require(set(originals) == set(names), 'Original test cohort must be exactly ' + cohort)
     rows = []
-    for name in NAMES:
-        original = cv2.imread(str(originals[name]), cv2.IMREAD_UNCHANGED)
+    for name in names:
+        original = read_image(originals[name], cv2.IMREAD_UNCHANGED)
         require(original is not None and original.ndim in (2, 3), 'Unreadable original image: ' + name)
         png, labels = no_symlink(results / (name + '_inst.png')), no_symlink(results / (name + '_class.json'))
         data = png.read_bytes()
@@ -432,7 +501,18 @@ def validate_code_model(code_model):
             'Missing real export or model parameter constraint failed')
     config = yaml.safe_load((code_model / 'config/inference/submission_reflect.yaml').read_text(encoding='utf8'))
     require(config['paths']['project_root'] == 'auto' and '_base' not in config, 'Config not independently portable')
+    dataset_contract(config.get('submission', {}).get('dataset'))
+    require({'backend', 'restorer'} <= set(receipt['models']), 'Required exported model roles missing')
+    require(set(receipt['models']) <= {*MODEL_NAMES, 'local_restorer'}, 'Unknown packaged model role')
+    require(set(config['submission']['models']) <= {*MODEL_NAMES, 'local_restorer'}, 'Unknown runtime model role')
+    require({key for key, value in config['submission']['models'].items() if value is not None}
+            == set(receipt['models']), 'Runtime and exported model roles differ')
+    local_restoration_policy(config, config['submission']['models'])
     for kind, row in receipt['models'].items():
+        filename = safe_relative(row['file'])
+        require(len(filename.parts) == 1, 'Model file must be directly inside model/')
+        require(row['kind'] == ('restorer' if kind == 'local_restorer' else kind),
+                'Checkpoint format kind differs from model role')
         require(row['fp32_exact'] is True and row['optimizer_rng_training_records_removed'] is True,
                 'Checkpoint export tensor verification missing')
         require(config['submission']['models'][kind] == dict(file=row['file'], sha256=row['sha256'])
@@ -440,15 +520,21 @@ def validate_code_model(code_model):
     return manifest
 
 
-def pack_submission(submission_dir, archive_path, test_dir, *, compression_level=9):
+def pack_submission(submission_dir, archive_path, test_dir, *, compression_level=9, dataset=None):
+    import yaml
     submission_dir, archive_path = no_symlink(submission_dir), no_symlink(archive_path)
     require(compression_level in (6, 9), 'Use measured DEFLATE level 6 or 9')
     require(archive_path.suffix == '.zip' and not archive_path.exists()
             and not archive_path.is_relative_to(submission_dir), 'Archive must be new and outside submission tree')
     require({path.name for path in submission_dir.iterdir()} == {'results', 'code_model'},
             'Submission tree must contain only results/ and code_model/')
-    predictions = validate_results(submission_dir / 'results', test_dir)
     validate_code_model(submission_dir / 'code_model')
+    packaged_config = yaml.safe_load((submission_dir / 'code_model/config/inference/submission_reflect.yaml')
+                                     .read_text(encoding='utf8'))
+    contract = dataset_contract(packaged_config.get('submission', {}).get('dataset'))
+    if dataset is not None:
+        require(dataset_contract(dataset) == contract, 'Requested dataset differs from sealed inference config')
+    predictions = validate_results(submission_dir / 'results', test_dir, dataset=contract.name)
     paths = []
     for path in sorted(submission_dir.rglob('*')):
         no_symlink(path)
@@ -473,7 +559,8 @@ def pack_submission(submission_dir, archive_path, test_dir, *, compression_level
                 compression_level=compression_level, seconds=time.monotonic() - started,
                 archive_bytes=size, archive_MiB=size / 1024 ** 2, archive_sha256=sha(archive_path),
                 uncompressed_bytes=sum(path.stat().st_size for path, _ in paths), files=len(paths),
-                result_pairs=len(predictions), results=predictions, zip_crc_ok=True, all_member_sha_verified=True,
+                result_pairs=len(predictions), dataset=contract.name, results=predictions,
+                zip_crc_ok=True, all_member_sha_verified=True,
                 size_comparison=[dict(limit_MiB=limit, fits=size <= limit * 1024 ** 2)
                                  for limit in (50, 100, 200, 500)],
                 size_limits_verified=False, upload_performed=False)
@@ -484,6 +571,7 @@ def main():
     parser.add_argument('--output-dir', default='outputs/submission_grain')
     parser.add_argument('--backend-checkpoint')
     parser.add_argument('--restorer-checkpoint')
+    parser.add_argument('--local-restorer-checkpoint', help='可选，仅局部 affinity 使用的独立恢复器')
     parser.add_argument('--terminal-checkpoint')
     parser.add_argument('--source-root', default=str(ROOT))
     parser.add_argument('--runtime-manifest')
@@ -498,6 +586,10 @@ def main():
     parser.add_argument('--archive')
     parser.add_argument('--compression-level', type=int, choices=(6, 9), default=9)
     args = parser.parse_args()
+    import yaml
+    template = yaml.safe_load(Path(args.config).read_text(encoding='utf8'))
+    require(isinstance(template, dict), 'Submission config must be an object')
+    contract = dataset_contract(template.get('submission', {}).get('dataset'))
     output = no_symlink(args.output_dir)
     require(any(output.is_relative_to(ROOT / name) for name in ('output', 'outputs')),
             'Real competition bundle must remain in ignored output/ or outputs/')
@@ -506,22 +598,25 @@ def main():
         print(json.dumps(dict(status='plan_only', output=str(output), format='results/+code_model/',
                               models='Inference-only exact FP32; no optimizer/RNG/cache/pretrained duplicate',
                               stages=['--build-models', '--build-code', '--pack'],
-                              expected_test_names='test_069..168', uploads=False), ensure_ascii=False, indent=2))
+                              expected_test_names=f'test_{contract.first:03d}..{contract.last:03d}',
+                              dataset=contract.name, uploads=False), ensure_ascii=False, indent=2))
         return
     results = {}
     if args.build or args.build_models:
         require(args.backend_checkpoint and args.restorer_checkpoint, 'Both real backend and D5a checkpoints required')
         results['models'] = build_models(code_model, args.backend_checkpoint, args.restorer_checkpoint,
-                                        args.terminal_checkpoint)
+                                        args.terminal_checkpoint, local_restorer=args.local_restorer_checkpoint)
     if args.build or args.build_code:
         require(args.runtime_manifest and args.environment, 'Runtime source SHA manifest and measured environment required')
         results['code'] = build_code(code_model, args.source_root, read_json(args.runtime_manifest),
                                     args.config, read_json(args.environment))
     if args.pack:
         require(args.test_dir, 'Original test directory required for exact shape checks')
+        packaged_config = yaml.safe_load((code_model / 'config/inference/submission_reflect.yaml').read_text(encoding='utf8'))
+        package_contract = dataset_contract(packaged_config.get('submission', {}).get('dataset'))
         if args.results_dir:
             require(not (submission / 'results').exists(), 'Packaged results already exist')
-            validate_results(args.results_dir, args.test_dir)
+            validate_results(args.results_dir, args.test_dir, dataset=package_contract.name)
             shutil.copytree(no_symlink(args.results_dir), submission / 'results')
         archive = args.archive or str(output / '复赛结果_待填写.zip')
         results['archive'] = pack_submission(submission, archive, args.test_dir,

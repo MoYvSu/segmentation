@@ -1,0 +1,35 @@
+# -*- coding: utf-8 -*-
+# 只更换监督方式：真实N1输入、共同随机NAF和前1000步配对/学习率保持。
+_base: boundary_naf_real_bce.yaml
+boundary_naf:
+  output_dir: outputs/naf_region
+  training:
+    main_updates: 1000
+    topology_updates: 0
+    bce_weight: 0.0
+    adversarial_weight: 0.0
+    topology_weight: 0.0
+  region:
+    initial_generator_sha256: 738fc9dc4179de0cb97a5c7141322248fa11de53be77a2df04bf6dfcb0de75a5
+    data:
+      core_radius: 4
+      min_core_component_pixels: 64
+      corridor_radius: 12
+      keep_high_distance: 4
+      keep_low_distance: 4
+      keep_low_gt_margin: 12
+    loss:
+      high_weight: 1.0
+      low_weight: 1.0
+      separation_weight: 1.0
+      positive_margin: 0.9
+      negative_margin: 0.1
+      min_atom_pixels: 64
+      max_pairs_per_image: 1
+      max_pair_attempts: 4
+      capacity_scale: 1000
+      exterior: true
+    monitor_steps: [0, 1, 100, 250, 500, 1000]
+  monitor:
+    # e0全图与旧同初态控制复用；本轮仍实际保存e0训练配对及监督范围图。
+    full_readout_steps: [1000]

@@ -1,0 +1,8 @@
+# -*- coding: utf-8 -*-
+# 新目标下的必要配对；不是重复旧骨架/Region控制。
+_base: boundary_rgb.yaml
+boundary_naf:
+  output_dir: outputs/naf_rgb/boundary
+  input_mode: boundary
+  inference:
+    input_mode: boundary

@@ -1,0 +1,8 @@
+# C组：同D5a e60起点、源图/退化/优化预算与已有A组一致，仅实际注入噪声为零。
+# 仍抽两份随机噪声并执行两次重建，保留原随机流和有效batch4。
+_base: restore_consistency.yaml
+rgb_restoration:
+  output_dir: outputs/noise_zero
+restore_consistency:
+  noise_mode: zero
+  consistency_weight: 0.0

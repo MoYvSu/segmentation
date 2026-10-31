@@ -1,0 +1,8 @@
+# -*- coding: utf-8 -*-
+# NAF模块内单变量：加强完整分隔监督，不改变选割规则。
+_base: boundary_naf_region.yaml
+boundary_naf:
+  output_dir: outputs/naf_sweep/S2
+  region:
+    loss:
+      separation_weight: 2.0

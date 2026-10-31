@@ -1,0 +1,8 @@
+# -*- coding: utf-8 -*-
+# NAF模块内单变量：加强既有可靠内部保护，不改变保护区域。
+_base: boundary_naf_region.yaml
+boundary_naf:
+  output_dir: outputs/naf_sweep/L2
+  region:
+    loss:
+      low_weight: 2.0

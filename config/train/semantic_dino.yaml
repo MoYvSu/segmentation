@@ -1,0 +1,41 @@
+# -*- coding: utf-8 -*-
+# 实际方案候选：冻结通用 DINO + 随机语义头；保留现有监督损失，不归因成单一骨干消融。
+_base: semantic_d5a.yaml
+semantic_dino:
+  output_dir: outputs/semantic_dino
+  seed: 20261025
+  epochs: 5
+  schedule_epochs: 20
+  updates_per_epoch: 64
+  expected_sources: 32
+  views_per_source: 8
+  effective_batch_size: 4
+  micro_batch_size: 2
+  input_size: 1024
+  native_crop_size: 1024
+  raw_data_dir: data/raw
+  completed_gt_dir: outputs/experiments/seeded_label_completion_o1/radius_8/derived_maps
+  backbone:
+    architecture: dinov3_vitb16
+    source_dir: weights/dinov3/source
+    checkpoint: weights/dinov3/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth
+    sha256: null  # 启动前必须用官方文件的实际 SHA 覆盖；不自动下载或绕过验证。
+    source_version: null
+  head_width: 64
+  precision: float32
+  learning_rate: 0.001
+  minimum_lr_ratio: 0.1
+  weight_decay: 0.0001
+  adam_eps: 0.00000001
+  grad_clip: 1.0
+  torch_threads: 4
+  opencv_threads: 2
+  checkpoint_every_updates: 16
+  control_manifest_sha256: null
+  monitor_epochs: [0, 1, 3, 5]
+  monitor:
+    train_sources: [train_001, train_173, train_558, train_889, train_175, train_873]
+    test_sources: [test_101, test_116, test_166]
+    test_dir: data/quarter_final_test/复赛
+    control_dir: output/semifinal_entry/n0/run1/results
+    thumbnail_width: 320

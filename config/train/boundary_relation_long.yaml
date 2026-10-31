@@ -1,0 +1,11 @@
+# -*- coding: utf-8 -*-
+# 同一完整随机初态，保留全部2746对、D4和64/尾批58；只延长有效更新预算。
+_base: boundary_relation.yaml
+boundary_relation:
+  output_dir: outputs/boundary_relation_long
+  epochs: 24
+  max_updates: 1000
+  schedule_updates: 1000
+  monitor_epochs: []
+  monitor_updates: [0, 215, 500, 750, 1000]
+  checkpoint_updates: [0, 215, 500, 750, 1000]

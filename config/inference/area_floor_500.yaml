@@ -1,0 +1,4 @@
+# -*- coding: utf-8 -*-
+_base: area_floor_100.yaml
+inference:
+  final_min_instance_area: 500

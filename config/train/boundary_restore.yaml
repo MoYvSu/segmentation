@@ -1,0 +1,46 @@
+# -*- coding: utf-8 -*-
+# 五轮机制试验；几何读出和语义固定，未获独立收益前不替换部署。
+_base: ../default_config.yaml
+boundary_restore:
+  output_dir: outputs/boundary_restore
+  manifest: output/boundary_restore/assets/processed_gt32.json
+  expected_sources: 32
+  seed: 20261025
+  epochs: 5
+  schedule_epochs: 20
+  updates_per_epoch: 64
+  effective_batch_size: 4
+  micro_batch_size: 2
+  crop_size: 512
+  views_per_source: 8
+  identity_probability: 0.2
+  gap_probability: 0.6
+  noise_probability: 0.2
+  target_sigma: 2.0
+  valid_margin: 8
+  model:
+    width: 16
+    max_residual: 1.0
+  loss:
+    # 各区域独立的有效像素均值；空区域为0，unknown永远不进入分母。
+    valid_weight: 1.0
+    gap_weight: 1.0
+    noise_weight: 0.5
+    preserve_weight: 0.25
+    preserve_threshold: 0.2
+  precision: float32
+  learning_rate: 0.0003
+  minimum_lr_ratio: 0.1
+  weight_decay: 0.0001
+  adam_eps: 0.00000001
+  grad_clip: 1.0
+  checkpoint_every_updates: 16
+  torch_threads: 4
+  opencv_threads: 2
+  monitor_epochs: [0, 1, 3, 5]
+  monitor:
+    pair_indices: [0, 1, 2, 3, 4, 5]
+    thumbnail_width: 300
+    tile_overlap: 128
+    control_manifest: null
+    roi_spec: null

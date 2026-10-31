@@ -1,0 +1,11 @@
+# -*- coding: utf-8 -*-
+# 单变量：只增加GT资格内的法向暗谷填充监督；复用双线性组完整随机初态与控制。
+_base: boundary_resize.yaml
+boundary_naf:
+  output_dir: outputs/naf_ridge/candidate
+  ridge_supervision:
+    enabled: true
+    version: normal_hull_v1
+    weight: 0.1
+    profile_radius: 4
+    corridor_half_width: 1

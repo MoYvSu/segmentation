@@ -1,0 +1,17 @@
+# -*- coding: utf-8 -*-
+# 同初态/结构/GT/损失/预算，唯一主要变化为输入任务：真实N1细化→处理后GT。
+_base: boundary_naf.yaml
+boundary_naf:
+  output_dir: outputs/naf_real
+  input_source: real_n1
+  real_input_manifest: output/boundary_naf_real/heatmaps/manifest.json
+  real_input_models:
+    backend:
+      sha256: 13b3ab1bc509fa45848e2eb8a40ee458b178fe747fc83eb65333c527a8161f04
+    restorer:
+      sha256: 9315da872ead66735f799e27f85eb97f8c2c265d44d64c6f8a271be50417007b
+  inference:
+    # 整张图先细化再裁窗；绝不在各tile单独细化。
+    input_mode: skeleton
+  monitor:
+    baseline_name: N1

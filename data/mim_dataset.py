@@ -6,7 +6,7 @@ from __future__ import annotations
 import glob
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence
 
 import cv2
 import numpy as np

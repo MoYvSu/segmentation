@@ -20,6 +20,7 @@ from train_backend_adaptation import prediction_maps, write_json
 from utils.affinity_deployment import crop_letterbox_output, prepare_image
 from utils.config import project_path
 from utils.patch_diagnostic import BlendMap, phase_description, tile_boxes
+from utils.restoration_probe import restore_probe
 
 
 def verify_prediction(ids, classes, shape):
@@ -30,8 +31,11 @@ def verify_prediction(ids, classes, shape):
 
 
 @torch.no_grad()
-def predict_views(model, restorer, path, config, device, seed, sizes, *, local_restorer=None, fixed_audit=None):
+def predict_views(model, restorer, path, config, device, seed, sizes, *, local_restorer=None,
+                  local_noise_mode='single', fixed_audit=None, local_audit=None, analysis_callback=None):
     """各尺度复用同一全图两路语义；连续边界拼回原图后各作一次全局划分。"""
+    if local_noise_mode not in ('single', 'zero'):
+        raise ValueError('Local restoration mode must be single/zero')
     results = {}
     with ExitStack() as stack:
         stack.enter_context(_inference_state(model, restorer, device))
@@ -46,7 +50,8 @@ def predict_views(model, restorer, path, config, device, seed, sizes, *, local_r
         if fixed_audit is not None:
             fixed_audit.update(
                 geometry_semantic_sha256=hashlib.sha256(semantic.contiguous().numpy().tobytes()).hexdigest(),
-                raw_probability_sha256=hashlib.sha256(probability.tobytes()).hexdigest())
+                raw_probability_sha256=hashlib.sha256(probability.tobytes()).hexdigest(),
+                global_boundary_sha256=hashlib.sha256(global_boundary.contiguous().numpy().tobytes()).hexdigest())
         for size in sizes:
             if int(size) == 0:
                 boundary, audit = global_boundary[0, 0].numpy(), dict(tiles=1)
@@ -56,10 +61,29 @@ def predict_views(model, restorer, path, config, device, seed, sizes, *, local_r
                 for index, box in enumerate(boxes):
                     y, x, y1, x1 = box
                     image, ph, pw = tensor_from_rgb(rgb[y:y1, x:x1], device)
-                    restored = restore_first(restorer if local_restorer is None else local_restorer,
-                                             image, seed + 100000 + int(size) * 1000 + index)
+                    actual_restorer = restorer if local_restorer is None else local_restorer
+                    local_seed = seed + 100000 + int(size) * 1000 + index
+                    row = dict(size=int(size), window=index, box=list(box), seed=local_seed,
+                               noise_mode=local_noise_mode)
+                    if local_noise_mode == 'single':
+                        # 默认仍使用历史函数及完全相同的算术顺序，不改全图恢复器属性。
+                        restored = restore_first(actual_restorer, image, local_seed)
+                    else:
+                        zero_audit = {} if local_audit is not None else None
+                        restored, _ = restore_probe(actual_restorer, image, local_seed, 'zero', audit=zero_audit)
+                        if zero_audit is not None:
+                            row.update(zero_audit)
+                            if not (row['noise_nonzero'] == 0 and row['initial_equals_condition']):
+                                raise RuntimeError('Local zero noise did not produce the actual condition state')
                     grid = boundary_grid(model, restored, config)
                     native = crop_letterbox_output(grid, 1024, ph, pw, (y1-y, x1-x)).cpu()[0, 0].numpy()
+                    if local_audit is not None:
+                        row.update(input_sha256=hashlib.sha256(image.contiguous().cpu().numpy().tobytes()).hexdigest(),
+                                   restored_sha256=hashlib.sha256(restored.contiguous().cpu().numpy().tobytes()).hexdigest())
+                        local_audit.append(row)
+                    if analysis_callback is not None:
+                        analysis_callback(source_shape=rgb.shape[:2], box=box, image=image, restored=restored, boundary=native,
+                                          ph=ph, pw=pw, size=int(size), window=index)
                     blend.add(box, native)
                 boundary, audit = blend.finish()
                 audit['tiles'] = len(boxes)
@@ -85,7 +109,7 @@ def save_monitor(model, restorer, config, device, output, epoch, size, *, smoke=
         if path.stem not in names:
             continue
         seed = config['backend_adaptation']['restoration']['inference_seed'] + index
-        rgb, views = predict_views(model, restorer, path, config, device, seed, [0, size])
+        _, views = predict_views(model, restorer, path, config, device, seed, [0, size])
         reference = (project_path(config, config['affinity_native']['reused_control'], 'deployment')
                      if reference_folder is None else reference_folder)
         control = load_directory(reference, path.stem)

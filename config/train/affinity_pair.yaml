@@ -1,0 +1,13 @@
+# -*- coding: utf-8 -*-
+# 保持mixed balance的主流与20轮预算；同一步补充同源互补视野。
+_base: affinity_balance_mixed.yaml
+backend_adaptation:
+  output_dir: outputs/affinity_pair
+affinity_pair:
+  reference: outputs/affinity_balance/mixed
+  reference_sha256: 43da103c95c7f85149bd0533fd116d26f0a81c91d793db7e8938b7d4ae80e434
+  zero_reference: outputs/affinity_balance_smoke/mixed
+  auxiliary_weight: 0.25
+  auxiliary_seed: 20261001
+  diagnostic_updates: 8
+  monitor_width: 300

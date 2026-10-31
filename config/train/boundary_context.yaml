@@ -1,0 +1,12 @@
+# -*- coding: utf-8 -*-
+# 只增加原RGB上下文；复用真实N0热图、原配对、损失及五轮预算。
+_base: boundary_real.yaml
+boundary_restore:
+  data_mode: real_n0_rgb_context
+  output_dir: outputs/boundary_context
+  context_normalization: uint8_RGB_div255
+  shared_e0_checkpoint: output/boundary_real/epoch_000.pt
+  monitor:
+    pair_indices: [0, 1, 2, 5, 4, 6]
+    required_control_sources: [test_101, test_116, test_166]
+    additional_control_manifest: null

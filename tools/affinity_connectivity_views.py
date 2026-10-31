@@ -23,6 +23,7 @@ from utils.affinity_fusion import affinity_boundary_probability
 from utils.config import project_path
 from utils.offset_letterbox import geometry_letterbox_metadata, letterbox_instance_geometry
 from utils.post_process import boundary_watershed_separation, reconstruct_marker_boundary
+from utils.instance_area_policy import instance_area_kwargs
 
 
 def _vote_options(cfg):
@@ -76,6 +77,7 @@ def decode_native(semantic_logits, boundary_probability, config, *, marker_audit
         semantic_vote_options=_vote_options(cfg), semantic_lab_prior=None,
         semantic_vote_audit={}, marker_partition_restore=cfg.get('marker_partition_restore'),
         marker_restoration_audit={} if marker_audit is None else marker_audit,
+        **instance_area_kwargs(cfg),
     )
 
 

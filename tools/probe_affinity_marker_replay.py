@@ -12,7 +12,6 @@ from unittest.mock import patch
 
 import cv2
 import numpy as np
-import torch
 
 from tools.affinity_connectivity_views import decode_native
 from tools.probe_affinity_partition import _native_tensor, decode_capture
@@ -75,7 +74,8 @@ def build_marker_variant(stages, mode, reflection_padding=32):
     count,labels,stats,_=cv2.connectedComponentsWithStats(cores,connectivity=8)
     markers=np.zeros(source.shape,np.int32); valid=0
     for label in range(1,count):
-        if int(stats[label,cv2.CC_STAT_AREA])<int(resolved['min_instance_area']):
+        if int(stats[label,cv2.CC_STAT_AREA])<int(
+                resolved.get('seed_min_area',resolved['min_instance_area'])):
             continue
         valid+=1; markers[labels==label]=valid
     return {**stages,'marker_boundary_mask':source.copy(),'marker_belt':belt,'cores':cores,

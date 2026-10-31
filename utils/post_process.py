@@ -22,6 +22,7 @@ import torch
 import torch.nn.functional as F
 
 from utils.semantic_vote import build_adaptive_lab_prior, instance_semantic_vote
+from utils.instance_area_policy import instance_area_kwargs, resolve_instance_area_policy
 
 
 CLASS_PEARLITE = 0
@@ -353,6 +354,9 @@ def boundary_watershed_separation(
     semantic_vote_audit: Optional[Dict] = None,
     marker_partition_restore: Optional[Dict] = None,
     marker_restoration_audit: Optional[Dict] = None,
+    seed_min_area: Optional[int] = None,
+    final_min_instance_area: Optional[int] = None,
+    final_small_instance_action: Optional[str] = None,
 ) -> Tuple[np.ndarray, Dict[int, int]]:
     """
     基于边界预测的受阻分水岭实例分割。
@@ -365,7 +369,18 @@ def boundary_watershed_separation(
     5. 受阻分水岭缝合 -> 实例图
     6. 每个实例区域语义投票 -> 晶粒类别
     7. 面积过滤 + ID 分配
+
+    min_area 为旧双阶段缺省；新两个面积参数分别控制核心和WS终态区域。
+    neighbor_merge_v1 不在此处丢弃小区，调用入口须在最终raw语义投票后
+    执行统一清理；本函数返回的仍是清理前的实例分区。
     """
+    area_policy = resolve_instance_area_policy(dict(
+        min_instance_area=min_area, seed_min_area=seed_min_area,
+        final_min_instance_area=final_min_instance_area,
+        final_small_instance_action=final_small_instance_action))
+    if ((marker_partition_restore or {}).get('enabled', False)
+            and area_policy['final_small_instance_action'] == 'neighbor_merge_v1'):
+        raise ValueError('neighbor_merge_v1 requires disabled marker partition restoration')
     max_instance_id = int(max_instance_id)
     if not 1 <= max_instance_id <= 65535:
         raise ValueError(
@@ -413,7 +428,7 @@ def boundary_watershed_separation(
         valid_id = 0
         for label_id in range(1, num_labels):
             area = int(stats[label_id, cv2.CC_STAT_AREA])
-            if area < min_area:
+            if area < area_policy['seed_min_area']:
                 continue
             valid_id += 1
             markers[labels == label_id] = valid_id
@@ -436,7 +451,7 @@ def boundary_watershed_separation(
             img_for_ws, markers,
             boundary_mask if marker_boundary_mask is None else marker_boundary_mask,
             bridge_width if marker_bridge_width is None else marker_bridge_width,
-            int(restore_options.get('min_core_area', min_area)),
+            int(restore_options.get('min_core_area', area_policy['seed_min_area'])),
             float(restore_options.get('area_iqr_multiplier', 1.5)),
             marker_restoration_audit,
             filter_area=bool(restore_options.get('area_filter_enabled', True)))
@@ -452,7 +467,7 @@ def boundary_watershed_separation(
     for label_id in unique_labels:
         inst_mask = ws_result == label_id
         area = int(inst_mask.sum())
-        if area < min_area:
+        if area < area_policy['pre_vote_final_min_area']:
             continue
         candidate_map[inst_mask] = int(label_id)
 
@@ -663,6 +678,9 @@ def post_process_prediction_boundary(
     original_image_rgb: Optional[np.ndarray] = None,
     save_visualization: bool = True,
     marker_partition_restore: Optional[Dict] = None,
+    seed_min_area: Optional[int] = None,
+    final_min_instance_area: Optional[int] = None,
+    final_small_instance_action: Optional[str] = None,
 ) -> Tuple[Dict[str, str], np.ndarray, Dict[int, int]]:
     """
     边界预测版后处理管线。
@@ -753,6 +771,10 @@ def post_process_prediction_boundary(
         semantic_vote_audit=semantic_vote_audit,
         marker_partition_restore=marker_partition_restore,
         marker_restoration_audit=marker_audit,
+        **instance_area_kwargs(dict(
+            min_instance_area=min_instance_area, seed_min_area=seed_min_area,
+            final_min_instance_area=final_min_instance_area,
+            final_small_instance_action=final_small_instance_action)),
     )
 
     inst_path = os.path.join(output_dir, f"{image_basename}_inst.png")

@@ -1,0 +1,7 @@
+# -*- coding: utf-8 -*-
+# 复用结构监督五轮控制；只将防泛亮系数从0.05降至0.005。
+_base: boundary_structure.yaml
+boundary_restore:
+  output_dir: outputs/boundary_mass
+  structure:
+    mass_weight: 0.005

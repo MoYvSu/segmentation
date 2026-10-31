@@ -1,0 +1,18 @@
+# -*- coding: utf-8 -*-
+# 只增加容忍原生像素偏移的实例分隔监督；复用已有 RGB 控制组，不自动全量推理。
+_base: boundary_context.yaml
+boundary_restore:
+  data_mode: real_n0_rgb_structure
+  output_dir: outputs/boundary_structure
+  structure:
+    weight: 0.25
+    response_margin: 0.70
+    mass_weight: 0.05
+    selection_change_cost: 0.01
+    teacher_release_threshold: 0.65
+    corridor_radius: 12
+    core_radius: 16
+    min_core_pixels: 64
+    min_path_points: 8
+    tangent_half_window: 4
+    closed_anchor_threshold: 0.65

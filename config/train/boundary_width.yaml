@@ -1,0 +1,12 @@
+# -*- coding: utf-8 -*-
+# 仅改训练/推理边界输入表示：作者316L式整图细化后ellipse8恢复线宽。
+_base: boundary_rgb_control.yaml
+boundary_naf:
+  output_dir: outputs/naf_width/candidate
+  input_normalization:
+    mode: skeleton_dilate
+    kernel_size: 8
+  inference:
+    input_normalization:
+      mode: skeleton_dilate
+      kernel_size: 8

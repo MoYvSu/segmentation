@@ -1,0 +1,21 @@
+# -*- coding: utf-8 -*-
+# 同源几何标签对照；保留原推理合同，五轮只是20轮日程的阶段检查。
+_base: affinity_balance_mixed.yaml
+
+gt_source:
+  format: affinity_gt_source_v1
+  output_dir: outputs/gt_source
+  manifest: outputs/gt_source/targets/manifest.json
+  approval_file: outputs/gt_source/quality_review.json
+  checkpoint: outputs/affinity_balance/mixed/final.pt
+  checkpoint_sha256: 43da103c95c7f85149bd0533fd116d26f0a81c91d793db7e8938b7d4ae80e434
+  epochs: 5
+  schedule_epochs: 20
+  updates_per_epoch: 64
+  seed: 20261004
+  learning_rate: 0.00002
+  monitor_images: [test_101, test_116]
+  train_monitors: [train_351, train_658]
+  monitor_reference_report: outputs/marker_trial/report.json
+  monitor_reference_sha256: 6214b751bdaefdc38bc8c979276baa553c0b6006e48989cf4b6bb7611fc7a6bd
+  snapshots: [0, 1, 5]

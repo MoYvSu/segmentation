@@ -1,0 +1,7 @@
+# -*- coding: utf-8 -*-
+# 固定NoGAN+S0源部署；完整推理还须显式选择其NAF权重及--seed-support original-zero。
+_base: semifinal_n1.yaml
+inference:
+  seed_min_area: 50
+  final_min_instance_area: 100
+  final_small_instance_action: neighbor_merge_v1

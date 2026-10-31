@@ -1,0 +1,15 @@
+# -*- coding: utf-8 -*-
+# 半决赛150图控制；旧复赛小测须显式 --dataset quarter_final_100。
+_base: submission_reflect.yaml
+submission:
+  dataset: semifinal_150
+  local_restoration:
+    mode: single
+    model: restorer
+  models:
+    backend:
+      file: backend.pt
+      sha256: 13b3ab1bc509fa45848e2eb8a40ee458b178fe747fc83eb65333c527a8161f04
+    restorer:
+      file: restorer.pt
+      sha256: 9315da872ead66735f799e27f85eb97f8c2c265d44d64c6f8a271be50417007b

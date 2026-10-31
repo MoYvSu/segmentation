@@ -1,0 +1,7 @@
+# -*- coding: utf-8 -*-
+# 仅局部恢复置零；全图恢复和语义保持原模型与固定Philox协议。
+_base: semifinal_n0.yaml
+submission:
+  local_restoration:
+    mode: zero
+    model: restorer

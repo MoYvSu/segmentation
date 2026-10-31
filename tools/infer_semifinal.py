@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""复赛独立推理：只读随包权重与源图，reflect32几何＋可选末端s64语义。"""
+"""分赛段独立推理：保留复赛默认，显式支持半决赛150图和局部恢复消融。"""
 from __future__ import annotations
 
 import argparse
@@ -30,7 +30,12 @@ from tools.semantic_marker_diagnostic import marker_stages
 from train_backend_adaptation import tensor_digest
 from utils.affinity_deployment import crop_letterbox_output, prepare_image
 from utils.config import load_config
+from utils.image_io import read_image, write_image
+from utils.instance_area_policy import resolve_instance_area_policy
+from utils.final_instance_cleanup import merge_final_instances
 from utils.patch_diagnostic import phase_description
+from utils.restoration_noise import NOISE_MODE, configure_restoration_noise, noise_protocol
+from utils.submission_stage import dataset_contract
 
 FORMAT = 'semifinal_standalone_inference_v1'
 TERMINAL_FORMAT = 'semantic_grain_inference_v1'
@@ -51,31 +56,31 @@ def write(path, value):
                                    allow_nan=False), encoding='utf-8')
 
 
-def source_index(stem):
-    """编号决定完整100图中的位置；短测子集不重新排列随机种子。"""
-    if stem not in FULL_NAMES:
-        raise ValueError('Expected test_069 through test_168 with three-digit numbering')
-    return int(stem[5:]) - 69
+def source_index(stem, dataset=None):
+    """编号决定该赛段完整清单的位置；旧100默认与子集种子保持。"""
+    return dataset_contract(dataset).source_index(stem)
 
 
-def source_seed(stem):
-    return BASE_SEED + source_index(stem)
+def source_seed(stem, dataset=None):
+    return BASE_SEED + source_index(stem, dataset)
 
 
-def input_files(directory, only=None):
+def input_files(directory, only=None, dataset=None):
+    contract = dataset_contract(dataset)
     files = sorted(p for p in Path(directory).iterdir()
                    if p.is_file() and p.suffix.lower() in {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff'})
     names = [p.stem for p in files]
-    if len(set(names)) != len(names) or any(name not in FULL_NAMES for name in names):
+    if len(set(names)) != len(names) or any(name not in contract.names for name in names):
         raise ValueError('Duplicate or unexpected test image names')
     if only is None:
-        if set(names) != set(FULL_NAMES):
-            raise ValueError('Full inference requires exactly test_069 through test_168')
+        if set(names) != set(contract.names):
+            raise ValueError(f'Full inference requires exactly {contract.count} images: '
+                             f'test_{contract.first:03d} through test_{contract.last:03d}')
         return files
     if not only or len(set(only)) != len(only) or not set(only) <= set(names):
         raise ValueError('--only requires distinct available test image names')
     for name in only:
-        source_index(name)
+        source_index(name, dataset)
     return [p for p in files if p.stem in set(only)]
 
 
@@ -92,7 +97,7 @@ def validate_config(config):
     if config.get('sam2', {}).get('input_normalization') != 'legacy_none':
         raise ValueError('Reflect deployment requires explicit legacy_none normalization')
     infer = config['inference']
-    expected = dict(threshold=.5, boundary_threshold=.65, min_instance_area=50,
+    expected = dict(threshold=.5, boundary_threshold=.65,
                     max_instance_id=65535, watershed_dilate_width=1, bridge_width=1,
                     marker_border_seal_width=2, marker_boundary_low_threshold=.45,
                     marker_boundary_reconstruction_steps=8, semantic_vote_mode='probability_mean',
@@ -100,17 +105,42 @@ def validate_config(config):
                     sem_edge_boost_alpha=0., sem_edge_merge_weight=0., center_seeds=False)
     if any(infer.get(key) != value for key, value in expected.items()):
         raise ValueError('Frozen reflect inference parameters differ')
+    # 种子仍锁定旧部署50；最终小区处理必须由独立字段和显式动作说明。
+    # 不再用可能已被覆盖的legacy别名判断两个阶段的实际取值。
+    area = resolve_instance_area_policy(infer)
+    if area['seed_min_area'] != 50:
+        raise ValueError('Frozen reflect seed_min_area must remain 50')
     if (infer.get('marker_partition_restore', {}).get('enabled', False)
             or config['affinity_native'].get('overlap') != .25
             or config['submission'].get('marker_reflection_padding') != 32
             or config['submission'].get('native_sizes') != [1024]
             or config['submission'].get('seed') != BASE_SEED):
         raise ValueError('Expected reflect32, native1024, overlap.25, no partition restoration')
+    if config['submission'].get('restoration_noise') != NOISE_MODE:
+        raise ValueError('Standalone inference requires explicit restoration_noise=' + NOISE_MODE)
+    dataset_contract(config['submission'].get('dataset'))
+    local_restoration(config)
     fusion = dict(fusion_mode='gated', distance2_weight=.5, distance4_weight=.25,
                   support_threshold=.2, support_temperature=.05, short_reduction='top2',
                   short_softmax_temperature=.15)
     if any(config['affinity_deployment'].get(key) != value for key, value in fusion.items()):
         raise ValueError('Frozen affinity fusion parameters differ')
+
+
+def local_restoration(config):
+    """局部策略单独声明，全图恢复永远沿用原固定噪声。"""
+    value = config['submission'].get('local_restoration', {'mode':'single', 'model':'restorer'})
+    if not isinstance(value, dict) or set(value) != {'mode', 'model'}:
+        raise ValueError('Expected explicit local_restoration mode/model')
+    mode, model = value['mode'], value['model']
+    candidates = {('single','restorer'):'N0', ('zero','restorer'):'N1', ('zero','local_restorer'):'N2'}
+    if (mode, model) not in candidates:
+        raise ValueError('Expected N0 single/shared, N1 zero/shared, or N2 zero/local')
+    if model == 'local_restorer' and not config['submission']['models'].get('local_restorer'):
+        raise ValueError('N2 requires a separately identified local_restorer')
+    if model == 'restorer' and config['submission']['models'].get('local_restorer'):
+        raise ValueError('Unused local_restorer model would obscure candidate identity')
+    return dict(mode=mode, model=model, candidate=candidates[(mode, model)])
 
 
 def decode_reflect(semantic, boundary, config, *, original_decode=None):
@@ -153,7 +183,7 @@ def decode_reflect(semantic, boundary, config, *, original_decode=None):
     return result
 
 
-def runtime_record():
+def runtime_record(*, restoration_noise_mode=NOISE_MODE):
     return dict(python=platform.python_version(), torch=torch.__version__, numpy=np.__version__,
                 opencv=cv2.__version__, cuda=torch.version.cuda, cudnn=torch.backends.cudnn.version(),
                 cuda_device=torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
@@ -163,7 +193,8 @@ def runtime_record():
                 matmul_precision=torch.get_float32_matmul_precision(),
                 cudnn_benchmark=torch.backends.cudnn.benchmark,
                 deterministic_algorithms=torch.are_deterministic_algorithms_enabled(),
-                autocast=False, precision='FP32', input_normalization='legacy_none')
+                autocast=False, precision='FP32', input_normalization='legacy_none',
+                restoration_noise=noise_protocol(restoration_noise_mode))
 
 
 def configure_runtime():
@@ -178,9 +209,9 @@ def configure_runtime():
 
 def model_paths(config, model_dir):
     result = {}
-    for name in ('backend', 'restorer', 'terminal_semantic'):
+    for name in ('backend', 'restorer', 'terminal_semantic', 'local_restorer'):
         item = config['submission']['models'].get(name)
-        if item is None and name == 'terminal_semantic':
+        if item is None and name in ('terminal_semantic', 'local_restorer'):
             continue
         if not isinstance(item, dict) or not isinstance(item.get('file'), str):
             raise ValueError('Missing explicit model file/SHA: ' + name)
@@ -224,6 +255,13 @@ def local_module_sources():
             if relative.split('/')[0] not in {'output', 'outputs'}:
                 result[relative] = sha(path)
     result[Path(__file__).resolve().relative_to(ROOT).as_posix()] = sha(__file__)
+    # 驱动直接读取PTX，Python模块清单不会自动发现这两份协议资源。
+    # 正式包必须携带它们，并同其他源码一样在运行前后核验实际文件摘要。
+    for relative in ('utils/cuda/restore_noise.cu', 'utils/cuda/restore_noise.ptx'):
+        path = ROOT / relative
+        if not path.is_file():
+            raise RuntimeError('Required restoration noise resource missing: ' + relative)
+        result[relative] = sha(path)
     return dict(sorted(result.items()))
 
 
@@ -233,6 +271,9 @@ def load_models(config, paths, device):
     restorer = load_rgb_restorer(str(paths['restorer']), device).eval().requires_grad_(False)
     if restorer.num_steps != 16 or restorer.kappa != .03:
         raise RuntimeError('Expected unchanged D5a first_x0 schedule:16steps/kappa.03')
+    # 在恢复器对象上显式启用一次，覆盖全图与原生裁块两条 restore_first 调用。
+    # 不修改模型权重，不向旧训练入口注入推理策略。
+    configure_restoration_noise(restorer, config['submission']['restoration_noise'])
     terminal = None
     if 'terminal_semantic' in paths:
         head_bundle = torch.load(paths['terminal_semantic'], map_location='cpu', weights_only=True)
@@ -247,8 +288,65 @@ def load_models(config, paths, device):
     return model, restorer, terminal
 
 
+def load_local_restorer(config, paths, device):
+    """保留load_models旧三元组接口，不把局部模型注册为全图模型的子模块。"""
+    if local_restoration(config)['model'] == 'restorer':
+        return None
+    local = load_rgb_restorer(str(paths['local_restorer']), device).eval().requires_grad_(False)
+    if local.num_steps != 16 or local.kappa != .03:
+        raise RuntimeError('Local D5a must retain 16steps/kappa.03 first_x0')
+    return local
+
+
+class RestorationPreview:
+    """只供私有目检：实际局部修复图按相同窗权重拼接，不回流模型。"""
+    def __init__(self):
+        self.maps = None
+
+    def __call__(self, *, source_shape, box, restored, ph, pw, **_):
+        if self.maps is None:
+            self.maps = [views.BlendMap(source_shape) for _ in range(3)]
+        y, x, y1, x1 = box
+        native = crop_letterbox_output(restored.float(), 1024, ph, pw,
+                                       (y1-y, x1-x)).cpu()[0].numpy()
+        for channel, blend in enumerate(self.maps):
+            blend.add(box, native[channel])
+
+    def finish(self, shape):
+        if self.maps is None:
+            raise RuntimeError('No actual restoration windows captured')
+        value = np.stack([blend.finish()[0] for blend in self.maps], axis=-1)
+        if value.shape != (*shape, 3):
+            raise RuntimeError('Restoration preview shape differs')
+        return value
+
+
+def finalize_instance_area(result, config):
+    """原图raw语义投票之后再合并小区，避免先丢成0或改变大区类别。
+
+    legacy_drop已在watershed内部完成，原路径直接返回。新策略保留接管者
+    的类别；若存在语义分数，只保留接管者原分数并明确标注，不冒充合并后的均值。
+    """
+    area = resolve_instance_area_policy(config['inference'])
+    if area['final_small_instance_action'] == 'legacy_drop':
+        return result
+    ids, classes, audit = merge_final_instances(
+        result['instances'], result['classes'], area['final_min_instance_area'],
+        action=area['final_small_instance_action'])
+    result = dict(result, instances=ids, classes=classes, final_area_cleanup=audit)
+    result['phases'] = phase_description(ids, classes)
+    if 'instance_scores' in result:
+        result['instance_scores'] = {key: result['instance_scores'][key] for key in classes}
+        result['instance_score_policy'] = 'original_target_score_inherited_not_recomputed'
+    return result
+
+
 @torch.no_grad()
-def predict(model, restorer, terminal, path, config, device):
+def predict(model, restorer, terminal, path, config, device, *, local_restorer=None,
+            fixed_audit=None, local_audit=None, analysis_callback=None):
+    policy = local_restoration(config)
+    if (policy['model'] == 'local_restorer') != (local_restorer is not None):
+        raise ValueError('Actual local model does not match the declared candidate')
     original_decode = views.decode_native
 
     def reflected_decode(semantic, boundary, actual_config, *args, **kwargs):
@@ -258,7 +356,11 @@ def predict(model, restorer, terminal, path, config, device):
 
     with torch.autocast(device_type=torch.device(device).type, enabled=False), \
             patch.object(views, 'decode_native', side_effect=reflected_decode):
-        rgb, predictions = views.predict_views(model, restorer, path, config, device, source_seed(path.stem), [1024])
+        rgb, predictions = views.predict_views(
+            model, restorer, path, config, device,
+            source_seed(path.stem, config['submission'].get('dataset')), [1024],
+            local_restorer=local_restorer, local_noise_mode=policy['mode'],
+            fixed_audit=fixed_audit, local_audit=local_audit, analysis_callback=analysis_callback)
         result = predictions['patch1024']
         if terminal is not None:
             # 上游恢复图语义仍由原头决定geometry；新头只在原图末端改类别。
@@ -270,6 +372,7 @@ def predict(model, restorer, terminal, path, config, device):
             result['classes'], result['instance_scores'] = revote_instances(result['instances'], probability)
             result['terminal_probability_sha256'] = hashlib.sha256(probability.tobytes()).hexdigest()
             result['phases'] = phase_description(result['instances'], result['classes'])
+        result = finalize_instance_area(result, config)
     verify_prediction(result['instances'], result['classes'], rgb.shape[:2])
     return rgb, result
 
@@ -283,9 +386,13 @@ def run(args):
     config = load_config(str(config_path))
     # 便携入口的根由源码位置决定，忽略工作站环境变量对历史项目根的注入。
     config['paths']['project_root'] = str(ROOT)
+    if getattr(args, 'dataset', None):
+        config['submission']['dataset'] = args.dataset
     validate_config(config)
+    contract = dataset_contract(config['submission'].get('dataset'))
+    policy = local_restoration(config)
     input_dir = Path(args.input_dir).resolve()
-    files = input_files(input_dir, args.only)
+    files = input_files(input_dir, args.only, contract.name)
     model_dir = Path(args.model_dir).resolve() if args.model_dir else ROOT / 'model'
     paths = model_paths(config, model_dir)
     output = Path(args.output_dir).resolve()
@@ -300,40 +407,64 @@ def run(args):
     try:
         manifest = verify_source_manifest()
         model, restorer, terminal = load_models(config, paths, 'cuda')
-        modules = [model, restorer] + ([] if terminal is None else [terminal])
+        local = load_local_restorer(config, paths, 'cuda')
+        named_modules = [('backend', model), ('restorer', restorer)]
+        if terminal is not None:
+            named_modules.append(('terminal', terminal))
+        if local is not None:
+            named_modules.append(('local_restorer', local))
+        modules = [module for _, module in named_modules]
         if any(m.training or any(p.requires_grad for p in m.parameters()) for root in modules for m in root.modules()):
             raise RuntimeError('All modules must be frozen and eval for inference')
-        before = {name: tensor_digest(module.state_dict().items()) for name, module in zip(('backend', 'restorer', 'terminal'), modules)}
+        before = {name: tensor_digest(module.state_dict().items()) for name, module in named_modules}
         parameters = sum(p.numel() for module in modules for p in module.parameters())
         if parameters >= 500_000_000:
             raise RuntimeError('Total model parameters exceed competition limit')
         source_hashes = local_module_sources()
-        runtime = runtime_record()
-        report = dict(format=FORMAT, complete=False, full100_complete=False, training=False,
+        runtime = runtime_record(restoration_noise_mode=restorer.inference_noise_mode)
+        report = dict(format=FORMAT, complete=False, full100_complete=False, full150_complete=False,
+                      dataset=contract.name, dataset_count=contract.count,
+                      local_restoration=policy, training=False,
                       no_optimizer_steps=True, parameter_count=parameters, runtime=runtime,
                       source_manifest=manifest, imported_sources=source_hashes,
                       config_sha256=sha(config_path), config=config,
                       models={name: dict(file=str(path.relative_to(model_dir)), sha256=sha(path), bytes=path.stat().st_size) for name, path in paths.items()},
                       model_states=before, semantic='raw terminal s64' if terminal is not None else 'raw original R1',
+                      instance_area_policy=resolve_instance_area_policy(config['inference']),
                       geometry='original R1 native1024, D5a first_x0, reflect32 markers only', images=[])
         for path in files:
-            rgb, result = predict(model, restorer, terminal, path, config, 'cuda')
+            fixed, windows = {}, []
+            collector = RestorationPreview() if getattr(args, 'save_analysis', False) else None
+            rgb, result = predict(model, restorer, terminal, path, config, 'cuda',
+                                  local_restorer=local, fixed_audit=fixed, local_audit=windows,
+                                  analysis_callback=collector)
             ids, classes = result['instances'], result['classes']
             png = result_dir / (path.stem + '_inst.png')
             labels = result_dir / (path.stem + '_class.json')
-            if not cv2.imwrite(str(png), ids):
-                raise RuntimeError('Could not save uint16 prediction')
+            write_image(png, ids)
             write(labels, classes)
-            reloaded = cv2.imread(str(png), cv2.IMREAD_UNCHANGED)
+            reloaded = read_image(png, cv2.IMREAD_UNCHANGED)
             reload_classes = json.loads(labels.read_text(encoding='utf-8'))
             verify_prediction(reloaded, reload_classes, rgb.shape[:2])
             if not np.array_equal(reloaded, ids) or reload_classes != classes:
                 raise RuntimeError('Saved PNG/JSON differs from actual inference')
-            row = dict(source=path.stem, full_source_index=source_index(path.stem), seed=source_seed(path.stem),
+            row = dict(source=path.stem, full_source_index=source_index(path.stem, contract.name),
+                       seed=source_seed(path.stem, contract.name), fixed_paths=fixed, local_windows=windows,
                        input_sha256=sha(path), shape=list(rgb.shape[:2]), phases=result['phases'], blend=result['blend'],
                        png_sha256=sha(png), classes_sha256=sha(labels))
+            if collector is not None:
+                preview = collector.finish(rgb.shape[:2])
+                analysis_dir = output / 'analysis'
+                analysis_dir.mkdir(exist_ok=True)
+                np.savez_compressed(analysis_dir / (path.stem + '.npz'), boundary=result['boundary'],
+                                    restored=preview)
+                row['analysis'] = 'analysis/' + path.stem + '.npz'
             if terminal is not None:
                 row.update(instance_scores=result['instance_scores'], terminal_probability_sha256=result['terminal_probability_sha256'])
+            if 'final_area_cleanup' in result:
+                row['final_area_cleanup'] = result['final_area_cleanup']
+                if 'instance_score_policy' in result:
+                    row['instance_score_policy'] = result['instance_score_policy']
             report['images'].append(row)
             write(audit / 'report.json', report)
             status['completed_images'] = len(report['images']); write(audit / 'status.json', status)
@@ -341,16 +472,21 @@ def run(args):
         expected = {p.stem + suffix for p in files for suffix in ('_inst.png', '_class.json')}
         if {p.name for p in result_dir.iterdir()} != expected:
             raise RuntimeError('Result directory does not contain exactly one pair per image')
-        after = {name: tensor_digest(module.state_dict().items()) for name, module in zip(('backend', 'restorer', 'terminal'), modules)}
-        if after != before or runtime_record() != runtime or verify_source_manifest() != manifest:
+        after = {name: tensor_digest(module.state_dict().items()) for name, module in named_modules}
+        if (after != before
+                or runtime_record(restoration_noise_mode=restorer.inference_noise_mode) != runtime
+                or verify_source_manifest() != manifest):
             raise RuntimeError('Models/source manifest/precision changed during inference')
         for name, digest in source_hashes.items():
             if sha(ROOT / name) != digest:
                 raise RuntimeError('Imported source changed during inference: ' + name)
-        report.update(complete=True, full100_complete=len(files) == 100, frozen_models_unchanged=True,
+        complete = len(files) == contract.count
+        flags = dict(full100_complete=complete and contract.count == 100,
+                     full150_complete=complete and contract.count == 150, full_dataset_complete=complete)
+        report.update(complete=True, **flags, frozen_models_unchanged=True,
                       elapsed_seconds=time.time() - started)
         write(audit / 'report.json', report)
-        status.update(complete=True, status='complete', full100_complete=len(files) == 100)
+        status.update(complete=True, status='complete', dataset=contract.name, **flags)
         write(audit / 'status.json', status)
         print('SEMIFINAL_INFERENCE_COMPLETE', len(files), output, flush=True)
     except Exception as exc:
@@ -365,6 +501,9 @@ def main():
     parser.add_argument('--config', default=str(ROOT / 'config/inference/submission_reflect.yaml'))
     parser.add_argument('--model-dir', help='Defaults to code_model/model; model files remain SHA-verified')
     parser.add_argument('--only', nargs='+', help='Optional fixed-name short check, e.g. test_101 test_116')
+    parser.add_argument('--dataset', choices=('quarter_final_100', 'semifinal_150'),
+                        help='Explicit stage override; defaults to config or legacy 100-image stage')
+    parser.add_argument('--save-analysis', action='store_true', help='Private boundary/restored preview arrays outside results/')
     run(parser.parse_args())
 
 

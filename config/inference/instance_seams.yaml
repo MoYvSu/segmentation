@@ -1,0 +1,20 @@
+# -*- coding: utf-8 -*-
+# 只给最高mixed balance的内侧同类细零缝归属；不训练、不重投票、不扫描阈值。
+_base: ../train/affinity_balance_mixed.yaml
+
+# 显式记录既有backend的输入归一化，数值与checkpoint部署合同相同。
+sam2:
+  input_normalization: legacy_none
+
+instance_seam_assignment:
+  version: same_phase_nearest_original_v1
+  enabled: true
+  checkpoint: outputs/affinity_balance/mixed/final.pt
+  checkpoint_sha256: 43da103c95c7f85149bd0533fd116d26f0a81c91d793db7e8938b7d4ae80e434
+  epoch: 20
+  input_archive: outputs/affinity_balance/mixedbalance1024.zip
+  input_archive_sha256: ac7533b529a35ce98a94ac8b2822d9f7543ea015762c15343b62dd3207fa3c77
+  output_dir: outputs/affinity_seams/test
+  expected_images: 100
+  gallery_images: [test_101, test_116]
+  gallery_random_seed: 20261002

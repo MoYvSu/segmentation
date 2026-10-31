@@ -1,0 +1,11 @@
+# -*- coding: utf-8 -*-
+# 相对N1仅换局部C5 e5；原D5a仍负责全图，不能用C5覆盖restorer.pt。
+_base: semifinal_n1.yaml
+submission:
+  local_restoration:
+    mode: zero
+    model: local_restorer
+  models:
+    local_restorer:
+      file: local_restorer.pt
+      sha256: 2cf4eb82ef81feb24371cd21c46849b10137cdb06e6294183e4684da7746cc8d

@@ -1,0 +1,28 @@
+# -*- coding: utf-8 -*-
+# 新实验：RGB+真实N1二值图纠错，不继承旧恢复器；旧部署不变。
+_base: boundary_naf_real.yaml
+boundary_naf:
+  output_dir: outputs/naf_rgb/rgb
+  input_mode: rgb_boundary
+  training:
+    main_updates: 1000
+    topology_updates: 0
+    discriminator_learning_rate: 0.0001
+    adversarial_weight: 0.01
+    adversarial_warmup_updates: 64
+    bce_weight: 0.0
+    topology_weight: 0.0
+    minimum_free_gib: 3.0
+    monitor_updates: [0, 1, 100, 250, 500, 750, 1000]
+  rgb_loss:
+    tolerance: 2
+    coverage_weight: 1.0
+    interior_weight: 1.0
+  inference:
+    input_mode: rgb_boundary
+    boundary_representation: binary
+    input_threshold: 0.5
+    output_stitch: probability
+  monitor:
+    baseline_name: N1
+    full_readout_steps: [0, 1000]

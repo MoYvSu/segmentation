@@ -1,0 +1,18 @@
+# -*- coding: utf-8 -*-
+# 单变量：只在既有真实N1标准化输入中显式擦断支持线段；不改目标/模型/损失/读出。
+_base: boundary_width.yaml
+boundary_naf:
+  output_dir: outputs/naf_erasure/candidate
+  erasure:
+    enabled: true
+    version: native_supported_v1
+    probability: 0.5
+    count_range: [1, 2]
+    lengths: [16, 24, 32, 40]
+    normal_half_width: 8
+    max_attempts: 64
+  monitor:
+    # 保留8核正式运行的七个共同draw（父YAML未包含后补固定draw 9921）。
+    pair_indices: [0, 5, 17, 29, 41, 63, 9921]
+    # 仅在预检确认原固定图未覆盖擦断时追加最多2个确定draw。
+    erasure_pair_indices: []

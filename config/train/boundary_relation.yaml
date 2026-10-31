@@ -1,0 +1,20 @@
+# -*- coding: utf-8 -*-
+# 关系分类新任务：不加载主线网络或旧修复器权重；两组共享完整随机初态。
+_base: ../default_config.yaml
+boundary_relation:
+  data_manifest: outputs/boundary_relation/data/manifest.json
+  output_dir: outputs/boundary_relation
+  mode: rgb
+  seed: 20261030
+  epochs: 5
+  batch_size: 64
+  learning_rate: 0.0003
+  minimum_learning_rate: 0.00003
+  weight_decay: 0.0001
+  max_ram_gib: 16
+  augment_d4: true
+  num_workers: 0
+  precision: float32
+  monitor_epochs: [0, 1, 2, 3, 4, 5]
+  no_validation_holdout: true
+  apply_predicted_merges: false

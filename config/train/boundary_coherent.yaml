@@ -1,0 +1,7 @@
+# -*- coding: utf-8 -*-
+# 单变量消融：三点共用法向偏移；未形成可靠三点的GT仍沿用原pointwise覆盖。
+_base: boundary_width.yaml
+boundary_naf:
+  output_dir: outputs/naf_coherent/candidate
+  rgb_loss:
+    coverage_mode: coherent3

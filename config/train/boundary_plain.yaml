@@ -1,0 +1,7 @@
+# -*- coding: utf-8 -*-
+# 单变量：在无GAN控制上关闭填谷；原GT、完整随机初态、采样和读出保持。
+_base: boundary_nogan.yaml
+boundary_naf:
+  output_dir: outputs/naf_plain/candidate
+  ridge_supervision:
+    enabled: false

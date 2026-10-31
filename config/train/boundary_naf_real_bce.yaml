@@ -1,0 +1,6 @@
+# -*- coding: utf-8 -*-
+# 真实N1配对的单变量损失对照：关闭GAN，结构、GT、初态及PH设置不变。
+_base: boundary_naf_real.yaml
+boundary_naf:
+  training:
+    adversarial_weight: 0.0

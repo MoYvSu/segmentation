@@ -10,11 +10,13 @@ import torch
 import torch.nn.functional as F
 
 from data.dataset import letterbox
+from utils.image_io import read_image
 from utils.affinity_fusion import (
     affinity_boundary_base_and_residual,
     affinity_boundary_probability,
 )
 from utils.post_process import post_process_prediction_boundary
+from utils.instance_area_policy import instance_area_kwargs
 
 
 def affinity_mean_boundary_probability(affinity_logits: torch.Tensor) -> torch.Tensor:
@@ -49,9 +51,7 @@ def crop_letterbox_grid(output: torch.Tensor, image_size: int, pad_h: int, pad_w
 
 
 def prepare_image(image_path: str | Path, image_size: int, device):
-    bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
-    if bgr is None:
-        raise FileNotFoundError(image_path)
+    bgr = read_image(image_path, cv2.IMREAD_COLOR)
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
     image_lb, _, pad_h, pad_w = letterbox(rgb, image_size)
     tensor = (
@@ -138,14 +138,11 @@ def predict_maps_with_challenger(
     original_size = image.shape[:2]
     if replace_reference_semantic:
         reference_output = None
-        features = [
-            feature.detach() for feature in system.reference_model.encoder(tensor)
-        ]
     else:
         reference_output = system.reference_model(tensor)
-        features = [
-            feature.detach() for feature in system.reference_model.encoder(tensor)
-        ]
+    features = [
+        feature.detach() for feature in system.reference_model.encoder(tensor)
+    ]
     geometry_output = system.geometry_forward_from_features(tensor, features)
     challenger_output = semantic_challenger(features, tensor)
 
@@ -243,6 +240,7 @@ def postprocess(
         output_dir=str(output_dir),
         image_basename=basename,
         min_instance_area=int(infer_cfg.get("min_instance_area", 50)),
+        **instance_area_kwargs(infer_cfg),
         max_instance_id=int(infer_cfg.get("max_instance_id", 65535)),
         threshold=float(infer_cfg.get("threshold", 0.5)),
         boundary_threshold=float(boundary_threshold),

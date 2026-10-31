@@ -32,6 +32,8 @@ Pillow>=10.0.0
 scipy>=1.11.0
 scikit-image>=0.22.0
 PyYAML>=6.0
+# NAF边界恢复末段的真实cubical持久同调；CPU配对、PyTorch临界像素反传。
+gudhi==3.11.0
 
 # ---- Machine Learning (Stage 2 classifier) ----
 scikit-learn>=1.4.0

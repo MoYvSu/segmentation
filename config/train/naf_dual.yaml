@@ -1,0 +1,16 @@
+# -*- coding: utf-8 -*-
+# 唯一主要变化：T8之外，增加同源/同坐标的连续N1输入；不继承旧训练权重。
+_base: boundary_width.yaml
+boundary_naf:
+  output_dir: outputs/naf_dual
+  input_mode: boundary_continuous
+  input_contract: t8_continuous_v1
+  continuous_cache_max_bytes: 1073741824
+  training:
+    minimum_free_gib: 10.0
+  inference:
+    input_mode: boundary_continuous
+    input_contract: t8_continuous_v1
+    boundary_representation: binary_t8_and_continuous_n1
+  monitor:
+    full_readout_steps: []

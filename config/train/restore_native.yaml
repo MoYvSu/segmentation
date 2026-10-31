@@ -1,0 +1,41 @@
+# 恢复器尺度适配：A/B只改变原生视野；共同从同一随机初态训练。
+_base: rgb_diffusion_d5a.yaml
+rgb_restoration:
+  output_dir: outputs/restore_native
+  crop_size: 1024
+  train:
+    # 保留60轮余弦日程，独立入口在20轮停止，随后可完整续训。
+    epochs: 60
+    save_epochs: [1, 5, 10, 15, 20, 40, 60]
+    batch_size: 4
+    num_workers: 2
+restore_native:
+  stage_epochs: 20
+  input_size: 1024
+  micro_batch: 1
+  arms:
+    native: [1024]
+    mixed: [1024, 512]
+  view_seed: 73001
+  downsample_probability: 0.5
+  exact_half_probability: 0.5
+  downsample_range: [0.5, 1.0]
+  minimum_free_gib: 6
+  monitor_epochs: [0, 1, 5, 10, 15, 20]
+  monitor:
+    seed: 20260930
+    training_sources: 4
+    real_typical: [test_101, test_116]
+    real_random_count: 2
+    exclude_previous: [test_101, test_116, test_090, test_123, test_104, test_147, test_091, test_130, test_089]
+    thumbnail_size: 224
+    roi_size: 256
+  backend_config: config/train/affinity_native.yaml
+  old_restorer: outputs/d5a/candidate/epoch_060.pt
+  old_restorer_sha256: 048954795dc634f82fecf96d5e02bb2f2505afe5eb76298dff5a1b0713b3c80a
+  backend1024: outputs/affinity_native/p1024/final.pt
+  backend1024_sha256: b750a3da2e93195bfa1f220aa1873ac7e85fe6ab34302afc614959fb0e583fca
+  backend512: outputs/affinity_native/p512/final.pt
+  backend512_sha256: f11c1b85d04890ed89c6a9150a6bc20b0cc149e2705f3613ce0fa40f52adf1cc
+  old_predictions1024: outputs/affinity_native/p1024/deployment/patch1024
+  old_predictions512: outputs/affinity_native/p512/deployment/patch512

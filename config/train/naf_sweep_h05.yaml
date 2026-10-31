@@ -1,0 +1,8 @@
+# -*- coding: utf-8 -*-
+# NAF模块内单变量：降低保线权重，其余配方继承旧Region s1000。
+_base: boundary_naf_region.yaml
+boundary_naf:
+  output_dir: outputs/naf_sweep/H05
+  region:
+    loss:
+      high_weight: 0.5
