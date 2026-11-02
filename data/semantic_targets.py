@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""从同一份补缝实例 GT 派生语义与内部区域；未知语义使用 -1。"""
+"""从人工补缝或显式教师实例派生语义；来源分开，未知语义使用 -1。"""
 
 import json
 from pathlib import Path
@@ -7,10 +7,17 @@ from pathlib import Path
 import numpy as np
 
 from data.offset_geometry_dataset import load_completed_instance_map
+from data.teacher_supervision import is_teacher_supervision, load_teacher_instance_source
 
 
 def load_completed_semantic_source(path, image_shape):
     path = Path(path)
+    if is_teacher_supervision(path):
+        instances, classes, _, _, _ = load_teacher_instance_source(path, image_shape)
+        lookup = np.full(int(instances.max()) + 1, -1, dtype=np.float32)
+        for key, value in classes.items():
+            lookup[key] = value
+        return instances, lookup
     instances = load_completed_instance_map(path, image_shape)
     class_path = path.with_name(path.name.removesuffix("_gt.npz") + "_class.json")
     with class_path.open(encoding="utf-8") as stream:
@@ -24,12 +31,15 @@ def load_completed_semantic_source(path, image_shape):
     return instances, lookup
 
 
-def semantic_targets_from_instances(instances, class_lookup):
+def semantic_targets_from_instances(instances, class_lookup, *, known_boundaries_only=False):
     """在最终网格派生目标；边缘只用于排除 core，不是边界分支的监督。"""
     semantic = class_lookup[instances]
     boundary = np.zeros(instances.shape, dtype=bool)
     horizontal = instances[:, 1:] != instances[:, :-1]
     vertical = instances[1:, :] != instances[:-1, :]
+    if known_boundaries_only:
+        horizontal &= (instances[:, 1:] > 0) & (instances[:, :-1] > 0)
+        vertical &= (instances[1:, :] > 0) & (instances[:-1, :] > 0)
     boundary[:, 1:] |= horizontal
     boundary[:, :-1] |= horizontal
     boundary[1:, :] |= vertical

@@ -174,6 +174,9 @@ def build_dataloaders(config):
         boundary_weight_floor=boundary_weight_floor,
         boundary_weight_ceil=boundary_weight_ceil,
         center_sigma=data_cfg.get("center_sigma", 4.0),
+        teacher_gt_dir=project_path(config, data_cfg["teacher_gt_dir"]) if data_cfg.get("teacher_gt_dir") else None,
+        teacher_center_supervision=float(config["train"].get("center_weight", 0.0)) > 0,
+        teacher_boundary_policy=data_cfg.get("teacher_boundary_policy", "known_neighbors_v1"),
     )
 
     val_dataset = BoundaryDataset(
@@ -189,6 +192,9 @@ def build_dataloaders(config):
         boundary_weight_floor=boundary_weight_floor,
         boundary_weight_ceil=boundary_weight_ceil,
         center_sigma=data_cfg.get("center_sigma", 4.0),
+        teacher_gt_dir=project_path(config, data_cfg["teacher_gt_dir"]) if data_cfg.get("teacher_gt_dir") else None,
+        teacher_center_supervision=float(config["train"].get("center_weight", 0.0)) > 0,
+        teacher_boundary_policy=data_cfg.get("teacher_boundary_policy", "known_neighbors_v1"),
     )
 
     if len(train_dataset) == 0:
@@ -315,9 +321,10 @@ def validate(model, loader, criterion, device):
         bnd_pred = (torch.sigmoid(bnd_logits) > 0.5).long()
         # boundary_soft 是连续目标，验证二值 IoU 时必须显式阈值，不能直接 long 截断。
         bnd_gt = (targets[:, 1] > 0.5).long()
-        bnd_tp += ((bnd_pred == 1) & (bnd_gt == 1)).sum().item()
-        bnd_fp += ((bnd_pred == 1) & (bnd_gt == 0)).sum().item()
-        bnd_fn += ((bnd_pred == 0) & (bnd_gt == 1)).sum().item()
+        valid = targets[:, 1] >= 0
+        bnd_tp += ((bnd_pred == 1) & (bnd_gt == 1) & valid).sum().item()
+        bnd_fp += ((bnd_pred == 1) & (bnd_gt == 0) & valid).sum().item()
+        bnd_fn += ((bnd_pred == 0) & (bnd_gt == 1) & valid).sum().item()
 
     val_metrics = metrics.get_metrics()
     val_metrics["loss"] = total_loss / max(n_batches, 1)
@@ -439,6 +446,14 @@ def main():
             f"最佳 Composite Score: {best_composite_score:.4f}"
         )
 
+    # 可选固定训练源缩略图；缺省关闭，不读取验证/测试源或参与选权重。
+    process_monitor = None
+    if train_cfg.get("process_monitor") is not None:
+        from utils.training_process_monitor import build_process_monitor
+        process_monitor = build_process_monitor(train_cfg["process_monitor"], train_loader.dataset, output_dir)
+        if process_monitor is not None:
+            process_monitor.maybe_save(model, start_epoch, train_cfg["epochs"], device)
+
     logger.info("=" * 60)
     logger.info("开始训练 (边界预测版本)")
     logger.info(f"  Epochs: {train_cfg['epochs']}")
@@ -505,6 +520,9 @@ def main():
                 optimizer=optimizer, scheduler=scheduler,
             ), ckpt_path)
             logger.info(f"  Checkpoint 已保存: {ckpt_path}")
+
+        if process_monitor is not None:
+            process_monitor.maybe_save(model, epoch + 1, train_cfg["epochs"], device)
 
     final_path = os.path.join(output_dir, "final_model.pth")
     torch.save(build_checkpoint(

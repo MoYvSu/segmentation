@@ -253,6 +253,10 @@ class BoundaryLoss(nn.Module):
         seg_target = target[:, 0]         # [B, H, W] 二值语义掩码
         boundary_logits = pred[:, 1]      # [B, H, W] 边界 logits
         boundary_target = target[:, 1]    # [B, H, W] 二值边界掩码
+        boundary_valid = boundary_target >= 0
+        has_boundary_ignore = bool((~boundary_valid).any())
+        if has_boundary_ignore:
+            boundary_target = boundary_target.clamp(0.0, 1.0)
 
         # ---- 语义 BCE Loss ----
         self.last_semantic_instance_loss = 0.0
@@ -362,12 +366,15 @@ class BoundaryLoss(nn.Module):
             else:
                 focal_loss = alpha_t * focal_weight * bce_boundary
 
-            loss_boundary = focal_loss.mean()
+            loss_boundary = ((focal_loss * boundary_valid).sum() / boundary_valid.sum().clamp_min(1)
+                             if has_boundary_ignore else focal_loss.mean())
 
             # 监督目标允许为 [0, 1] 的软边界。对目标质量最高的边界像素
             # 单独施加峰值约束，解决“面积大致正确但整张热力图发灰”的问题。
             if self.peak_weight > 0:
                 positive_mass = boundary_target.detach().clamp(0.0, 1.0).pow(2)
+                if has_boundary_ignore:
+                    positive_mass = positive_mass * boundary_valid
                 positive_den = positive_mass.sum().clamp_min(1.0)
                 peak_hinge = F.relu(self.peak_logit - boundary_logits).pow(2)
                 peak_loss = (peak_hinge * positive_mass).sum() / positive_den
@@ -377,6 +384,8 @@ class BoundaryLoss(nn.Module):
             # 以减少圆斑/雾状响应而不牺牲细边界召回。
             if self.hard_negative_weight > 0:
                 negative_mass = (boundary_target.detach() < 0.05).float()
+                if has_boundary_ignore:
+                    negative_mass = negative_mass * boundary_valid
                 hard_negative = F.relu(
                     boundary_logits - self.hard_negative_logit
                 ).pow(2)
@@ -387,6 +396,8 @@ class BoundaryLoss(nn.Module):
                 )
 
             if self.ridge_weight > 0:
+                if has_boundary_ignore:
+                    raise ValueError("boundary ridge loss is not defined across teacher unknown regions")
                 loss_boundary = loss_boundary + self.ridge_weight * (
                     self.boundary_ridge_loss(boundary_logits, boundary_target)
                 )
@@ -395,6 +406,7 @@ class BoundaryLoss(nn.Module):
         loss_center = torch.tensor(0.0, device=pred.device, requires_grad=False)
         if pred.shape[1] >= 3 and target.shape[1] >= 3 and self.center_weight > 0:
             center_logits = pred[:, 2]
+            center_valid = target[:, 2] >= 0
             center_target = target[:, 2].clamp(0.0, 1.0)
             bce_center = F.binary_cross_entropy_with_logits(
                 center_logits, center_target, reduction="none"
@@ -403,7 +415,9 @@ class BoundaryLoss(nn.Module):
             focal_center = (1.0 - p_t_center).pow(self.center_gamma) * bce_center
             # Gaussian 峰中心承载主要监督，背景仍保留但不额外放大。
             center_weight_map = 1.0 + 4.0 * center_target.detach().pow(2)
-            loss_center = (focal_center * center_weight_map).mean()
+            loss_center = ((focal_center * center_weight_map * center_valid).sum()
+                           / center_valid.sum().clamp_min(1)
+                           if bool((~center_valid).any()) else (focal_center * center_weight_map).mean())
 
         # ---- 总损失 ----
         total_loss = (

@@ -1,5 +1,37 @@
 # 配置目录
 
+当前使用方法见[训练、推理与引擎构建指南](../docs/TRAINING_INFERENCE_GUIDE.md)：
+训练入口`train_pipeline.py`默认`repro/current_pipeline.yaml`；原C推理入口`infer.py`
+默认Torch及`config/inference/area_floor_200.yaml`，实际全零执行由入口明确覆盖历史协议标签。
+教师GT候选已完成训练与推理但80.4回分淘汰；全五TensorRT候选已完成150及下载验收，待本包独立回分。
+下方按日期保留历史过程，不能将其“刚启动”等措辞当作当前状态。
+
+2026-11-01后续：`repro/current_pipeline.yaml`与`teacher_pipeline.yaml`默认`semantic_teacher_source: joint`，13阶段，省去V6及语义边界缓存；显式`legacy_v6_e9`才保留旧链。已完成joint可用严格`completed_joint_continuation`在新run接续，必须同GT/资产及完整来源封条。76 CPU及真实checkpoint CUDA确定性桥接通过，[当前接续记录](../docs/V6_ELISION_20261101.md)区分等待joint完成与后半段训练。
+
+2026-11-01：`repro/teacher_pipeline.yaml`是[C教师32源训练演习](../docs/TEACHER_C32_REHEARSAL_20261101.md)的独立配方；使用显式教师资产、`explicit_separators_v1`边界域、原SSL/D5a导入和重新建立的监督链。240 CPU及真实GPU预检通过，统一入口已在后台开始Stage1；原默认推理/训练配置和旧GT保留。
+
+2026-11-01：[当前统一训练入口](../docs/CURRENT_TRAINING_ENTRY_20261101.md)使用`repro/current_pipeline.yaml`与私有资产映射；`repro/pipeline.py`覆盖当前三模型全链。完成配置/CPU及现有32/1000/64源校验，未启动实际训练/GT优化。GT、SAM64和未来新权重分别绑定真实版本，不放宽旧消融合同。
+
+2026-11-01：[当前实际训练流程与参数总表](../docs/TRAINING_RECIPE_20261101.md)汇总三权重采用链及预算、初始化、数据尺度、优化器/LR/loss/精度/冻结，历史恢复配方与已核日志分列；旧repro尚未覆盖当前后续阶段。新`tools/infer_compact.py`继续使用`inference/area_floor_200.yaml`继承合同，默认`--geometry-mode C`，可独立指定F0；没有改变推理/训练默认配置。52项CPU与12图C最终成员byte exact已通过，[测速与验收](../docs/INFERENCE_COMPACT_20261101.md)。未来[GT重训计划](../docs/GT_RETRAIN_PLAN_20261101.md)未启动。
+
+2026-10-31：`train/semantic_native_random.yaml`的20轮/2560步已完成，[终态与同12图对照](../docs/SEMANTIC_NATIVE_RANDOM_ANALYSIS_20261031.md)验收通过；独立`tools/infer_semantic_native_random.py`严格接受本随机训练完整终态。另`tools/infer_flat_semantic.py`使用原13b3/旧20a59，仅把WS语义底图置128、保持原raw票，[全150黑盒](../docs/FLAT_SEMANTIC_PACKAGE_20261031.md)已完成并下载，300成员独立验真。两任务权重与身份独立，无新推荐默认或官方分。
+
+2026-10-31：`train/semantic_native_random.yaml`继承原生零噪配方，新增完整语义头随机初始化seed1101、LR1e-4→1e-5；20轮/2560步、同32源GT与裁窗/增强/损失、冻结其它模块。入口`tools/train_semantic_native_random.py`，独立checkpoint版本，不从上一组e20接续。[单组正式训练已启动](../docs/SEMANTIC_NATIVE_RANDOM_20261031.md)，不追加第二组对照；启动后停止代理监督，等用户通知结束。目前无本轮最终指标。
+
+2026-10-31：`train/semantic_native_zero.yaml`的20轮/2560已完成，[终态与两路对照](../docs/SEMANTIC_NATIVE_ZERO_ANALYSIS_20261031.md)核验6302010语义参数实际更新、GT/冻结/源码保持；全图raw→D5a新头票翻转0.954522%，原生U0→U20为0.757242%。独立`tools/infer_semantic_native_zero.py --semantic-checkpoint`只接受正式2560步增量，并显式记录基座＋新头身份；未改推理默认或晋级，不复跑旧带噪全图训练器。原配方full warm-start/LR3e-5→3e-6/batch1、D4与损失均保留。
+
+2026-10-31：[原图语义双用候选](../docs/RAW_SHARED_SEMANTIC_20261031.md)新增`tools/infer_raw_shared.py`，继续核验N1＋final200配置，实际审计另标`raw_shared`：global_restoration不计算，原图全图logit/prob同时供WS与末端票；局部恢复仍zero。未改默认YAML或训练配置。四源无新capture重放用C原图概率的阈值等价辅助logit，严格核实际WS输入hash与终态exact，不冒充网络logit重建。
+
+2026-10-31：[恢复图末端投票候选](../docs/RESTORED_GLOBAL_VOTE_20261031.md)使用独立`tools/infer_restored_vote.py`，仍接受N1＋final200配置，运行时显式`restored_vote/global_restored_shared_probability`；不再计算raw语义，WS与最终票复用原尺寸全图恢复语义。仅12图与四源缓存桥接，几何exact但类别改变；未改默认配置或训练YAML，不将legacy捕获键`raw_probability`误认作raw RGB来源。
+
+2026-10-31：[统一滑窗候选](../docs/UNIFIED_SLIDING1024_20261031.md)新增`tools/infer_unified.py`，继续接受既有N1＋final200配置，实际审计另标`unified_local1024`：全图恢复不计算，语义和affinity同用局部零噪恢复特征；旧`raw_probability`捕获键明确标为局部恢复语义，不能认作raw RGB。仅12图候选与四源交叉完成，未替换全零默认或新增训练YAML。
+
+2026-10-31：[全链零噪声推理](../docs/GLOBAL_ZERO_20261031.md)使用独立`tools/infer_zero.py --global-noise zero`，固定旧20a59/S0/native1024/final200。入口接受既有N1＋final200源配置核验，审计中的实际配置/运行协议另显式记为`explicit_zero_v1`，全图与局部均为zero；原配置和runtime另存为baseline。旧`infer_semifinal.py`及其固定Philox校验仅用于历史对照，不可把它当作全零入口。12源两遍完成，无新训练或推理YAML修改。
+
+2026-10-31：[高阈值缓存2×2](../docs/NAF_THRESHOLD_20261031.md)完成，只在私有冻结配置副本改`inference.boundary_threshold .65→.75`，没有修改任何推荐推理YAML。双输入部分去环伴明显区域合并，旧模型无明确通用收益；旧.65部署保持，两组.75不晋级。
+
+2026-10-31：`train/naf_dual.yaml`对应1000更新已完成，[终态分析](../docs/NAF_DUAL_ANALYSIS_20261031.md)显示原标补缺与负区抑制进步，但完整线覆盖和实际微环风险退步。新state776f仅作候选，旧20a59推理配置/S0白名单不改；建议的单高阈值缓存2×2尚未执行，不预写为推荐部署。
+
 2026-10-31：`train/naf_dual.yaml`继承`boundary_width`，显式双输入版本`boundary_continuous`／`t8_continuous_v1`。仅新增原N1连续float32输入，公共随机初态、原1000更新/16000计划、旧GAN/loss保持；monitor不自动WS或150图。32源只读缓存共享、连续缓存上限1GiB、磁盘保留10GiB；实际快盘展开配置与守卫入口见[执行记录](../docs/NAF_DUAL_20261031.md)。旧推理配置不变，新格式不冒认旧S0权重。
 
 2026-10-31：`train/naf_perturb.yaml`对应s1000已完成，但固定同输入配对不支持普遍收益，不写入推荐推理配置。新state695ca只作候选留档；S0白名单、旧20a59部署保持。见[终态分析](../docs/NAF_PERTURB_ANALYSIS_20261031.md)，资源异常来自独立诊断脚本，不属于训练配置变更。

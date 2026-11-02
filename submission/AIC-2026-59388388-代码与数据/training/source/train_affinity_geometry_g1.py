@@ -1,0 +1,1413 @@
+# -*- coding: utf-8 -*-
+"""G1: full labeled-data generalization training for local affinities."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import logging
+import math
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+import cv2
+import numpy as np
+import torch
+import torch.nn.functional as F
+from torch.utils.data import ConcatDataset, DataLoader, WeightedRandomSampler
+
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from data.affinity_geometry_augmentation import AffinityGeometryAugmentedDataset
+from data.dataset import letterbox
+from data.offset_geometry_dataset import OffsetGeometryDataset
+from data.sam2_geometry_dataset import SAM2GeometryDataset
+from inference import build_model as build_reference_model
+from models.affinity_geometry import (
+    AffinityGeometryDecoder,
+    HighResolutionShortAffinityResidual,
+)
+from models.gda_mim import GenerativeDomainAdapterPyramid
+from models.offset_geometry import (
+    FrozenSemanticGeometrySystem,
+    lora_state_dict_digest,
+    semantic_state_digest,
+)
+from train_affinity_geometry_g0 import edge_metrics
+from train_offset_geometry import (
+    colorize_instances,
+    file_sha256,
+    semantic_contract_audit,
+    set_seed,
+)
+from train_offset_geometry_g1 import deterministic_split
+from utils.affinity_graph import (
+    DEFAULT_AFFINITY_OFFSETS,
+    audit_instance_recovery,
+    build_affinity_targets,
+    reconstruct_affinity_components,
+)
+from utils.affinity_loss import (
+    balanced_affinity_loss,
+    build_affinity_targets_torch,
+    negative_affinity_tail_loss,
+)
+from utils.affinity_deployment import (
+    postprocess,
+    predict_maps,
+    predict_maps_with_challenger,
+)
+from utils.config import load_config, project_path
+from utils.instance_metrics import (
+    evaluate_instance_pair,
+    load_labelme_instances,
+    summarize_instance_results,
+)
+from utils.offset_letterbox import geometry_letterbox_metadata
+from utils.semantic_challenger import build_semantic_challenger
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("train_affinity_geometry_g1")
+
+AFFINITY_LOSS_PROTOCOL = "covered_pairs_per_image_fp32_v1"
+
+
+def build_manual_geometry_dataset(
+    config, cfg, raw_dir, sample_names, *, training, **dataset_kwargs
+):
+    """默认保留旧验证口径；显式teacher版本的训练/验证均只读取teacher。"""
+    completed_dir = cfg.get("manual_train_completed_gt_dir") if training else None
+    teacher_dir = cfg.get("manual_teacher_gt_dir")
+    return OffsetGeometryDataset(
+        raw_dir, sample_names=sample_names,
+        completed_gt_dir=project_path(config, completed_dir) if completed_dir and not teacher_dir else None,
+        teacher_gt_dir=project_path(config, teacher_dir) if teacher_dir else None,
+        **dataset_kwargs,
+    )
+
+
+def build_geometry_sampler(dataset_parts, sampling_masses, cfg, seed):
+    """显式总抽样预算也适用于纯人工组；未配置时保持旧配方的采样行为。"""
+    sam2_cfg = cfg.get("sam2_geometry", {})
+    sam2_enabled = bool(sam2_cfg.get("enabled", False))
+    epoch_samples = cfg.get("samples_per_epoch")
+    if epoch_samples is None:
+        if not sam2_enabled:
+            return None
+        epoch_samples = sam2_cfg.get("samples_per_epoch", 2 * len(dataset_parts[0]))
+    epoch_samples = int(epoch_samples)
+    if epoch_samples <= 0:
+        raise ValueError("affinity_geometry_g1.samples_per_epoch must be positive")
+    # 保持历史混合采样先生成 float32 权重再转 double 的数值及随机序列。
+    weights = torch.cat(
+        [
+            torch.full((len(part),), mass / len(part))
+            for part, mass in zip(dataset_parts, sampling_masses)
+        ]
+    ).double()
+    return WeightedRandomSampler(
+        weights,
+        num_samples=epoch_samples,
+        replacement=True,
+        generator=torch.Generator().manual_seed(seed),
+    )
+
+
+def resolve_selection_metric(cfg, deployment_enabled):
+    metric = cfg.get("selection_metric") or (
+        "deployment_score_total" if deployment_enabled else "oracle_gt_penalized_miou"
+    )
+    if metric not in {
+        "val_affinity_loss", "deployment_score_total", "oracle_gt_penalized_miou"
+    }:
+        raise ValueError(f"Unknown affinity selection_metric: {metric}")
+    if metric == "deployment_score_total" and not deployment_enabled:
+        raise ValueError("deployment_score_total requires deployment validation")
+    return metric
+
+
+def selection_improved(score, best_score, metric):
+    if not math.isfinite(score) or not math.isfinite(best_score):
+        raise ValueError("Checkpoint selection scores must be finite")
+    return score < best_score if metric == "val_affinity_loss" else score > best_score
+
+
+@torch.no_grad()
+def evaluate_affinity_loss(system, dataset, cfg):
+    """固定人工验证集：原始 logits、covered pair、逐图 FP32 损失。"""
+    if system.training:
+        raise ValueError("Affinity loss validation requires system.eval()")
+    if len(dataset) == 0:
+        raise ValueError("Affinity loss validation requires a nonempty dataset")
+    device = next(system.geometry_decoder.parameters()).device
+    loss_cfg = cfg.get("loss", {})
+    parameters = {
+        "negative_weight": float(loss_cfg.get("negative_weight", 1.0)),
+        "hard_negative_weight": float(loss_cfg.get("hard_negative_weight", 0.0)),
+        "hard_negative_gamma": float(loss_cfg.get("hard_negative_gamma", 2.0)),
+        "normalize_edge_weights": bool(loss_cfg.get("normalize_edge_weights", True)),
+    }
+    positive_total = np.zeros(len(DEFAULT_AFFINITY_OFFSETS), dtype=np.int64)
+    negative_total = np.zeros_like(positive_total)
+    rows = []
+    for index in range(len(dataset)):
+        sample = dataset[index]
+        logits = system.geometry_forward(
+            sample["image"].unsqueeze(0).to(device)
+        )["affinity_logits"]
+        if logits.dtype != torch.float32:
+            raise ValueError(f"Validation logits must be FP32, got {logits.dtype}")
+        target, edge_valid = build_affinity_targets_torch(
+            sample["instance_map"].unsqueeze(0).to(device),
+            sample["valid_content"].unsqueeze(0).to(device),
+            uncovered_as_boundary=None,
+        )
+        positive = (edge_valid & (target > 0.5)).sum(dim=(0, 2, 3)).cpu().numpy()
+        negative = (edge_valid & (target <= 0.5)).sum(dim=(0, 2, 3)).cpu().numpy()
+        if int((positive + negative).sum()) == 0:
+            raise ValueError(f"No supervised affinity edges in validation sample {index}")
+        loss, _ = balanced_affinity_loss(
+            logits, target, edge_valid, edge_weight=None, **parameters
+        )
+        value = float(loss)
+        if not math.isfinite(value):
+            raise ValueError(f"Non-finite affinity validation loss in sample {index}")
+        positive_total += positive
+        negative_total += negative
+        rows.append({
+            "image": sample.get("image_name", str(index)), "loss": value,
+            "positive_edges": positive.tolist(), "negative_edges": negative.tolist(),
+        })
+    if np.any(positive_total + negative_total == 0):
+        raise ValueError("At least one affinity channel has no validation supervision")
+    return {
+        "protocol": AFFINITY_LOSS_PROTOCOL, "loss_parameters": parameters,
+        "loss": float(np.mean([row["loss"] for row in rows])), "per_image": rows,
+        "positive_edges": positive_total.tolist(),
+        "negative_edges": negative_total.tolist(),
+    }
+
+
+def validate_semantic_geometry_contract(
+    config, cfg, checkpoint, reference_path, actual_semantic_digest
+):
+    """Allow decoder-only semantic overrides while protecting geometry features."""
+
+    expected = checkpoint.get("semantic_state_digest")
+    if not expected or expected == actual_semantic_digest:
+        return "exact"
+
+    override_base = cfg.get("semantic_decoder_override_base", "")
+    if not override_base:
+        raise RuntimeError(
+            "Affinity checkpoint references a different semantic state; set "
+            "semantic_decoder_override_base only for a decoder-only checkpoint"
+        )
+    base_path = project_path(config, override_base)
+    base_checkpoint = torch.load(
+        base_path, map_location="cpu", weights_only=False
+    )
+    override_checkpoint = torch.load(
+        reference_path, map_location="cpu", weights_only=False
+    )
+    base_lora = lora_state_dict_digest(
+        base_checkpoint.get("lora_state_dict", {})
+    )
+    override_lora = lora_state_dict_digest(
+        override_checkpoint.get("lora_state_dict", {})
+    )
+    if base_lora != override_lora:
+        raise RuntimeError(
+            "Semantic override changed encoder LoRA tensors and is incompatible "
+            "with the frozen affinity geometry checkpoint"
+        )
+    logger.warning(
+        "Semantic decoder override accepted: geometry LoRA is byte-identical "
+        "to %s; only semantic decoder differences are allowed",
+        base_path,
+    )
+    return "decoder_only_override"
+
+
+def load_geometry_checkpoint_state(system, checkpoint):
+    """Load decoder and optional feature adapter with strict compatibility."""
+    system.geometry_decoder.load_state_dict(
+        checkpoint["geometry_state_dict"], strict=True
+    )
+    adapter_state = checkpoint.get("geometry_feature_adapter_state_dict")
+    if system.geometry_feature_adapter is not None:
+        if adapter_state is not None:
+            system.geometry_feature_adapter.load_state_dict(
+                adapter_state, strict=True
+            )
+        else:
+            system.geometry_feature_adapter.gates.data.zero_()
+    elif adapter_state is not None:
+        raise RuntimeError(
+            "checkpoint contains a geometry feature adapter, but the selected "
+            "config has feature_adapter.enabled=false"
+        )
+    refiner_state = checkpoint.get("geometry_highres_refiner_state_dict")
+    if system.geometry_highres_refiner is not None:
+        if refiner_state is None:
+            system.geometry_highres_refiner.reset_parameters()
+            logger.info(
+                "Initialized zero-output high-resolution affinity residual"
+            )
+        else:
+            system.geometry_highres_refiner.load_state_dict(
+                refiner_state, strict=True
+            )
+    elif refiner_state is not None:
+        raise RuntimeError(
+            "checkpoint contains a high-resolution affinity refiner, but the "
+            "selected config has highres_refiner.enabled=false"
+        )
+
+
+def resolve_geometry_initialization(cfg):
+    """区分 geometry checkpoint 与参考边界 FPN；保留历史 V6 模式名兼容。"""
+    mode = str(cfg.get("geometry_init_mode", "checkpoint"))
+    checkpoint = cfg.get("geometry_init_checkpoint")
+    if mode == "checkpoint":
+        if not checkpoint:
+            raise ValueError("geometry_init_mode=checkpoint requires geometry_init_checkpoint")
+        if cfg.get("init_from_v6_boundary_fpn", False):
+            raise ValueError("checkpoint initialization conflicts with init_from_v6_boundary_fpn")
+    elif mode in {"v6_boundary_fpn", "reference_boundary_fpn"}:
+        if checkpoint:
+            raise ValueError(f"{mode} initialization requires geometry_init_checkpoint=null")
+        if cfg.get("init_from_v6_boundary_fpn") is False:
+            raise ValueError(f"{mode} initialization cannot disable boundary FPN copying")
+        if any(cfg.get(key, {}).get("enabled", False) for key in (
+            "feature_adapter", "highres_refiner"
+        )):
+            raise ValueError(f"{mode} ablation requires the original geometry decoder only")
+    else:
+        raise ValueError(f"Unknown geometry_init_mode: {mode}")
+    return mode
+
+
+def build_system(config, cfg, device):
+    init_mode = resolve_geometry_initialization(cfg)
+    reference_path = project_path(config, cfg["reference_checkpoint"])
+    reference = build_reference_model(config, device, reference_path)
+    decoder = AffinityGeometryDecoder(
+        in_channels=reference.encoder.get_stage_channels(),
+        affinity_channels=len(DEFAULT_AFFINITY_OFFSETS),
+        fpn_channels=int(cfg.get("fpn_channels", 256)),
+        up_channels=int(cfg.get("up_channels", 128)),
+        output_grid=int(cfg.get("coarse_output_grid", cfg.get("output_grid", 512))),
+    ).to(device)
+    init_path = None
+    checkpoint = {}
+    if init_mode == "checkpoint":
+        init_path = project_path(config, cfg["geometry_init_checkpoint"])
+        checkpoint = torch.load(init_path, map_location="cpu", weights_only=False)
+        decoder.load_state_dict(checkpoint["geometry_state_dict"], strict=True)
+        logger.info("Affinity geometry initialized strictly from %s", init_path)
+    else:
+        # 与 G0 首次训练前保持相同的 RNG 消耗顺序：先构造 reference 和完整
+        # 随机 decoder，再复制 FPN；其余层不加载任何 G0/G1/G2 训练权重。
+        decoder.initialize_fpn_from_boundary(reference.decoder.boundary_fpn)
+        logger.info(
+            "Affinity FPN initialized strictly from %s:decoder.boundary_fpn; "
+            "upsample/affinity_head retain their seeded random initialization; "
+            "no geometry checkpoint loaded",
+            reference_path,
+        )
+    adapter_cfg = cfg.get("feature_adapter", {})
+    geometry_feature_adapter = None
+    if bool(adapter_cfg.get("enabled", False)):
+        geometry_feature_adapter = GenerativeDomainAdapterPyramid(
+            channels=reference.encoder.get_stage_channels(),
+            bottleneck_ratio=int(adapter_cfg.get("bottleneck_ratio", 8)),
+            gate_mode=str(adapter_cfg.get("gate_mode", "scalar")),
+            active_scales=adapter_cfg.get("active_scales"),
+        )
+        adapter_state = checkpoint.get("geometry_feature_adapter_state_dict")
+        if adapter_state is not None:
+            geometry_feature_adapter.load_state_dict(adapter_state, strict=True)
+            logger.info("Loaded geometry feature adapter from %s", init_path)
+        else:
+            logger.info(
+                "Initialized zero-gated geometry feature adapter; epoch 0 "
+                "preserves the source geometry path"
+            )
+    highres_cfg = cfg.get("highres_refiner", {})
+    geometry_highres_refiner = None
+    if bool(highres_cfg.get("enabled", False)):
+        geometry_highres_refiner = HighResolutionShortAffinityResidual(
+            feature_channels=int(cfg.get("up_channels", 128)),
+            short_channels=int(highres_cfg.get("short_channels", 4)),
+            feature_hidden=int(highres_cfg.get("feature_hidden", 32)),
+            image_hidden=int(highres_cfg.get("image_hidden", 16)),
+            fusion_hidden=int(highres_cfg.get("fusion_hidden", 32)),
+            max_logit_delta=float(highres_cfg.get("max_logit_delta", 1.0)),
+        )
+        refiner_state = checkpoint.get("geometry_highres_refiner_state_dict")
+        if refiner_state is not None:
+            geometry_highres_refiner.load_state_dict(refiner_state, strict=True)
+            logger.info("Loaded high-resolution affinity refiner from %s", init_path)
+        else:
+            logger.info(
+                "Initialized zero-output high-resolution affinity residual; "
+                "G4b body remains the coarse anchor"
+            )
+    system = FrozenSemanticGeometrySystem(
+        reference,
+        decoder,
+        geometry_feature_adapter,
+        geometry_highres_refiner,
+    ).to(device)
+    system.geometry_initialization = {
+        "version": 1,
+        "mode": init_mode,
+        "source_checkpoint": os.path.abspath(init_path or reference_path),
+        "source_component": (
+            "geometry_state_dict" if init_mode == "checkpoint" else "decoder.boundary_fpn"
+        ),
+        "random_components": (
+            [] if init_mode == "checkpoint" else ["upsample", "affinity_head"]
+        ),
+        "seed": int(cfg.get("seed", 42)),
+    }
+    if geometry_highres_refiner is not None and bool(
+        highres_cfg.get("train_only", True)
+    ):
+        for parameter in system.geometry_decoder.parameters():
+            parameter.requires_grad_(False)
+        if system.geometry_feature_adapter is not None:
+            for parameter in system.geometry_feature_adapter.parameters():
+                parameter.requires_grad_(False)
+    digest = semantic_state_digest(reference)
+    validate_semantic_geometry_contract(
+        config, cfg, checkpoint, reference_path, digest
+    )
+    return system, reference_path, init_path, digest
+
+
+def build_optimizer(system, cfg):
+    groups = []
+    decoder_parameters = [
+        parameter
+        for parameter in system.geometry_decoder.parameters()
+        if parameter.requires_grad
+    ]
+    if decoder_parameters:
+        if cfg.get("fpn_learning_rate") is None:
+            # 旧配置保持整个几何头共用一个学习率。
+            groups.append({
+                "params": decoder_parameters,
+                "lr": float(cfg.get("learning_rate", 5e-5)),
+                "name": "geometry_decoder",
+            })
+        else:
+            fpn_parameters = []
+            output_parameters = []
+            for name, parameter in system.geometry_decoder.named_parameters():
+                if parameter.requires_grad:
+                    target = (
+                        fpn_parameters if name.startswith("geometry_fpn.")
+                        else output_parameters
+                    )
+                    target.append(parameter)
+            if not fpn_parameters or not output_parameters:
+                raise ValueError(
+                    "fpn_learning_rate requires trainable geometry_fpn and output modules"
+                )
+            groups.extend([
+                {
+                    "params": fpn_parameters,
+                    "lr": float(cfg["fpn_learning_rate"]),
+                    "name": "geometry_fpn",
+                },
+                {
+                    "params": output_parameters,
+                    "lr": float(cfg.get("learning_rate", 5e-5)),
+                    "name": "geometry_output",
+                },
+            ])
+    adapter_cfg = cfg.get("feature_adapter", {})
+    adapter = system.geometry_feature_adapter
+    if adapter is not None and any(
+        parameter.requires_grad for parameter in adapter.parameters()
+    ):
+        groups.extend([
+            {
+                "params": list(adapter.adapter_parameters()),
+                "lr": float(
+                    adapter_cfg.get(
+                        "learning_rate", cfg.get("learning_rate", 5e-5)
+                    )
+                ),
+                "name": "geometry_feature_adapter",
+            },
+            {
+                "params": [adapter.gates],
+                "lr": float(adapter_cfg.get("gate_learning_rate", 1e-4)),
+                "weight_decay": 0.0,
+                "name": "geometry_feature_gates",
+            },
+        ])
+    if system.geometry_highres_refiner is not None:
+        refiner_parameters = [
+            parameter
+            for parameter in system.geometry_highres_refiner.parameters()
+            if parameter.requires_grad
+        ]
+        if refiner_parameters:
+            groups.append({
+                "params": refiner_parameters,
+                "lr": float(
+                    cfg.get("highres_refiner", {}).get(
+                        "learning_rate", cfg.get("learning_rate", 5e-5)
+                    )
+                ),
+                "name": "geometry_highres_refiner",
+            })
+    if not groups:
+        raise ValueError("affinity training selected no trainable parameters")
+    return torch.optim.AdamW(
+        groups, weight_decay=float(cfg.get("weight_decay", 1e-4))
+    )
+
+
+def adapter_metrics(system):
+    values = {
+        "adapter_gate_mean_abs": 0.0,
+        "adapter_gate_max_abs": 0.0,
+    }
+    adapter = system.geometry_feature_adapter
+    if adapter is None:
+        return values
+    stats = adapter.gate_statistics()
+    active = [row for row in stats if row["active"]]
+    if active:
+        values["adapter_gate_mean_abs"] = float(
+            np.mean([row["mean_abs"] for row in active])
+        )
+        values["adapter_gate_max_abs"] = float(
+            max(row["max_abs"] for row in active)
+        )
+    for row in stats:
+        values[f"adapter_gate_scale{row['scale']}_abs"] = float(row["mean_abs"])
+    return values
+
+
+@torch.no_grad()
+def evaluate_sample(
+    system,
+    sample,
+    graph_thresholds,
+    return_arrays=False,
+    validation_grid=None,
+):
+    device = next(system.geometry_decoder.parameters()).device
+    output = system.geometry_forward(sample["image"].unsqueeze(0).to(device))
+    probability_tensor = torch.sigmoid(output["affinity_logits"]).cpu()
+    labels_tensor = sample["instance_map"][None, None].float()
+    valid_tensor = sample["valid_content"][None].float()
+    if validation_grid is not None:
+        target_size = (int(validation_grid), int(validation_grid))
+        if probability_tensor.shape[-2:] != target_size:
+            probability_tensor = F.interpolate(
+                probability_tensor,
+                size=target_size,
+                mode="bilinear",
+                align_corners=False,
+            )
+            labels_tensor = F.interpolate(
+                labels_tensor, size=target_size, mode="nearest"
+            )
+            valid_tensor = F.interpolate(
+                valid_tensor, size=target_size, mode="nearest"
+            )
+    probability = probability_tensor[0].numpy()
+    labels = labels_tensor[0, 0].numpy().astype(np.int32)
+    valid_pixels = valid_tensor[0, 0].numpy().astype(bool)
+    target, valid = build_affinity_targets(
+        labels, valid_pixels
+    )
+    prediction, graph = reconstruct_affinity_components(
+        labels > 0, probability, threshold=graph_thresholds, max_instances=65535
+    )
+    recovery = audit_instance_recovery(labels, prediction)
+    gt_ids = [int(value) for value in np.unique(labels) if int(value) != 0]
+    pred_ids = [int(value) for value in np.unique(prediction) if int(value) != 0]
+    instance_metrics = evaluate_instance_pair(
+        labels, {value: 0 for value in gt_ids},
+        prediction, {value: 0 for value in pred_ids},
+    )
+    metrics = {
+        **edge_metrics(probability, target, valid),
+        **graph,
+        **recovery,
+        "instance_count_abs_error": abs(len(gt_ids) - len(pred_ids)),
+        "instance_miou_valid": float(instance_metrics["instance_miou_valid"]),
+        "gt_penalized_miou": float(instance_metrics["gt_penalized_miou"]),
+    }
+    if return_arrays:
+        return metrics, probability, labels, prediction
+    return metrics
+
+
+@torch.no_grad()
+def write_val_monitor(
+    system,
+    dataset,
+    output_dir,
+    epoch,
+    graph_thresholds,
+    validation_grid=None,
+):
+    monitor_dir = output_dir / "val_monitor" / f"epoch_{epoch:03d}"
+    for index in range(min(2, len(dataset))):
+        sample = dataset[index]
+        metrics, probability, labels, prediction = evaluate_sample(
+            system,
+            sample,
+            graph_thresholds,
+            return_arrays=True,
+            validation_grid=validation_grid,
+        )
+        sample_dir = monitor_dir / Path(sample["image_name"]).stem
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(sample_dir / "instances_gt.png"), colorize_instances(labels))
+        cv2.imwrite(str(sample_dir / "instances_pred.png"), colorize_instances(prediction))
+        for name, values in (
+            ("short", probability[:4]),
+            ("distance2", probability[4:6]),
+            ("distance4", probability[6:8]),
+        ):
+            cv2.imwrite(
+                str(sample_dir / f"affinity_{name}.png"),
+                np.clip(np.mean(values, axis=0) * 255.0, 0, 255).astype(np.uint8),
+            )
+        (sample_dir / "metrics.json").write_text(
+            json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+
+@torch.no_grad()
+def write_unlabeled_monitor(
+    system, image_path: Path, output_dir: Path, epoch: int,
+    input_size: int, grid_size: int,
+):
+    image_bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    if image_bgr is None:
+        raise FileNotFoundError(image_path)
+    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+    image_lb, _, _, _ = letterbox(image_rgb, input_size)
+    tensor = torch.from_numpy(image_lb).permute(2, 0, 1).float().div(255.0)
+    device = next(system.geometry_decoder.parameters()).device
+    output = system.geometry_forward(tensor.unsqueeze(0).to(device))
+    probability = torch.sigmoid(output["affinity_logits"])[0].cpu().numpy()
+    metadata = geometry_letterbox_metadata(image_rgb.shape[:2], input_size, grid_size)
+    sample_dir = (
+        output_dir / "unlabeled_monitor" / f"epoch_{epoch:03d}" / image_path.stem
+    )
+    sample_dir.mkdir(parents=True, exist_ok=True)
+    metrics = {"image": image_path.name, "note": "visual-only; never selects checkpoints"}
+    for name, values in (
+        ("short", probability[:4]),
+        ("distance2", probability[4:6]),
+        ("distance4", probability[6:8]),
+    ):
+        content = np.mean(values, axis=0)[
+            : metadata.content_height, : metadata.content_width
+        ]
+        cv2.imwrite(
+            str(sample_dir / f"affinity_{name}.png"),
+            np.clip(content * 255.0, 0, 255).astype(np.uint8),
+        )
+        cv2.imwrite(
+            str(sample_dir / f"cut_{name}.png"),
+            np.clip((1.0 - content) * 255.0, 0, 255).astype(np.uint8),
+        )
+        metrics[f"{name}_mean"] = float(content.mean())
+    (sample_dir / "metrics.json").write_text(
+        json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def aggregate_validation(rows):
+    keys = [
+        "gt_penalized_miou", "instance_miou_valid", "instance_count_abs_error",
+        "split_gt_instance_count", "merged_pred_instance_count",
+        "raw_component_count", "merged_components_for_cap",
+        "edge_precision", "edge_recall", "edge_specificity",
+    ]
+    return {key: float(np.mean([row[key] for row in rows])) for key in keys}
+
+
+def deployment_validation_recipe(cfg):
+    deployment = cfg.get("deployment_validation", {})
+    return {
+        "enabled": bool(deployment.get("enabled", False)),
+        "fusion_mode": deployment.get("fusion_mode", "gated"),
+        "boundary_threshold": float(deployment.get("boundary_threshold", 0.55)),
+        "fusion_kwargs": {
+            "distance2_weight": float(deployment.get("distance2_weight", 0.50)),
+            "distance4_weight": float(deployment.get("distance4_weight", 0.25)),
+            "support_threshold": float(deployment.get("support_threshold", 0.20)),
+            "support_temperature": float(
+                deployment.get("support_temperature", 0.05)
+            ),
+            "short_reduction": deployment.get("short_reduction", "mean"),
+            "short_softmax_temperature": float(
+                deployment.get("short_softmax_temperature", 0.15)
+            ),
+        },
+    }
+
+
+@torch.no_grad()
+def evaluate_deployment_validation(
+    system,
+    image_paths,
+    image_size,
+    device,
+    infer_cfg,
+    recipe,
+    semantic_challenger=None,
+    replace_reference_semantic=False,
+    teacher_gt_dir=None,
+):
+    """Score the exact deployment path; GT is loaded only after prediction."""
+    metrics = []
+    with tempfile.TemporaryDirectory(prefix="affinity-deploy-val-") as temp_dir:
+        for image_path in image_paths:
+            challenger_logits = None
+            if semantic_challenger is None:
+                image, _, affinity_output, _ = predict_maps(
+                    system,
+                    image_path,
+                    image_size,
+                    device,
+                    recipe["fusion_mode"],
+                    recipe["fusion_kwargs"],
+                )
+            else:
+                (
+                    image,
+                    _,
+                    affinity_output,
+                    _,
+                    challenger_logits,
+                ) = predict_maps_with_challenger(
+                    system,
+                    semantic_challenger,
+                    image_path,
+                    image_size,
+                    device,
+                    recipe["fusion_mode"],
+                    recipe["fusion_kwargs"],
+                    replace_reference_semantic=replace_reference_semantic,
+                )
+            _, pred_map, pred_class_map = postprocess(
+                affinity_output,
+                image.shape[:2],
+                temp_dir,
+                image_path.stem,
+                infer_cfg,
+                recipe["boundary_threshold"],
+                False,
+                image_rgb=image,
+                semantic_challenger_logits=challenger_logits,
+            )
+            if teacher_gt_dir:
+                from data.teacher_supervision import load_teacher_instance_source
+                gt_map, gt_class_map, _, ignored, _ = load_teacher_instance_source(
+                    Path(teacher_gt_dir) / f"{image_path.stem}_gt.npz", image.shape[:2])
+                pred_map = pred_map.copy()
+                pred_map[ignored] = 0
+                remaining = set(map(int, np.unique(pred_map))) - {0}
+                pred_class_map = {key: value for key, value in pred_class_map.items() if int(key) in remaining}
+            else:
+                gt_map, gt_class_map, _ = load_labelme_instances(
+                    image_path.with_suffix(".json"), image.shape[:2]
+                )
+            metrics.append(
+                evaluate_instance_pair(
+                    gt_map, gt_class_map, pred_map, pred_class_map
+                )
+            )
+    return summarize_instance_results(metrics)
+
+
+def save_checkpoint(
+    path, system, config, epoch, best_score, reference_path, reference_sha,
+    init_path, digest, split, selection_metric, best_oracle_score, best_epoch=None,
+):
+    payload = {
+        "format": "affinity_geometry_g1_v4",
+        "epoch": int(epoch),
+        "best_selection_metric": selection_metric,
+        "best_selection_score": float(best_score),
+        "best_selection_epoch": int(epoch if best_epoch is None else best_epoch),
+        "best_selection_direction": "min" if selection_metric == "val_affinity_loss" else "max",
+        "validation_protocol_version": (
+            AFFINITY_LOSS_PROTOCOL if selection_metric == "val_affinity_loss" else None
+        ),
+        "best_val_gt_penalized_miou": float(best_oracle_score),
+        "deployment_promotion_required": selection_metric != "deployment_score_total",
+        "affinity_offsets": [list(value) for value in DEFAULT_AFFINITY_OFFSETS],
+        "geometry_state_dict": system.geometry_decoder.state_dict(),
+        "reference_checkpoint": os.path.abspath(reference_path),
+        "reference_checkpoint_sha256": reference_sha,
+        "geometry_init_checkpoint": os.path.abspath(init_path) if init_path else None,
+        "semantic_state_digest": digest,
+        "split": split,
+        "config": config,
+    }
+    initialization = getattr(system, "geometry_initialization", None)
+    if initialization is not None:
+        payload["geometry_initialization"] = dict(initialization)
+    if system.geometry_feature_adapter is not None:
+        payload["geometry_feature_adapter_state_dict"] = (
+            system.geometry_feature_adapter.state_dict()
+        )
+    if system.geometry_highres_refiner is not None:
+        payload["geometry_highres_refiner_state_dict"] = (
+            system.geometry_highres_refiner.state_dict()
+        )
+    torch.save(payload, path)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", default="config/train/affinity_geometry_g1.yaml")
+    args = parser.parse_args()
+    config = load_config(args.config)
+    cfg = config["affinity_geometry_g1"]
+    seed = int(cfg.get("seed", 42))
+    set_seed(seed)
+    device = torch.device(
+        "cuda" if torch.cuda.is_available() and config["sam2"].get("device") == "cuda"
+        else "cpu"
+    )
+    system, reference_path, init_path, digest = build_system(config, cfg, device)
+    semantic_challenger, _ = build_semantic_challenger(
+        config, system, reference_path, device
+    )
+    replace_reference_semantic = bool(
+        config.get("semantic_challenger", {}).get(
+            "replace_reference_semantic", False
+        )
+    )
+    reference_sha = file_sha256(reference_path)
+    raw_dir = project_path(config, config["paths"]["raw_data_dir"])
+    index_dataset = OffsetGeometryDataset(raw_dir)
+    all_names = [path.stem for path in index_dataset.samples]
+    train_names, val_names = deterministic_split(
+        all_names, float(cfg.get("val_fraction", 0.2)), seed,
+        cfg.get("forced_train_names", ["train_001", "train_002"]),
+    )
+    split = {"train": train_names, "val": val_names, "seed": seed}
+    expected_val = cfg.get("expected_val_names")
+    if expected_val is not None and set(val_names) != set(expected_val):
+        raise ValueError(f"Validation split changed: {val_names} != {expected_val}")
+    logger.info("Split train=%d val=%d val_names=%s", len(train_names), len(val_names), val_names)
+    dataset_kwargs = {
+        "image_size": int(cfg.get("input_size", 1024)),
+        "output_grid": int(cfg.get("output_grid", 512)),
+        "cache_in_memory": True,
+    }
+    manual_train_base = build_manual_geometry_dataset(
+        config, cfg, raw_dir, train_names, training=True, **dataset_kwargs
+    )
+    if manual_train_base.teacher_gt_dir is not None:
+        split["manual_training_targets"] = {
+            "source": "model_teacher", "directory": cfg["manual_teacher_gt_dir"],
+            "unknown": "ignore", "validation_source": "same_model_teacher_version",
+        }
+    elif manual_train_base.completed_gt_dir is not None:
+        split["manual_training_targets"] = {
+            "source": "completed_instance_map",
+            "directory": cfg["manual_train_completed_gt_dir"],
+            "unknown": "ignore",
+            "validation_source": "original_labelme",
+        }
+        logger.info(
+            "Manual training targets: completed GT from %s; validation: original LabelMe",
+            manual_train_base.completed_gt_dir,
+        )
+    augmentation_cfg = cfg.get("augmentation", {})
+    dataset_parts = [manual_train_base]
+    augmentation_parts = [augmentation_cfg]
+    sampling_masses = [1.0]
+    sampler = None
+    sam2_geometry_cfg = cfg.get("sam2_geometry", {})
+    if bool(sam2_geometry_cfg.get("enabled", False)):
+        pseudo_dataset_dir = project_path(config, sam2_geometry_cfg["dataset_dir"])
+        pseudo_source_dir = project_path(
+            config,
+            sam2_geometry_cfg.get(
+                "source_dir", cfg.get("unlabeled_dir", "data/unlabeled")
+            ),
+        )
+        pseudo_common = {
+            "image_size": dataset_kwargs["image_size"],
+            "output_grid": dataset_kwargs["output_grid"],
+            "use_eroded_interiors": bool(
+                sam2_geometry_cfg.get("use_eroded_interiors", False)
+            ),
+        }
+        pseudo_base = SAM2GeometryDataset(
+            pseudo_dataset_dir,
+            pseudo_source_dir,
+            **pseudo_common,
+            cache_in_memory=True,
+        )
+        pseudo_fraction = float(sam2_geometry_cfg.get("pseudo_fraction", 0.5))
+        if not 0.0 < pseudo_fraction < 1.0:
+            raise ValueError("sam2_geometry.pseudo_fraction must be within (0, 1)")
+        dataset_parts.append(pseudo_base)
+        augmentation_parts.append(augmentation_cfg)
+
+        native_crop_cfg = sam2_geometry_cfg.get("native_crop", {})
+        crop_base = None
+        crop_fraction = 0.0
+        if bool(native_crop_cfg.get("enabled", False)):
+            crop_fraction = float(
+                native_crop_cfg.get("fraction_within_pseudo", 0.5)
+            )
+            if not 0.0 < crop_fraction < 1.0:
+                raise ValueError(
+                    "sam2_geometry.native_crop.fraction_within_pseudo must be "
+                    "within (0, 1)"
+                )
+            crop_base = SAM2GeometryDataset(
+                pseudo_dataset_dir,
+                pseudo_source_dir,
+                **pseudo_common,
+                cache_in_memory=False,
+                native_crop_size=int(native_crop_cfg.get("size", 1024)),
+                native_crop_min_coverage=float(
+                    native_crop_cfg.get("min_coverage", 0.92)
+                ),
+                native_crop_min_instances=int(
+                    native_crop_cfg.get("min_instances", 12)
+                ),
+                native_crop_min_negative_edge_pixels=int(
+                    native_crop_cfg.get("min_negative_edge_pixels", 128)
+                ),
+                native_crop_stride_fraction=float(
+                    native_crop_cfg.get("stride_fraction", 0.5)
+                ),
+                native_crop_max_candidates=int(
+                    native_crop_cfg.get("max_candidates_per_image", 8)
+                ),
+            )
+            crop_augmentation = dict(augmentation_cfg)
+            crop_augmentation["crop_probability"] = 0.0
+            dataset_parts.append(crop_base)
+            augmentation_parts.append(crop_augmentation)
+
+        sampling_masses = [
+            1.0 - pseudo_fraction,
+            pseudo_fraction * (1.0 - crop_fraction),
+        ]
+        if crop_base is not None:
+            sampling_masses.append(pseudo_fraction * crop_fraction)
+        sampler = build_geometry_sampler(dataset_parts, sampling_masses, cfg, seed)
+        epoch_samples = len(sampler)
+        split["sam2_geometry"] = {
+            "count": len(pseudo_base),
+            "pseudo_fraction": pseudo_fraction,
+            "samples_per_epoch": epoch_samples,
+            "dataset_dir": os.path.abspath(
+                project_path(config, sam2_geometry_cfg["dataset_dir"])
+            ),
+        }
+        if crop_base is not None:
+            split["sam2_geometry"]["native_crop"] = {
+                **native_crop_cfg,
+                "eligible_source_count": len(crop_base),
+            }
+        logger.info(
+            "SAM2 geometry mix enabled: manual=%d pseudo_full=%d "
+            "pseudo_crop=%d masses=%s samples_per_epoch=%d",
+            len(manual_train_base),
+            len(pseudo_base),
+            len(crop_base) if crop_base is not None else 0,
+            [round(value, 3) for value in sampling_masses],
+            epoch_samples,
+        )
+    elif cfg.get("samples_per_epoch") is not None:
+        sampler = build_geometry_sampler(dataset_parts, sampling_masses, cfg, seed)
+        split["manual_sampling"] = {
+            "count": len(manual_train_base),
+            "samples_per_epoch": len(sampler),
+            "replacement": True,
+        }
+        logger.info(
+            "Manual-only resampling: manual=%d samples_per_epoch=%d replacement=True",
+            len(manual_train_base), len(sampler),
+        )
+    train_parts = [
+        AffinityGeometryAugmentedDataset(dataset, augmentation)
+        for dataset, augmentation in zip(dataset_parts, augmentation_parts)
+    ]
+    train_dataset = (
+        train_parts[0] if len(train_parts) == 1 else ConcatDataset(train_parts)
+    )
+    val_dataset = build_manual_geometry_dataset(
+        config, cfg, raw_dir, val_names, training=False, **dataset_kwargs
+    )
+    loader_workers = int(cfg.get("num_workers", 0))
+    loader = DataLoader(
+        train_dataset,
+        batch_size=int(cfg.get("batch_size", 2)),
+        shuffle=sampler is None,
+        sampler=sampler,
+        num_workers=loader_workers,
+        pin_memory=device.type == "cuda",
+        persistent_workers=loader_workers > 0,
+        prefetch_factor=(
+            int(cfg.get("prefetch_factor", 2)) if loader_workers > 0 else None
+        ),
+        drop_last=False,
+    )
+    unlabeled_dir = Path(project_path(config, cfg.get("unlabeled_dir", "data/unlabeled")))
+    labeled_set = set(all_names)
+    extensions = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+    unlabeled_monitors = [
+        path for path in sorted(unlabeled_dir.iterdir())
+        if path.suffix.lower() in extensions and path.stem not in labeled_set
+    ][: int(cfg.get("unlabeled_monitor_count", 2))]
+    audit_image = val_dataset[0]["image"].unsqueeze(0).to(device)
+    with torch.no_grad():
+        semantic_baseline = system.semantic_logits(audit_image).cpu()
+    semantic_contract_audit(
+        system, audit_image, semantic_baseline, digest,
+        float(cfg.get("semantic_tolerance", 1e-6)),
+    )
+    output_dir = Path(project_path(config, cfg["output_dir"]))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "split.json").write_text(
+        json.dumps(split, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    graph_thresholds = cfg.get("graph_thresholds")
+    oracle_validation_grid = cfg.get("oracle_validation_grid")
+    deployment_recipe = deployment_validation_recipe(cfg)
+    selection_metric = resolve_selection_metric(cfg, deployment_recipe["enabled"])
+    val_image_paths = [Path(raw_dir) / f"{name}.jpg" for name in val_names]
+    system.eval()
+    baseline_rows = [
+        evaluate_sample(
+            system,
+            val_dataset[index],
+            graph_thresholds,
+            validation_grid=oracle_validation_grid,
+        )
+        for index in range(len(val_dataset))
+    ]
+    baseline = aggregate_validation(baseline_rows)
+    (output_dir / "baseline.json").write_text(
+        json.dumps(baseline, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    best_oracle_score = baseline["gt_penalized_miou"]
+    deployment_baseline = None
+    if deployment_recipe["enabled"]:
+        deployment_baseline = evaluate_deployment_validation(
+            system,
+            val_image_paths,
+            int(cfg.get("input_size", 1024)),
+            device,
+            config["inference"],
+            deployment_recipe,
+            semantic_challenger,
+            replace_reference_semantic,
+            teacher_gt_dir=project_path(config, cfg["manual_teacher_gt_dir"]) if cfg.get("manual_teacher_gt_dir") else None,
+        )
+        (output_dir / "deployment_baseline.json").write_text(
+            json.dumps(deployment_baseline, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    loss_history = []
+    if selection_metric == "val_affinity_loss":
+        loss_baseline = evaluate_affinity_loss(system, val_dataset, cfg)
+        (output_dir / "loss_baseline.json").write_text(
+            json.dumps(loss_baseline, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        best_score = loss_baseline["loss"]
+        loss_history.append({"epoch": 0, "loss": best_score})
+    elif selection_metric == "deployment_score_total":
+        best_score = deployment_baseline["score_total"]
+    else:
+        best_score = best_oracle_score
+    if not math.isfinite(best_score):
+        raise ValueError("Non-finite epoch-0 checkpoint selection score")
+    best_epoch = 0
+    logger.info("Selection metric=%s direction=%s epoch0=%.8f; final deployment decides promotion",
+                selection_metric, "min" if selection_metric == "val_affinity_loss" else "max",
+                best_score)
+    save_checkpoint(
+        output_dir / "best_affinity.pth", system, config, 0, best_score,
+        reference_path, reference_sha, init_path, digest, split,
+        selection_metric, best_oracle_score, best_epoch,
+    )
+    write_val_monitor(
+        system,
+        val_dataset,
+        output_dir,
+        0,
+        graph_thresholds,
+        validation_grid=oracle_validation_grid,
+    )
+    for path in unlabeled_monitors:
+        write_unlabeled_monitor(
+            system, path, output_dir, 0,
+            int(cfg.get("input_size", 1024)), int(cfg.get("output_grid", 512)),
+        )
+    optimizer = build_optimizer(system, cfg)
+    if cfg.get("fpn_learning_rate") is not None:
+        for group in optimizer.param_groups:
+            logger.info(
+                "Optimizer group=%s parameters=%d initial_lr=%.8g",
+                group["name"], sum(p.numel() for p in group["params"]), group["lr"],
+            )
+    epochs = int(cfg.get("epochs", 20))
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=max(1, epochs), eta_min=float(cfg.get("min_learning_rate", 1e-5))
+    )
+    amp_enabled = bool(cfg.get("amp", True) and device.type == "cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+    metrics_file = open(output_dir / "metrics.csv", "w", newline="", encoding="utf-8")
+    fields = [
+        "epoch", "train_loss", "train_edge_precision", "train_edge_recall",
+        "attempted_steps", "optimizer_steps", "amp_skipped_steps",
+        "val_gt_penalized_miou", "val_instance_miou_valid",
+        "val_instance_count_abs_error", "val_split_gt_instance_count",
+        "val_merged_pred_instance_count", "val_raw_component_count",
+        "val_merged_components_for_cap", "val_edge_precision", "val_edge_recall",
+        "val_edge_specificity", "val_deployment_score_total",
+        "val_deployment_instance_miou", "val_deployment_gt_penalized_miou",
+        "val_deployment_ferrite_area_relative_error",
+        "val_deployment_pred_count", "val_deployment_valid_matches",
+        "val_deployment_macro_image_score_total", "learning_rate",
+        "train_negative_tail_loss",
+        "adapter_gate_mean_abs", "adapter_gate_max_abs",
+        "adapter_gate_scale0_abs", "adapter_gate_scale1_abs",
+        "adapter_gate_scale2_abs", "adapter_gate_scale3_abs",
+    ]
+    if selection_metric == "val_affinity_loss":
+        fields.append("val_affinity_loss")
+    # 仅新分组配置增加列，记录该轮实际使用的学习率；保留旧 learning_rate 列含义。
+    record_group_lrs = cfg.get("fpn_learning_rate") is not None
+    if record_group_lrs:
+        fields.extend(f"learning_rate_{group['name']}" for group in optimizer.param_groups)
+    writer = csv.DictWriter(metrics_file, fieldnames=fields)
+    writer.writeheader()
+    logger.info("Baseline val=%s", baseline)
+    for epoch in range(1, epochs + 1):
+        epoch_group_lrs = {
+            f"learning_rate_{group['name']}": group["lr"]
+            for group in optimizer.param_groups
+        } if record_group_lrs else {}
+        system.train()
+        totals = {
+            "loss": 0.0, "precision": 0.0, "recall": 0.0,
+            "negative_tail_loss": 0.0, "batches": 0, "optimizer_steps": 0,
+        }
+        for batch in loader:
+            image = batch["image"].to(device, non_blocking=True)
+            labels = batch["instance_map"].to(device, non_blocking=True)
+            valid = batch["valid_content"].to(device, non_blocking=True)
+            manual_source = batch["uncovered_boundary_source"].to(
+                device, non_blocking=True
+            ).bool()
+            uncovered_as_boundary = None
+            if bool(cfg.get("manual_uncovered_as_boundary", False)):
+                uncovered_as_boundary = manual_source
+            target, edge_valid, uncovered_edge = build_affinity_targets_torch(
+                labels,
+                valid,
+                uncovered_as_boundary=uncovered_as_boundary,
+                return_uncovered_mask=True,
+            )
+            edge_weight = None
+            pseudo_negative_weight = float(
+                cfg.get("sam2_geometry", {}).get("negative_edge_weight", 1.0)
+            )
+            if not 0.0 <= pseudo_negative_weight <= 1.0:
+                raise ValueError(
+                    "sam2_geometry.negative_edge_weight must be within [0, 1]"
+                )
+            if pseudo_negative_weight != 1.0:
+                edge_weight = torch.ones_like(target)
+                pseudo_negative = (
+                    (~manual_source)[:, None, None, None]
+                    & edge_valid
+                    & (target <= 0.5)
+                )
+                edge_weight[pseudo_negative] = pseudo_negative_weight
+            if uncovered_as_boundary is not None:
+                gap_weight = float(
+                    cfg.get("manual_uncovered_boundary_weight", 1.0)
+                )
+                if not 0.0 <= gap_weight <= 1.0:
+                    raise ValueError(
+                        "manual_uncovered_boundary_weight must be within [0, 1]"
+                    )
+                if edge_weight is None:
+                    edge_weight = torch.ones_like(target)
+                edge_weight[uncovered_edge] = gap_weight
+            optimizer.zero_grad(set_to_none=True)
+            with torch.autocast(device_type=device.type, enabled=amp_enabled):
+                output = system.geometry_forward(image)
+                loss_logits = output["affinity_logits"]
+                loss_target = target
+                loss_valid = edge_valid
+                loss_edge_weight = edge_weight
+                if bool(cfg.get("train_short_channels_only", False)):
+                    short_channels = int(
+                        cfg.get("highres_refiner", {}).get("short_channels", 4)
+                    )
+                    loss_logits = loss_logits[:, :short_channels]
+                    loss_target = loss_target[:, :short_channels]
+                    loss_valid = loss_valid[:, :short_channels]
+                    if loss_edge_weight is not None:
+                        loss_edge_weight = loss_edge_weight[:, :short_channels]
+                loss_cfg = cfg.get("loss", {})
+                loss, train_metrics = balanced_affinity_loss(
+                    loss_logits,
+                    loss_target,
+                    loss_valid,
+                    negative_weight=float(loss_cfg.get("negative_weight", 1.0)),
+                    hard_negative_weight=float(
+                        loss_cfg.get("hard_negative_weight", 0.0)
+                    ),
+                    hard_negative_gamma=float(
+                        loss_cfg.get("hard_negative_gamma", 2.0)
+                    ),
+                    edge_weight=loss_edge_weight,
+                    normalize_edge_weights=bool(
+                        loss_cfg.get("normalize_edge_weights", True)
+                    ),
+                )
+                tail_weight = float(
+                    loss_cfg.get("negative_tail_weight", 0.0)
+                )
+                if tail_weight > 0:
+                    tail_loss, tail_metrics = negative_affinity_tail_loss(
+                        loss_logits,
+                        loss_target,
+                        loss_valid,
+                        margin=float(
+                            loss_cfg.get("negative_tail_margin", 0.45)
+                        ),
+                        top_fraction=float(
+                            loss_cfg.get("negative_tail_fraction", 0.05)
+                        ),
+                        sample_mask=(
+                            manual_source
+                            if bool(
+                                loss_cfg.get(
+                                    "negative_tail_manual_only", True
+                                )
+                            )
+                            else None
+                        ),
+                        edge_weight=loss_edge_weight,
+                    )
+                    loss = loss + tail_weight * tail_loss
+                    train_metrics.update(tail_metrics)
+                    train_metrics["loss"] = loss.detach()
+            if not torch.isfinite(loss):
+                raise FloatingPointError("Non-finite training loss")
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(
+                list(system.geometry_trainable_parameters()),
+                float(cfg.get("grad_clip", 1.0)), error_if_nonfinite=not scaler.is_enabled())
+            scale_before = scaler.get_scale()
+            scaler.step(optimizer)
+            scaler.update()
+            # scale 下降表示本次因非有限梯度跳过更新；禁用 AMP 时 scale 恒为 1。
+            totals["optimizer_steps"] += int(scaler.get_scale() >= scale_before)
+            totals["loss"] += float(train_metrics["loss"])
+            totals["precision"] += float(train_metrics["precision"])
+            totals["recall"] += float(train_metrics["recall"])
+            totals["negative_tail_loss"] += float(
+                train_metrics.get("tail_loss", 0.0)
+            )
+            totals["batches"] += 1
+        scheduler.step()
+        system.eval()
+        val_rows = [
+            evaluate_sample(
+                system,
+                val_dataset[index],
+                graph_thresholds,
+                validation_grid=oracle_validation_grid,
+            )
+            for index in range(len(val_dataset))
+        ]
+        val = aggregate_validation(val_rows)
+        loss_validation = None
+        if selection_metric == "val_affinity_loss":
+            loss_validation = evaluate_affinity_loss(system, val_dataset, cfg)
+            loss_history.append({"epoch": epoch, "loss": loss_validation["loss"]})
+        deployment = None
+        if deployment_recipe["enabled"]:
+            deployment = evaluate_deployment_validation(
+                system,
+                val_image_paths,
+                int(cfg.get("input_size", 1024)),
+                device,
+                config["inference"],
+                deployment_recipe,
+                semantic_challenger,
+                replace_reference_semantic,
+                teacher_gt_dir=project_path(config, cfg["manual_teacher_gt_dir"]) if cfg.get("manual_teacher_gt_dir") else None,
+            )
+        deployment_values = {
+            "val_deployment_score_total": (
+                deployment["score_total"] if deployment is not None else None
+            ),
+            "val_deployment_instance_miou": (
+                deployment["instance_miou_valid"] if deployment is not None else None
+            ),
+            "val_deployment_gt_penalized_miou": (
+                deployment["gt_penalized_miou"] if deployment is not None else None
+            ),
+            "val_deployment_ferrite_area_relative_error": (
+                deployment["ferrite_area_relative_error"]
+                if deployment is not None else None
+            ),
+            "val_deployment_pred_count": (
+                deployment["pred_count"] if deployment is not None else None
+            ),
+            "val_deployment_valid_matches": (
+                deployment["valid_matches"] if deployment is not None else None
+            ),
+            "val_deployment_macro_image_score_total": (
+                deployment["macro_image_score_total"]
+                if deployment is not None else None
+            ),
+        }
+        row = {
+            "epoch": epoch,
+            "train_loss": totals["loss"] / totals["batches"],
+            "train_edge_precision": totals["precision"] / totals["batches"],
+            "train_edge_recall": totals["recall"] / totals["batches"],
+            "attempted_steps": totals["batches"],
+            "optimizer_steps": totals["optimizer_steps"],
+            "amp_skipped_steps": totals["batches"] - totals["optimizer_steps"],
+            **{f"val_{key}": value for key, value in val.items()},
+            **deployment_values,
+            "learning_rate": optimizer.param_groups[0]["lr"],
+            "train_negative_tail_loss": (
+                totals["negative_tail_loss"] / totals["batches"]
+            ),
+            **adapter_metrics(system),
+            **epoch_group_lrs,
+        }
+        if loss_validation is not None:
+            row["val_affinity_loss"] = loss_validation["loss"]
+            logger.info("epoch=%d val_affinity_loss=%.8f", epoch, loss_validation["loss"])
+        writer.writerow(row)
+        metrics_file.flush()
+        logger.info(
+            "epoch=%d attempted_steps=%d optimizer_steps=%d amp_skipped_steps=%d",
+            epoch, row["attempted_steps"], row["optimizer_steps"],
+            row["amp_skipped_steps"],
+        )
+        logger.info(
+            "epoch=%d train=%.4f oracle_pen=%.4f valid=%.4f count_err=%.1f "
+            "split=%.1f merge=%.1f raw=%.1f cap=%.1f edge_p=%.4f edge_r=%.4f",
+            epoch, row["train_loss"], row["val_gt_penalized_miou"],
+            row["val_instance_miou_valid"], row["val_instance_count_abs_error"],
+            row["val_split_gt_instance_count"], row["val_merged_pred_instance_count"],
+            row["val_raw_component_count"], row["val_merged_components_for_cap"],
+            row["val_edge_precision"], row["val_edge_recall"],
+        )
+        if deployment is not None:
+            logger.info(
+                "epoch=%d deployment_score=%.4f miou=%.4f gt_pen=%.4f "
+                "area_err=%.4f pred=%d valid=%d macro=%.4f",
+                epoch,
+                deployment["score_total"],
+                deployment["instance_miou_valid"],
+                deployment["gt_penalized_miou"],
+                deployment["ferrite_area_relative_error"],
+                deployment["pred_count"],
+                deployment["valid_matches"],
+                deployment["macro_image_score_total"],
+            )
+        if system.geometry_feature_adapter is not None:
+            logger.info(
+                "epoch=%d adapter_gate_mean_abs=%.6f max_abs=%.6f",
+                epoch, row["adapter_gate_mean_abs"], row["adapter_gate_max_abs"],
+            )
+        best_oracle_score = max(
+            best_oracle_score, row["val_gt_penalized_miou"]
+        )
+        if selection_metric == "val_affinity_loss":
+            selection_score = loss_validation["loss"]
+        elif selection_metric == "deployment_score_total":
+            selection_score = deployment["score_total"]
+        else:
+            selection_score = row["val_gt_penalized_miou"]
+        if selection_improved(selection_score, best_score, selection_metric):
+            best_score = selection_score
+            best_epoch = epoch
+            save_checkpoint(
+                output_dir / "best_affinity.pth", system, config, epoch, best_score,
+                reference_path, reference_sha, init_path, digest, split,
+                selection_metric, best_oracle_score, best_epoch,
+            )
+        if epoch % int(cfg.get("monitor_interval", 5)) == 0 or epoch == epochs:
+            semantic_contract_audit(
+                system, audit_image, semantic_baseline, digest,
+                float(cfg.get("semantic_tolerance", 1e-6)),
+            )
+            save_checkpoint(
+                output_dir / "latest_affinity.pth", system, config, epoch, best_score,
+                reference_path, reference_sha, init_path, digest, split,
+                selection_metric, best_oracle_score, best_epoch,
+            )
+            write_val_monitor(
+                system,
+                val_dataset,
+                output_dir,
+                epoch,
+                graph_thresholds,
+                validation_grid=oracle_validation_grid,
+            )
+            for path in unlabeled_monitors:
+                write_unlabeled_monitor(
+                    system, path, output_dir, epoch,
+                    int(cfg.get("input_size", 1024)), int(cfg.get("output_grid", 512)),
+                )
+    metrics_file.close()
+    if loss_history:
+        ranked = sorted(loss_history, key=lambda item: (item["loss"], item["epoch"]))
+        (output_dir / "selection_summary.json").write_text(json.dumps({
+            "metric": selection_metric, "direction": "min",
+            "protocol": AFFINITY_LOSS_PROTOCOL, "best_epoch": best_epoch,
+            "best_loss": best_score, "runner_up": ranked[1] if len(ranked) > 1 else None,
+            "best_runner_up_gap": ranked[1]["loss"] - best_score if len(ranked) > 1 else None,
+            "history": loss_history,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+    logger.info(
+        "Affinity G1 complete selection=%s best=%.6f output=%s",
+        selection_metric, best_score, output_dir,
+    )
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,290 @@
+paths:
+  project_root: auto
+sam2:
+  model_version: sam2_hiera_base_plus
+  config_file: configs/sam2/sam2_hiera_b+.yaml
+  device: cuda
+  freeze: true
+  sam2_repo_path: segment-anything-2
+  input_normalization: legacy_none
+decoder:
+  fpn_channels: 256
+  num_classes: 2
+  dropout: 0.1
+  use_bn: true
+  boundary_refine: false
+  center_head: false
+  semantic_residual: true
+  semantic_residual_hidden: 64
+  semantic_residual_color_channels: 16
+  semantic_residual_use_photometric: true
+  semantic_residual_max_logit_delta: 2.0
+  semantic_residual_version: highres_v1
+  semantic_residual_half_channels: 48
+  semantic_residual_full_channels: 24
+data:
+  image_size: 1024
+  crop_size: 512
+  center_sigma: 4.0
+  erode_pixels: 5
+  dist_scale_factor: 10.0
+  classes:
+    0: pearlite
+    1: ferrite
+  train_ratio: 0.8
+  seed: 42
+  batch_size: 4
+  num_workers: 4
+  augmentation:
+    horizontal_flip: true
+    vertical_flip: true
+    rotation: true
+  native_multiscale:
+    enabled: false
+  semantic_train_completed_gt_dir: outputs/experiments/seeded_label_completion_o1/radius_8/derived_maps
+  semantic_val_completed_gt_dir: outputs/experiments/seeded_label_completion_o1/radius_8/derived_maps
+train:
+  learning_rate: 0.00015
+  weight_decay: 0.0001
+  epochs: 100
+  warmup_epochs: 25
+  grad_clip: 1.0
+  amp: true
+  focal_gamma: 2.0
+  focal_alpha: 0.75
+  boundary_alpha: 3.0
+  center_weight: 0.0
+  center_gamma: 2.0
+  seg_dice_weight: 0.3
+  composite_sem_weight: 1.0
+  composite_boundary_weight: 0.0
+  save_checkpoints: true
+  semantic_instance_weight: 0.75
+  semantic_core_radius: 3
+  semantic_core_min_pixels: 12
+  semantic_core_boundary_threshold: 0.2
+  semantic_instance_class_balance: true
+  semantic_instance_ferrite_weight: 1.0
+  semantic_instance_hard_gamma: 0.5
+  semantic_instance_hard_floor: 0.5
+  semantic_tversky_weight: 0.0
+  semantic_tversky_alpha: 0.4
+  semantic_tversky_beta: 0.6
+  semantic_instance_pool_weight: 0.5
+  semantic_thin_instance_weight: 1.5
+  seed: 42
+  deterministic: true
+  amp_init_scale: 256.0
+boundary:
+  purify_erode_radius: 2
+  purify_dilate_width: 2
+  purify_canny_low: 30
+  purify_canny_high: 100
+  edt_scale_factor: 10.0
+  edt_weight_floor: 1.0
+  edt_weight_ceil: 4.0
+inference:
+  threshold: 0.5
+  min_instance_area: 300
+  max_instance_id: 65535
+  boundary_threshold: 0.35
+  boundary_logit_scale: 1.0
+  sem_edge_boost_alpha: 0.0
+  sem_edge_merge_weight: 0.0
+  sem_edge_mode: valley
+  sem_edge_smooth: 1.0
+  tta: false
+  quality_aware:
+    enabled: false
+    weak_min_flags: 2
+    thresholds:
+      brightness_low: 0.58
+      contrast_low: 0.14
+      sharpness_low: 0.02
+      sharpness_critical: 0.008
+      color_cast_high: 0.04
+    enhanced_weight: 0.35
+    enhanced_tta: false
+    boundary_threshold_offsets:
+      standard: 0.0
+      weak: -0.02
+    boundary_threshold_limits:
+    - 0.25
+    - 0.5
+    enhance:
+      white_balance: true
+      white_balance_gain_limit: 0.12
+      gamma: true
+      target_brightness: 0.65
+      gamma_min: 0.75
+      gamma_max: 1.25
+      clahe: true
+      clahe_clip: 1.5
+      unsharp: true
+      unsharp_sigma: 1.0
+      unsharp_amount: 0.35
+  watershed_dilate_width: 1
+  bridge_width: 1
+  marker_border_seal_width: 0
+  marker_boundary_low_threshold: null
+  marker_boundary_reconstruction_steps: 0
+  semantic_vote_mode: hard_majority
+  semantic_vote_erode_width: 0
+  semantic_vote_threshold: 0.5
+  checkpoint_stage: stage2
+  center_seeds: false
+  center_threshold: 0.25
+  center_nms_kernel: 9
+lora:
+  enabled: true
+  rank: 16
+  alpha: 32.0
+  target_layers:
+  - attn.qkv
+  - attn.proj
+  lr_ratio: 0.0
+  freeze: true
+post_process:
+  interpolate_mode: bilinear
+  align_corners: true
+  connectivity: 8
+  min_noise_area: 50
+  save_visualization: false
+semi_supervised:
+  ema_decay: 0.999
+  adaptive_ema: true
+  boundary_teacher_mode: ema
+  use_cached_pseudo_labels: false
+  unsup_weight: 0.0
+  unsup_seg_weight: 0.0
+  unsup_rampup_epochs: 4
+  epochs: 20
+  learning_rate: 0.0001
+  seg_lr_ratio: 1.0
+  boundary_lr_ratio: 0.0
+  lr_schedule: flat_decay
+  warmup_epochs: 2
+  warmup_start_factor: 0.25
+  cosine_end_factor: 0.0
+  flat_epochs: 12
+  decay_end_factor: 0.25
+  batch_size_labeled: 4
+  batch_size_unlabeled: 4
+  unlabeled_samples_per_epoch: 248
+  save_checkpoints: false
+  checkpoint_interval: 20
+  monitor:
+    num_images: 3
+  patch_mask_ratio: 0.2
+  patch_mask_size: 160
+  num_patches: 8
+  seg_mask_region_weight: 1.0
+  boundary_mask_region_weight: 1.0
+  boundary_anchor:
+    enabled: false
+    anchor_floor: 0.5
+    anchor_ramp_epochs: 20
+  boundary_consistency:
+    sobel_weight: 0.5
+    tv_weight: 0.05
+    tv_dilate_radius: 2
+    tv_bg_weight: 1.0
+    tv_boundary_weight: 0.1
+    bg_suppress_weight: 0.2
+    bg_suppress_threshold: 0.05
+    pos_weight: 3.0
+    margin_loss_weight: 1.0
+    margin: 0.4
+    peak_hinge_weight: 0.5
+    peak_threshold: 0.8
+    rate_regularizer_weight: 0.2
+    rate_regularizer_weight_end: 0.2
+    rate_regularizer_ramp_epochs: 0
+    rate_slack: 0.03
+  freeze:
+    seg_branch: false
+    boundary_branch: true
+  sem_boundary_align_weight: 0.0
+  sem_degrade_warn_factor: 0.9
+  skeleton_filter:
+    enabled: false
+    threshold: 0.5
+    threshold_end: 0.5
+    threshold_ramp_epochs: 60
+    dilate_width: 1
+    blur_sigma: 0.01
+  use_unlabeled: true
+  labeled_steps_per_epoch: 62
+  unsup_seg_sharpen_temperature: 0.7
+  unsup_seg_confidence_threshold: 0.9
+  enable_patch_mask: false
+  diagnostics:
+    enabled: true
+    save_initial_monitor: false
+  semantic_residual_training:
+    enabled: false
+  semantic_cold_start_training:
+    enabled: true
+    distill_weight_start: 0.12
+    distill_weight_end: 0.03
+    distill_decay_epochs: 12
+  selection_metric: val_loss
+  shared_spatial_augmentation: true
+progressive_aug:
+  enabled: true
+  start_epoch: 1
+  ramp_epochs: 4
+  max_prob: 0.6
+  brightness_range:
+  - 0.55
+  - 1.45
+  contrast_range:
+  - 0.45
+  - 1.45
+  sharpness_range:
+  - -0.5
+  - 1.0
+  gaussian_noise_std: 0.0
+  policy: physical_v1
+  min_ops: 1
+  max_ops: 2
+  op_weights:
+    dark_rim: 0.0
+    gamma: 1.2
+    white_balance: 1.0
+    gaussian_blur: 0.6
+    downsample: 0.3
+    illumination: 1.2
+    scratch: 0.2
+    noise: 0.0
+  gamma_range:
+  - 0.72
+  - 1.35
+  white_balance_range:
+  - 0.9
+  - 1.1
+  blur_sigma_range:
+  - 0.3
+  - 1.3
+  blur_kernel_size: 9
+  downsample_scale_range:
+  - 0.75
+  - 0.95
+  illumination_strength: 0.16
+  illumination_grid: 3
+  scratch_count_range:
+  - 1
+  - 2
+  scratch_width_range:
+  - 0.6
+  - 1.6
+  scratch_opacity_range:
+  - 0.02
+  - 0.06
+  dark_rim_width_range:
+  - 2
+  - 5
+  dark_rim_opacity_range:
+  - 0.08
+  - 0.22
+  dark_rim_boundary_threshold: 0.2

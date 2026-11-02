@@ -41,3 +41,5 @@ joblib>=1.4.0
 
 # ---- Debug Visualization (optional, used by render scripts) ----
 matplotlib>=3.8.0
+
+# 可选TensorRT引擎推理/导出依赖见requirements-tensorrt.txt；普通入口无需安装。

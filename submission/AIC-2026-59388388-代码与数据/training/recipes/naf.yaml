@@ -1,0 +1,120 @@
+paths:
+  project_root: auto
+boundary_naf:
+  expected_sources: 32
+  seed: 20261026
+  model:
+    width: 48
+    encoder_blocks:
+    - 1
+    - 1
+    - 2
+    - 4
+    middle_blocks: 2
+    decoder_blocks:
+    - 1
+    - 1
+    - 1
+    - 1
+  discriminator:
+    width: 64
+  data:
+    crop_size: 256
+    stride: 50
+    augmentations: 8
+    samples_per_epoch: 16000
+    identity_probability: 0.2
+    boundary_dilation: 0
+    valid_margin: 4
+    crop_margin: 4
+    gap_count_range:
+    - 1
+    - 4
+    gap_length_range:
+    - 8
+    - 40
+    gap_half_width_range:
+    - 3
+    - 5
+  training:
+    main_updates: 1000
+    topology_updates: 0
+    main_schedule_updates: 53000
+    topology_schedule_updates: 10600
+    segment_updates: 1000
+    effective_batch_size: 16
+    micro_batch_size: 16
+    learning_rate: 0.001
+    topology_learning_rate: 0.0001
+    minimum_lr_ratio: 0.01
+    adam_betas:
+    - 0.9
+    - 0.999
+    adam_eps: 1.0e-08
+    grad_clip: 1.0
+    bce_weight: 0.0
+    adversarial_weight: 0.01
+    topology_weight: 0.0
+    num_workers: 4
+    prefetch_factor: 2
+    torch_threads: 4
+    opencv_threads: 1
+    precision: float32
+    checkpoint_every_updates: 250
+    log_every_updates: 25
+    discriminator_learning_rate: 0.0001
+    adversarial_warmup_updates: 64
+    minimum_free_gib: 0
+    monitor_updates:
+    - 0
+    - 1
+    - 100
+    - 250
+    - 500
+    - 750
+    - 1000
+  topology:
+    tile_size: 192
+    max_tiles_per_image: 1
+    min_persistence: 0.01
+    border_margin: 2
+    stride: 32
+    max_pred_features: 256
+    target_cache_size: 512
+  inference:
+    input_mode: boundary
+    input_threshold: 0.5
+    tile_size: 256
+    overlap: 64
+    reflect_pad: 32
+    batch_size: 16
+    iterations: 1
+    revert_unconnected: false
+    boundary_representation: binary
+    output_stitch: probability
+    input_normalization:
+      mode: skeleton_dilate
+      kernel_size: 8
+  monitor:
+    pair_indices:
+    - 0
+    - 5
+    - 17
+    - 29
+    - 41
+    - 63
+    thumbnail_width: 280
+    source_names: []
+    control_manifests: []
+    roi_spec: null
+    full_readout_steps: []
+    baseline_name: N1
+  input_source: real_n1
+  input_mode: boundary
+  rgb_loss:
+    tolerance: 2
+    coverage_weight: 1.0
+    interior_weight: 1.0
+  input_normalization:
+    mode: skeleton_dilate
+    kernel_size: 8

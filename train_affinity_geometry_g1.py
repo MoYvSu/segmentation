@@ -85,11 +85,13 @@ AFFINITY_LOSS_PROTOCOL = "covered_pairs_per_image_fp32_v1"
 def build_manual_geometry_dataset(
     config, cfg, raw_dir, sample_names, *, training, **dataset_kwargs
 ):
-    """新 GT 只替换训练目标；验证始终使用原人工标注，保持 loss 选优口径。"""
+    """默认保留旧验证口径；显式teacher版本的训练/验证均只读取teacher。"""
     completed_dir = cfg.get("manual_train_completed_gt_dir") if training else None
+    teacher_dir = cfg.get("manual_teacher_gt_dir")
     return OffsetGeometryDataset(
         raw_dir, sample_names=sample_names,
-        completed_gt_dir=project_path(config, completed_dir) if completed_dir else None,
+        completed_gt_dir=project_path(config, completed_dir) if completed_dir and not teacher_dir else None,
+        teacher_gt_dir=project_path(config, teacher_dir) if teacher_dir else None,
         **dataset_kwargs,
     )
 
@@ -680,6 +682,7 @@ def evaluate_deployment_validation(
     recipe,
     semantic_challenger=None,
     replace_reference_semantic=False,
+    teacher_gt_dir=None,
 ):
     """Score the exact deployment path; GT is loaded only after prediction."""
     metrics = []
@@ -723,9 +726,18 @@ def evaluate_deployment_validation(
                 image_rgb=image,
                 semantic_challenger_logits=challenger_logits,
             )
-            gt_map, gt_class_map, _ = load_labelme_instances(
-                image_path.with_suffix(".json"), image.shape[:2]
-            )
+            if teacher_gt_dir:
+                from data.teacher_supervision import load_teacher_instance_source
+                gt_map, gt_class_map, _, ignored, _ = load_teacher_instance_source(
+                    Path(teacher_gt_dir) / f"{image_path.stem}_gt.npz", image.shape[:2])
+                pred_map = pred_map.copy()
+                pred_map[ignored] = 0
+                remaining = set(map(int, np.unique(pred_map))) - {0}
+                pred_class_map = {key: value for key, value in pred_class_map.items() if int(key) in remaining}
+            else:
+                gt_map, gt_class_map, _ = load_labelme_instances(
+                    image_path.with_suffix(".json"), image.shape[:2]
+                )
             metrics.append(
                 evaluate_instance_pair(
                     gt_map, gt_class_map, pred_map, pred_class_map
@@ -815,7 +827,12 @@ def main():
     manual_train_base = build_manual_geometry_dataset(
         config, cfg, raw_dir, train_names, training=True, **dataset_kwargs
     )
-    if manual_train_base.completed_gt_dir is not None:
+    if manual_train_base.teacher_gt_dir is not None:
+        split["manual_training_targets"] = {
+            "source": "model_teacher", "directory": cfg["manual_teacher_gt_dir"],
+            "unknown": "ignore", "validation_source": "same_model_teacher_version",
+        }
+    elif manual_train_base.completed_gt_dir is not None:
         split["manual_training_targets"] = {
             "source": "completed_instance_map",
             "directory": cfg["manual_train_completed_gt_dir"],
@@ -1013,6 +1030,7 @@ def main():
             deployment_recipe,
             semantic_challenger,
             replace_reference_semantic,
+            teacher_gt_dir=project_path(config, cfg["manual_teacher_gt_dir"]) if cfg.get("manual_teacher_gt_dir") else None,
         )
         (output_dir / "deployment_baseline.json").write_text(
             json.dumps(deployment_baseline, ensure_ascii=False, indent=2),
@@ -1253,6 +1271,7 @@ def main():
                 deployment_recipe,
                 semantic_challenger,
                 replace_reference_semantic,
+                teacher_gt_dir=project_path(config, cfg["manual_teacher_gt_dir"]) if cfg.get("manual_teacher_gt_dir") else None,
             )
         deployment_values = {
             "val_deployment_score_total": (

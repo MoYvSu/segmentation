@@ -67,6 +67,9 @@ class LabeledDataset(Dataset):
         native_multiscale_config: Optional[dict] = None,
         include_instance_map: bool = False,
         completed_gt_dir: Optional[str] = None,
+        teacher_gt_dir: Optional[str] = None,
+        teacher_center_supervision: bool = False,
+        teacher_boundary_policy: str = "known_neighbors_v1",
     ):
         super().__init__()
         self.data_dir = data_dir
@@ -86,6 +89,11 @@ class LabeledDataset(Dataset):
         self.native_multiscale_config = native_multiscale_config or {}
         self.include_instance_map = bool(include_instance_map)
         self.completed_gt_dir = completed_gt_dir
+        self.teacher_gt_dir = teacher_gt_dir
+        self.teacher_center_supervision = bool(teacher_center_supervision)
+        self.teacher_boundary_policy = teacher_boundary_policy
+        if teacher_gt_dir and (completed_gt_dir or self.native_multiscale_config.get("enabled", False)):
+            raise ValueError("teacher supervision requires its own source and legacy letterbox geometry")
         if completed_gt_dir and self.native_multiscale_config.get("enabled", False):
             raise ValueError("completed semantic GT requires native_multiscale.enabled=false")
         if self.include_instance_map and self.native_multiscale_config.get(
@@ -102,8 +110,11 @@ class LabeledDataset(Dataset):
             for img_path in glob.glob(os.path.join(data_dir, f"*{ext}")):
                 json_path = os.path.splitext(img_path)[0] + ".json"
                 basename = os.path.splitext(os.path.basename(img_path))[0]
-                gt_path = os.path.join(gt_dir, f"{basename}_gt.npz")
-                if os.path.exists(json_path) and os.path.exists(gt_path):
+                gt_path = os.path.join(teacher_gt_dir or gt_dir, f"{basename}_gt.npz")
+                if teacher_gt_dir and (not os.path.isfile(gt_path) or not os.path.isfile(
+                        os.path.join(teacher_gt_dir, f"{basename}_class.json"))):
+                    raise FileNotFoundError(f"Incomplete teacher cohort: {img_path}")
+                if (teacher_gt_dir or os.path.exists(json_path)) and os.path.exists(gt_path):
                     self.samples.append((img_path, gt_path))
         self.samples.sort()
         # 与 BoundaryDataset 使用同一划分函数（同 seed / train_ratio）
@@ -117,7 +128,7 @@ class LabeledDataset(Dataset):
                     path = os.path.join(self.completed_gt_dir, stem + suffix)
                     if not os.path.isfile(path):
                         raise FileNotFoundError(f"Incomplete semantic GT cohort: {path}")
-        self.instance_centers = {} if self.completed_gt_dir else {
+        self.instance_centers = {} if self.completed_gt_dir or self.teacher_gt_dir else {
             img_path: labelme_instance_centers(os.path.splitext(img_path)[0] + ".json")
             for img_path, _ in self.samples
         }
@@ -128,6 +139,9 @@ class LabeledDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict:
         img_path, gt_path = self.samples[idx]
+        if self.teacher_gt_dir:
+            from data.teacher_supervision import teacher_sample
+            return teacher_sample(self, img_path, gt_path, with_instances=True)
 
         image = cv2.imread(img_path, cv2.IMREAD_COLOR)
         if image is None:

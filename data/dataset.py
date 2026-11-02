@@ -357,6 +357,9 @@ class BoundaryDataset(Dataset):
         boundary_weight_ceil: float = 4.0,
         boundary_target_key: str = "boundary_soft",
         center_sigma: float = 4.0,
+        teacher_gt_dir: Optional[str] = None,
+        teacher_center_supervision: bool = False,
+        teacher_boundary_policy: str = "known_neighbors_v1",
     ):
         """
         Args:
@@ -386,6 +389,9 @@ class BoundaryDataset(Dataset):
         self.boundary_weight_ceil = boundary_weight_ceil
         self.boundary_target_key = boundary_target_key
         self.center_sigma = float(center_sigma)
+        self.teacher_gt_dir = teacher_gt_dir
+        self.teacher_center_supervision = bool(teacher_center_supervision)
+        self.teacher_boundary_policy = teacher_boundary_policy
 
         # 支持的图像扩展名
         valid_exts = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
@@ -396,8 +402,11 @@ class BoundaryDataset(Dataset):
             for img_path in glob.glob(os.path.join(data_dir, f"*{ext}")):
                 json_path = os.path.splitext(img_path)[0] + ".json"
                 basename = os.path.splitext(os.path.basename(img_path))[0]
-                gt_path = os.path.join(gt_dir, f"{basename}_gt.npz")
-                if os.path.exists(json_path) and os.path.exists(gt_path):
+                gt_path = os.path.join(teacher_gt_dir or gt_dir, f"{basename}_gt.npz")
+                if teacher_gt_dir and (not os.path.isfile(gt_path) or not os.path.isfile(
+                        os.path.join(teacher_gt_dir, f"{basename}_class.json"))):
+                    raise FileNotFoundError(f"Incomplete teacher cohort: {img_path}")
+                if (teacher_gt_dir or os.path.exists(json_path)) and os.path.exists(gt_path):
                     all_samples.append((img_path, gt_path))
 
         all_samples.sort()
@@ -405,7 +414,7 @@ class BoundaryDataset(Dataset):
         # 划分训练/验证集（与 LabeledDataset 共用同一函数，保证划分一致）
         selected = split_train_val_indices(len(all_samples), train_ratio, seed, split)
         self.samples = [all_samples[i] for i in selected]
-        self.instance_centers = {
+        self.instance_centers = {} if teacher_gt_dir else {
             img_path: labelme_instance_centers(os.path.splitext(img_path)[0] + ".json")
             for img_path, _ in self.samples
         }
@@ -440,6 +449,9 @@ class BoundaryDataset(Dataset):
             }
         """
         img_path, gt_path = self.samples[idx]
+        if self.teacher_gt_dir:
+            from data.teacher_supervision import teacher_sample
+            return teacher_sample(self, img_path, gt_path)
 
         # 1. 读取原始图像（BGR -> RGB）
         image = cv2.imread(img_path, cv2.IMREAD_COLOR)

@@ -1,0 +1,141 @@
+paths:
+  project_root: auto
+rgb_restoration:
+  expected_train_sources: 1000
+  split_policy: all_train
+  holdout_manifest: null
+  selection: null
+  seed: 42
+  image_size: 1024
+  crop_size: 512
+  model:
+    architecture: pixel_diffusion_nafnet
+    width: 32
+    encoder_blocks:
+    - 1
+    - 2
+    - 4
+    middle_blocks: 4
+    decoder_blocks:
+    - 2
+    - 2
+    - 1
+    time_dim: 128
+    num_steps: 16
+    kappa: 0.03
+    eta_start: 0.001
+    schedule_power: 0.3
+  degradation:
+    profile_probabilities:
+    - 0.2
+    - 0.8
+    - 0.0
+    - 0.0
+    blur_sigma:
+    - 0.4
+    - 5.2
+    resample_probability: 0.5
+    resample_scale:
+    - 0.65
+    - 1.0
+    gamma:
+    - 0.8
+    - 1.25
+    exposure:
+    - 0.8
+    - 1.15
+    channel_gain:
+    - 0.95
+    - 1.05
+    illumination_strength: 0.15
+    spatial_blur:
+      enabled: true
+      probability: 0.5
+      grid_size:
+      - 3
+      - 5
+      strength: 1.0
+      levels: 8
+      endpoint_transition:
+        enabled: true
+        probability: 0.5
+        weak_sigma:
+        - 0.6
+        - 1.5
+        strong_sigma:
+        - 4.0
+        - 5.2
+        transition_fraction:
+        - 0.2
+        - 0.5
+        min_region_fraction: 0.05
+  masked_pretraining:
+    epochs: 6
+    start_strength: 0.5
+    patch_size:
+    - 16
+    - 48
+    coverage:
+    - 0.08
+    - 0.16
+    lowpass_sigma:
+    - 6.0
+    - 12.0
+    blend:
+    - 0.65
+    - 0.95
+    continuation_probability: 0.25
+  training_noise: null
+  loss:
+    rgb_weight: 1.0
+    gradient_weight: 0.2
+  train:
+    epochs: 60
+    save_epochs:
+    - 1
+    - 10
+    - 20
+    - 40
+    - 60
+    batch_size: 4
+    num_workers: 4
+    learning_rate: 0.0002
+    min_learning_rate: 2.0e-06
+    weight_decay: 0.0001
+    grad_clip: 1.0
+    amp: true
+    timestep_sampling: terminal_half
+    save_initial_checkpoint: true
+  monitor:
+    samples: 4
+    every_epochs: 5
+    sampling_seed: 314159
+    thumbnail_size: 224
+    roi_size: 256
+    include_first_step: true
+    spatial_blur:
+      enabled: true
+      samples: 4
+      base_sigma: 3.0
+    endpoint_blur:
+      enabled: true
+      samples: 4
+      weak_sigma:
+      - 0.6
+      - 1.5
+      strong_sigma:
+      - 4.0
+      - 5.2
+      transition_fraction:
+      - 0.2
+      - 0.5
+      min_region_fraction: 0.05
+  overfit:
+    samples: 4
+    steps: 800
+    monitor_every: 100
+    learning_rate: 0.0002
+    gate:
+      rgb_l1: 0.8
+      gradient_l1: 0.95
+      mse: 0.8

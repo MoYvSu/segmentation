@@ -1,6 +1,43 @@
-# 冷启动训练复现
+# 训练与推理入口
 
-本目录提供从赛方数据和官方 SAM2 backbone 开始、重新训练当前 `83.94` 主线所需的固定顺序、
+状态更新：2026-11-01。当前部署仍使用旧 **13b3 backend＋9315 D5a＋20a59 NAF**。
+训练配方可执行、训练已经完成、候选获得官方分数是不同证据，不能相互替代。
+
+| 用途 | 推荐入口 | 状态与边界 |
+|---|---|---|
+| 原人工标注＋r8重训配方 | `python train_pipeline.py`，配置`repro/current_pipeline.yaml` | 默认13阶段；尚无这份原GT配方从头完整GPU实跑的记录，不承诺重现原C权重或得分 |
+| 教师32源演习 | 同一入口，配置`repro/teacher_pipeline.yaml` | 监督链跨两段run完成；SSL/D5a导入而未重训；150图用户回分约80.4，候选淘汰 |
+| 原C Torch推理 | `python infer.py --backend torch`，默认即`torch` | 调用既有`tools/infer_compact.py`；默认C，保留两路全图语义及局部N1/NAF/S0/final200 |
+| 全五TensorRT候选 | `python infer.py --backend tensorrt --engine-manifest <清单>` | 调用`tools/infer_accelerated.py`并包含CPU整数读出；150图已完成、下载及本地验收通过，待本包独立回分 |
+| 旧E10a/G4b历史链 | `python repro/train.py` | 仅供下方历史记录，不覆盖当前S-align/V/D5a/R1/NAF三模型链 |
+
+`train_pipeline.py`转发给`repro/pipeline.py`，不改变配置、预算或资产检查。只读命令为：
+
+```bash
+python train_pipeline.py list
+python train_pipeline.py check --code-only
+python train_pipeline.py run --dry-run --config <私有资产映射.yaml> --run-dir outputs/repro_current/preview
+```
+
+`--code-only`不检查数据是否齐全；正式运行使用新的私有run目录，实际输入需提供原32标注、purified GT、
+r8、1000图、原授权SAM64和官方底座，入口不生成或修订GT。默认链已[移除V6及无用缓存](../docs/V6_ELISION_20261101.md)，
+S-align直接取joint固定语义教师；旧15阶段仅在显式`semantic_teacher_source: legacy_v6_e9`时启用。
+SSL新配方batch2是原15000更新的条件性强推断，mask .4是恢复默认值，完整历史seed未固定；
+不能把这些新选择写成已恢复原CLI。详见[当前训练入口](../docs/CURRENT_TRAINING_ENTRY_20261101.md)、
+[实际参数及历史缺口](../docs/TRAINING_RECIPE_20261101.md)和[推理接口](INFERENCE_INTERFACE.md)。
+完整命令、产物位置与独立引擎构建集中在[训练与推理使用指南](../docs/TRAINING_INFERENCE_GUIDE.md)。
+
+[教师链训练结果](../docs/TRAINING_RESULT_TEACHER32_20261101.md)证明工程执行完成；
+[150图回分](../docs/TEACHER32_C150_INFERENCE_20261101.md)为`.7106/.8975`、等权参考80.405，
+低于原全零C的82.660，未采用。它不构成原GT配方或原C从零复现的证据。
+
+## 历史记录：E10a/G4b旧训练入口
+
+以下保留旧`repro/train.py`的配置、流程及当时83.94链记录，不作为当前推荐入口。
+旧SSL命令仍为batch8，与原checkpoint的15000更新存在冲突，见[SSL补证](../docs/SSL_PARAMETER_RECOVERY_20261101.md)。
+旧`--skip-existing`按约定输出文件是否存在跳过，不具备新统一入口的完整身份回执检查。
+
+该历史目录提供从赛方数据和官方 SAM2 backbone 开始、训练当时 `83.94` 链的固定顺序、
 历史配置和预检入口。历史 checkpoint 只用于结果校验，不是冷启动输入。
 
 训练目标链如下：
@@ -18,7 +55,7 @@ LabelMe 标注 ──> purified GT
 
 E10a 与 affinity 分支在 V6 之后互相独立；编排入口为便于核对而顺序执行。
 
-## 目录内容
+### 历史目录内容
 
 ```text
 repro/
@@ -36,7 +73,7 @@ repro/
 服务器的历史文件/运行快照，只把绝对 `project_root` 改为 `auto`；joint-v3 和 V6 额外显式
 设置了当前配置加载器需要的 `base_checkpoint`，目标 checkpoint 与历史命令保持一致。
 
-## 冷启动输入
+### 历史冷启动输入
 
 在仓库根目录准备：
 
@@ -51,7 +88,7 @@ segment-anything-2/                    仓库约定的 SAM2 子模块
 `3.12.3`、PyTorch `2.8.0+cu128`、RTX 4090；PyTorch/CUDA 应按实际服务器驱动安装，不在本目录
 复制第二套依赖文件。
 
-## 使用方法
+### 旧入口使用方法
 
 在仓库根目录运行：
 
@@ -83,7 +120,7 @@ python repro/train.py run \
 `--skip-existing` 只跳过已经生成最终约定产物的完整阶段。某个长训练在阶段内部中断时，先使用
 原训练脚本的 `--resume` 恢复，得到该阶段的最终约定产物后，再让编排器继续下一阶段。
 
-## 固定训练阶段
+### 旧入口固定训练阶段
 
 | 顺序 | 阶段 | 主要产物 |
 |---:|---|---|
@@ -103,7 +140,7 @@ python repro/train.py run \
 V6 不能直接使用 Stage1 边界缓存。必须先由 joint-v3 运行
 `tools/precompute_semantic_boundary.py`，生成 `semantic_boundary` 单线缓存；该步骤已经纳入编排。
 
-## G2 数据与人工确认门槛
+### 历史G2数据与人工确认门槛
 
 G2/G4b 使用无类别 SAM2 几何候选。若 `data/sam2_geometry_g2/` 尚不存在，先生成 64 张候选：
 
@@ -127,7 +164,7 @@ python tools/build_sam2_geometry_dataset.py \
 `data/sam2_geometry_g2/approval.json`，填写审核人和时间并将 `approved` 改为 `true`。
 `repro/train.py` 在该文件通过校验前不会启动 G2/G4b。
 
-## 历史锚点与验收
+### 历史锚点与验收
 
 这些哈希用于比较冷启动结果，不应复制成训练输入：
 
@@ -147,7 +184,8 @@ Stage1-LoRA 当时没有独立 `run_info.json`。其训练链对应 2026-08-04 �
 准备提交可定位到 `d9c83308`，但这里不把该推断写成精确运行提交。joint-v3 和 V6 均有原始
 run snapshot，提交号已经确认。
 
-## 推理接口
+### 当时的推理接口计划
 
-推理复现目前不在本任务范围内。本轮只固定其训练产物输入、参数接口和输出契约，见
-[`INFERENCE_INTERFACE.md`](INFERENCE_INTERFACE.md)；没有复制或包装现有推理实现。
+旧训练入口编写时只固定E10a/G4b的推理产物输入，未创建计划中的`repro/inference.py`。
+当前实际推理使用顶层`infer.py`；旧计划和当前接口分别保存在
+[`INFERENCE_INTERFACE.md`](INFERENCE_INTERFACE.md)，不能把旧计划命令当成现成入口。

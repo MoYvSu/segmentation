@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""NAF补边的二值GT断裂配对；只读取处理后训练实例，不读取模型预测。
+"""NAF二值配对：默认人工处理实例，显式教师实例保留独立来源。
 
 Dual-CGB使用人工断裂GT恢复完整GT。原文没有给出全部断裂算法参数，
 本文件将实际采用的原生像素断裂范围写入identity，不能称为逐项精确复现。
@@ -20,6 +20,9 @@ import torch
 from torch.utils.data import Dataset
 
 from data.boundary_restore import known_instance_boundary, reliable_region
+from data.teacher_supervision import (
+    is_teacher_supervision, load_teacher_instance_source, teacher_boundary_targets,
+)
 
 
 def canonical_sha(value):
@@ -120,10 +123,35 @@ def build_training_plan(rows, crop_size=256, stride=50, augmentations=8,
     return plan
 
 
-def load_processed_binary(gt_path, class_path, boundary_dilation=0, valid_margin=4):
+def load_processed_binary(gt_path, class_path, boundary_dilation=0, valid_margin=4, *,
+                          teacher_boundary_policy=None):
     """直接读取新GT并核provenance；类别只校验合法性，不参与边界生成。"""
     _positive_integer(boundary_dilation, 'boundary_dilation', 0)
     _positive_integer(valid_margin, 'valid_margin')
+    if is_teacher_supervision(gt_path):
+        ids, _, known, unknown, provenance = load_teacher_instance_source(gt_path, class_path=class_path)
+        policy = 'known_neighbors_v1' if teacher_boundary_policy is None else teacher_boundary_policy
+        boundary, valid, geometry = teacher_boundary_targets(ids, valid_margin=valid_margin, policy=policy)
+        if boundary_dilation:
+            kernel = np.ones((2 * boundary_dilation + 1,) * 2, np.uint8)
+            # 新明确分界版本只在原width的dilation=0配方使用，不悄悄扩大0监督域。
+            if policy == 'explicit_separators_v1':
+                raise ValueError('explicit_separators_v1 requires boundary_dilation=0')
+            boundary = cv2.dilate(boundary.astype(np.uint8), kernel).astype(bool) & known
+        if not valid.any():
+            raise ValueError('Teacher source has no reliable known interior')
+        positive = int((boundary & valid).sum())
+        details = dict(provenance, **geometry)
+        details.update(shape=list(ids.shape), teacher_boundary_policy=policy,
+            raw_boundary_pixels=int(boundary.sum()), valid_pixels=int(valid.sum()),
+            boundary_pixels=positive, valid_boundary_pixels=positive,
+            valid_negative_pixels=int((valid & ~boundary).sum()),
+            boundary_policy=policy,
+            ID0=('instance/semantic/affinity endpoints ignore; explicit separators are geometry boundary; other zero ignore'
+                 if policy == 'explicit_separators_v1' else 'ignore'))
+        return boundary.astype(bool), valid, details
+    if teacher_boundary_policy not in (None, 'known_neighbors_v1'):
+        raise ValueError('Explicit teacher boundary policy cannot be applied to manual GT')
     with np.load(gt_path, allow_pickle=False) as payload:
         required = {'instance_map', 'original_covered', 'filled', 'residual_unknown'}
         if not required.issubset(payload.files):
@@ -287,7 +315,8 @@ class BoundaryNAFDataset(Dataset):
                     raise ValueError(f'Processed-source SHA256 differs: {source}/{key}')
                 record[key], record[key + '_sha256'] = str(path.resolve()), actual
             target, valid, metadata = load_processed_binary(record['gt'], record['classes'],
-                boundary_dilation=self.boundary_dilation, valid_margin=self.valid_margin)
+                boundary_dilation=self.boundary_dilation, valid_margin=self.valid_margin,
+                teacher_boundary_policy=cfg.get('teacher_boundary_policy'))
             if 'shape' in row and list(row['shape']) != list(target.shape):
                 raise ValueError('Processed GT shape differs from checked source manifest')
             record.update(metadata)
@@ -329,6 +358,22 @@ class BoundaryNAFDataset(Dataset):
             test_training=False, independent_validation=False,
             policy='processed known including filled; unknown/frame/crop rim/padding ignored; native crop then D4 augmentation',
             limitation='Artificial gap parameters are explicit adaptations because paper does not provide full corruption implementation.')
+        teacher_sources = [r['source'] for r in self.records if r.get('source_kind') == 'model_teacher']
+        if teacher_sources:
+            if len(teacher_sources) != len(self.sources):
+                raise ValueError('NAF target cohort must not silently mix teacher and manual provenance')
+            self.identity.update(target_source_kind='model_teacher', model_predictions_used=True,
+                model_predictions_as_target=True, source_supervision_format='teacher_supervision_v1',
+                teacher_boundary_policy=self.records[0]['teacher_boundary_policy'],
+                target_valid_boundary_pixels=sum(r['boundary_pixels'] for r in self.records),
+                target_valid_negative_pixels=sum(r['valid_negative_pixels'] for r in self.records),
+                policy='teacher positive IDs supervised; ID0/unknown/frame/crop rim/padding ignored; no fabricated manual provenance')
+            if self.identity['teacher_boundary_policy'] == 'explicit_separators_v1':
+                self.identity.update(
+                    boundary_representation='known-known different positive IDs both sides OR certified axis A-0-B separator center',
+                    policy='ID0 instance/semantic/affinity endpoints ignored; certified single-pixel separators supervised as boundary; other zero/frame/crop/padding ignored',
+                    target_separator_pixels=sum(r['separator_pixels'] for r in self.records),
+                    target_geometry_known_pixels=sum(r['geometry_known_pixels'] for r in self.records))
         self.set_epoch(epoch)
 
     @staticmethod

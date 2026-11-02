@@ -1,0 +1,64 @@
+# -*- coding: utf-8 -*-
+# 当前三模型训练链；只定义配方，读取配置不会启动训练或生成GT。
+format: current_training_pipeline_v1
+recipe: joint_semantic_teacher_20261102
+semantic_teacher_source: joint
+paths:
+  project_root: auto
+seed: 20261101
+assets:
+  raw_dir: data/raw
+  unlabeled_dir: data/unlabeled
+  purified_gt_dir: data/purified_gt
+  completed_gt_dir: outputs/experiments/seeded_label_completion_o1/radius_8/derived_maps
+  completed_gt_manifest: outputs/experiments/seeded_label_completion_o1/radius_8/derived_maps/manifest.json
+  sam2_geometry_dir: data/sam2_geometry_g2
+  sam2_source_dir: data/unlabeled
+  sam2_authorization_doc: docs/G1_ABLATION_TRAINING_20260912.md
+  backbone: weights/sam2_hiera_base_plus.pt
+  sam2_repo: segment-anything-2
+  # 留空时，从completed_gt原数组创建本轮训练封装，不修订GT。
+  naf_target_manifest: null
+  monitor_dir: data/raw
+expected:
+  manual_sources: 32
+  unlabeled_sources: 1000
+  sam2_sources: 64
+  backbone_sha256: d0bb7f236400a49669ffdd1be617959a8b1d1065081789d7bbff88eded3a8071
+  sam2_manifest_sha256: 4ed3e2e1fcfd2fa369dd647fc5ce7c869c5bcb7f472e29398ee889b368e40749
+stages:
+  lora_ssl:
+    config: repro/configs/stage1_lora.yaml
+    cli:
+      epochs: 30
+      batch_size: 2
+      lr: 0.0001
+      mask_ratio: 0.4
+      rank: 16
+      alpha: 32.0
+      num_workers: 4
+    # batch2是checkpoint步数强推断，mask .4是默认值；新seed非历史原seed。
+  stage1:
+    config: repro/configs/stage1_lora.yaml
+    overrides:
+      train:
+        process_monitor:
+          enabled: true
+          every_epochs: 10
+          thumbnail_size: 384
+  stage1_boundary:
+    config: repro/configs/stage1_lora.yaml
+  joint:
+    config: repro/configs/stage2_joint_v3.yaml
+  semantic:
+    config: config/train/stage2_semantic_gt_aligned20.yaml
+  affinity:
+    config: config/train/affinity_geometry_g2_skip_v6.yaml
+  d5a:
+    config: config/train/rgb_diffusion_d5a.yaml
+  r1:
+    config: config/train/affinity_balance_mixed.yaml
+    seed: 20260928
+    mixed_view_seed: 20260930
+  naf_train:
+    config: config/train/boundary_width.yaml

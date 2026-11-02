@@ -1,0 +1,46 @@
+# -*- coding: utf-8 -*-
+# 当前完整语义头在原生1024/显式零噪D5a上接续训练；原部署和GT固定。
+_base: ../inference/area_floor_200.yaml
+
+paths:
+  project_root: auto
+
+semantic_native_zero:
+  output_dir: outputs/semantic_native_zero
+  seed: 20261031
+  epochs: 20
+  expected_sources: 32
+  expected_trainable_parameters: 6302010
+  draws_per_source: 4
+  input_size: 1024
+  overlap: 0.25
+  batch_size: 1
+  num_workers: 0
+  learning_rate: 0.00003
+  minimum_lr_ratio: 0.1
+  warmup_epochs: 2
+  weight_decay: 0.0001
+  adam_eps: 0.0001
+  grad_clip: 1.0
+  restoration_noise: explicit_zero_v1
+  augmentation: d4_only
+  train_precision: bfloat16
+  frozen_precision: float32
+  inference_precision: float32
+  minimum_free_gib: 10.0
+  monitor_sources: [train_001, train_173, train_558, train_889]
+  monitor_epochs: [0, 1, 5, 10, 15, 20]
+
+direct_semantic_affinity:
+  semantic_loss:
+    dice_weight: 0.30
+    instance_weight: 0.75
+    core_radius: 3
+    core_min_pixels: 12
+    core_boundary_threshold: 0.20
+    class_balance: true
+    ferrite_weight: 1.0
+    hard_gamma: 0.5
+    hard_floor: 0.50
+    pool_weight: 0.50
+    thin_weight: 1.50

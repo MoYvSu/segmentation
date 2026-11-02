@@ -3,6 +3,15 @@
 This file holds potentially reusable findings that still need validation or
 scope clarification. It is not a chronological task log.
 
+## 20261101-report-figure-displayed-coordinate-alignment
+
+- status: candidate; last_verified: 2026-11-01.
+- scope: 使用同一原图缓存制作多阶段PPT对照图，图片框长宽比各异。
+- finding: 源PNG都取同一1024窗口时，按各自框形居中裁切仍会产生不同的实际显示区域。本例语义横框显示原图y约197至827，边界图显示y为0至1024；文件来源核验与最终版显示视野应分别检查。
+- evidence: 私有素材目录中的`postprocess_build/alignment_fix_receipt.json`记录旧/新可见坐标；`display_alignment_verified.json`逐项核对13张PPT图片，语义与边界PNG与同源缓存逐像素一致。修复只调整图片显示范围，其他幻灯片对象和嵌入图片内容保持一致。
+- reuse_hypothesis: 需要空间对应的阶段图使用同一原图坐标和完整视野，按比例缩放并留白；交付前从实际PPT图片裁切参数计算有效可见原图范围，并配同坐标原图/阶段图板目检。元数据同时记录源裁窗与显示视野。
+- limits: 当前验证覆盖一张真实测试样本及本机PowerPoint渲染；不同模板和软件的裁切、旋转及嵌套组变换需各自核验。保留为素材工作流候选经验。
+
 ## 20261031-boolean-mask-before-large-array-indexing
 
 - status: candidate; last_verified: 2026-10-31.
@@ -510,6 +519,10 @@ scope clarification. It is not a chronological task log.
 - followup_WS_semantic_input_20261030: 同20a59/S0/200、同13源固定NAF及分类概率，仅把WS的128/200语义底图改为统一128，当前9图F计数逐图不变，F均面积却全部下降0.1106%–0.3428%；该改动同时改变两类区域边界带的灰度对比，不能只归因消除了语义界面。独立种子内缩1px则使九图F总像素全部增加，但总F733不变来自两图+1/−1抵消。固定head和raw投票不等于冻结几何、逐图面积或逐实例类别。两组均无稳定原标核／接口定位收益，不据此调目标面积或解释旧高分为错误抵消。证据`docs/SEED_CORE_20261030.md`、私有`output/readout_core/received/`；九图不是全150，GT已见不完整，保持观察项，不晋升AGENTS。
 - followup_readout_identity_20261030: 分层检查不能停在种子身份或最终面积档。K1虽保留种子ID，仍能把原F面积推过末端200门槛，间接触发合并；H0重新生成ID后，须按空间覆盖及双方类别核对，才确认237的两个非超小F预测区合并，而非超小碎块去噪或语义翻转。逐实例精确面积保留私有risk记录，不复制进公开知识条目。种子计数、最终总数、小F面积档、实例身份和类别变化应分别记录；预封ROI未包含该变化位置，补图必须标为后验差异定位，不能混成预封样本或测试真值证据。证据`docs/STRONG_READOUT_20261030.md`，无新增官方收益结论，保留观察项。
 - followup_H0_official_20261030: H0同末端200正式回分两项均略降，等权参考相对C低.080分，FP少94伴TP少11。已见接口覆盖微升、全150实例净少105和precision提高，均未保证官方收益；不能把旧support50到H0的变化全归因取消弱生长。证据见同报告的回分节，保留C、不晋级；只更新该候选观察，不推断弱生长普遍必要或统计显著性。
+- followup_unified_local_semantic_20261031: 同权重统一1024滑窗共享特征双头，12图实际局部恢复/N1/NAF/S0逐值保持，最终F/P翻转仍0.60494%、F814→807，边界差占边界并集17.73%。四源原C和联合U终态exact桥接后，仅换WS语义翻14380像素、仅换末端概率158677、联合168901；不能相加归因、称错误率或外推全150。统一特征只减少前向路径，语义同时改变恢复域/尺度/拼接仍会影响轮廓和分类；未匹配对象须单列。证据`docs/UNIFIED_SLIDING1024_20261031.md`及私有`output/unified1024/received/analysis_v2/`；当前只支持优先查语义工况，不证明头架构或GT必然有错，不否决统一架构，不晋升AGENTS。
+- followup_shared_global_restored_vote_20261031: 同一全零C只将末端raw票替为已有全图恢复语义，12图几何/PNG字节及N1/NAF/S0完全不变、语义头前向24→12，仍出现55F→P/2P→F、250057像素翻转（0.82629%）、F814→761。F汇总均面积约+5.96%完全来自类别成员变化，不能称轮廓改善；少一次前向也没有在本次predict计时体现明确加速。四源复用C旧logit按生产线程重算新票SHA，先原C桥接再新票桥接，各在pre200投票后final200一次，均终态exact，无需重复存浮点缓存。见`docs/RESTORED_GLOBAL_VOTE_20261031.md`及私有`output/restored_vote/received/`；无候选官方分，不把计算复用当数值等价或移植9月回分，不晋升AGENTS。
+- followup_shared_raw_geometry_20261031: 反向只将WS语义改为原图、末端raw概率保持exactC，删全图D5a后12图F/P翻转0.044765%、F814→815；1198稳定对应0整区改类，但外23/24、14个吸收及3个旧小区主去向异相仍须单列。当前geometry仅读语义二值mask且临时类被最终raw票覆盖，故可用C原图概率构造阈值等价±1辅助logit；四源仍须以真实WS调用前输入hash与candidate终态exact闭合，不能声称恢复网络logit或修改投票时机。候选更接近C不等于更准；来源/冻结回执还明确当前S-align语义没针对D5a恢复特征再训，历史适配full/simple虽完成但未采用。见`docs/RAW_SHARED_SEMANTIC_20261031.md`与私有`output/raw_shared/received/`；无候选官方分，不晋升AGENTS。
+- followup_native_semantic_adaptation_20261031: 原生1024＋零噪D5a接续完整语义头20轮/2560步，非语义模块/GT保持，前后五轮训练loss下降20.31%；固定12原生U0→U20仍翻0.757242%，F807→758。另在全图缩1024兼容性对照，同一次新WS的H1 raw票→H1恢复票0.954522%、98完整实例全F→P，三臂ID exact；只换WS保留旧raw票相对C仅0.074746%、稳定1179零改类但外42/44另列。已适应不保证raw/恢复一致，也不能用全图视野代表native训练工况或把更多翻转当更错。全12真实语义GPU＋冻结边界CPU pre200票→final200一次，四C先exact桥接；旧.826294%属于H0/旧几何，不是新几何的头×输入四格。证据`docs/SEMANTIC_NATIVE_ZERO_ANALYSIS_20261031.md`及私有`output/semantic_native_zero/received/`，无新官方分，不晋级、不宣判GT或冻结特征为唯一原因，不晋升AGENTS。
 
 ## 20260925-brightness-change-versus-sensitivity
 
@@ -568,13 +581,15 @@ scope clarification. It is not a chronological task log.
 ## 20260916-checkpoint-carrier-versus-stage-contribution
 
 - status: observation
-- last_verified: 2026-09-16
+- last_verified: 2026-11-01
 - scope: V6边界阶段消融、joint-v3来源及共享encoder/语义兼容性
 - finding: 下游引用某阶段checkpoint，不等于依赖该阶段训练过的所有内容；应逐模块核对实际差异。V6与其joint-v3前身的LoRA和语义权重完全相同，V6特有的边界FPN可以作为独立初始化变量检验。任务头随机重置也不等于上游知识清空，还应核对共享LoRA与固定教师这两条传递路径。
 - evidence: `docs/G2_SKIP_V6_20260916.md`及受忽略的`output/20260916_g2_skip_v6/training_preflight.json`、`lora_config_audit.json`。joint-v3 e88与V6 e9的96个LoRA、36个语义张量相同，LoRA rank/alpha/target_layers相同，28个边界FPN张量不同；保留L几何与E10a时，更换参考来源后的既定验证图最终实例/类别完全一致。
   同目录`joint_v3_role_audit.json`确认Stage1→joint-v3的96个LoRA张量全部改变，joint-v3→E10a全部相同；joint-v3保存配方包含Stage1缓存边界一致性，E10a冷启动则另启固定教师语义蒸馏。常规`unsup_seg_weight=0`不能单独证明没有无标签监督。
 - reuse_hypothesis: 跳过冻结阶段前，先区分checkpoint作为权重载体与该阶段实际贡献，复用完全相同的模块，避免不必要地回退整个encoder或重训语义分支。
 - followup_20260926: 用户要求的头部冷启动不能自动解释为删除Stage1/joint-v3。纯SSL随机双头短链同时切断共享LoRA、几何FPN与固定教师依赖；用户纠正后于e93停止，见`docs/BACKEND_COLD_20260926.md`。保留这些阶段可通过复用其匹配权重实现，并不必然要求重跑上游；若要改变D5a进入上游的时点，须另列实验问题。该短链没有正式回分，不能用停止决定证明任一阶段的必要性。
+- followup_20261101: 当前teacher32入口静态复核：S-align先复制固定语义教师再重置学生，教师仅读语义通道；V从joint边界FPN起步，最终backend不带旧直接边界头，因此V6新训练边界没有本链最终消费者。下游artifact固定e9，V6第10～60轮没有下游权重读取。当前GroupNorm语义路径无BN运行统计buffer，不能从通用reset的BN分支反推当前残留。见`docs/TRAINING_FLOW_TEACHER32_20261101.md`。移除V6的数值桥接尚未执行，未改正在运行的配方；不把旧头随机重置解释成删除LoRA/固定教师知识。
+- followup_20261101_elision: 用户随后授权删除。独立复核发现S-align的BoundaryLoss在freeze_boundary=True时训练/验证边界loss均为0，语义边界缓存实际不读；CPU三步和完整SAM2/本轮真实Stage1 checkpoint CUDA FP16强确定性两步的教师、初态、loss、语义梯度、AdamW、验证/best与RNG逐值相同，边界输出确实不同。默认入口已删V6/semantic_boundary为13阶段；legacy显式保留。原joint不中断，用新身份验证原完成链/同GT资产后接续，已有CUDA仅为实现回归抽查，不是GT质量或完整轨迹等价证明；后续重复CUDA门槛已取消。见`docs/V6_ELISION_20261101.md`，完整后半段与最终部署尚未完成。
 - verification_gap: V已完成同预算120轮、完整部署及用户回报的官方对照，工程删留结论见`docs/G2_SKIP_V6_20260916.md`；仍缺重复训练及完整冷启动复现。接受删去独立边界阶段，不等于所有读取V6文件的载体引用已被替换，也不证明统计等效。
 - limits: 不说明V6边界预训练无用，也不把语义/LoRA相同外推到其他checkpoint或Stage1/SSL特征。
 
@@ -935,6 +950,7 @@ Use this shape:
 - evidence: 私有`runs/naf_sweep/failed.json`保留原核验错误；`recovery_formal_check.json`通过修正后的解析身份及其余全部旧门槛，含1000步采样/LR、严格权重重载、六阶段monitor和四图基线exact；专题`docs/NAF_TRAIN_SWEEP_20261026.md`。
 - reuse_hypothesis: 同时保留声明配置的单变量检查与“用训练器同一冻结解析器解析后的完整配置/identity”检查，不全局放宽字符串/数值比较，也不改旧训练器来迁就核验。完成的训练经全部原门槛复核后再接续，不因元数据误报重训控制。
 - verification_gap: 这里只核实该解析器版本和两字段；其他数值消费者不保证自动转换，不能把任意字符串差异视为数值等价。不晋升AGENTS或改解析规则。
+- followup_native_semantic_20261031: 新接续训练的严格参数合同在GPU更新前再次拒绝JSON经YAML读出的字符串`3e-05`，保留原`guard_smoke_a`失败回执。展开配置改用yaml.safe_dump生成YAML，不放宽固定类型/数值校验；同配方GPU A3/B2接续3的输入、head/Adam/RNG全exact，随后12源e0连续/终态复现通过。见`docs/SEMANTIC_NATIVE_ZERO_20261031.md`及私有`runs/semantic_native_zero/{train_config.json,train_config.yaml,preflight_complete.json}`。新增严格配置在执行更新前核解析后的数值类型；不因旧消费者可float转换就假定任意JSON均能原样读取。
 
 ## 20261027-seed-core-final-filter
 
@@ -978,6 +994,7 @@ Use this shape:
 - verification_gap: 激活平均也改变内容/幅值并丢失子像素信息，不是正式修复；原PixelShuffle分支GAN贡献未独立消融，后继bilinear/ridge配方的GAN对照见下；GPU精度或官方增益未由本探针验证，合成输入不是实际准确率验证，不晋升AGENTS或替换部署。
 - followup_real_RGB_phase_20261029: 冻结D5a恢复RGB＋T8擦断组的两块真实干净256窗口，原输出SHA与固定monitor相同；RGB/T同步移位后只比较中心valid，GT±8带内移1px逆对齐概率MAE0.163–0.230，移16px仅0.0014–0.0036。该模型的2×2棋盘项下降，规则竖向多轨仍在，空间均值RGB也未消除网格；因此单个棋盘统计改善不等于相位稳定或线条更规整。证据`docs/NAF_RGB_ERASURE_20261028.md`终态与私有`output/naf_rgb_erasure/analysis/natural_probe/{complete,phase}.json`。只定位现象，不唯一归因PixelShuffle，也不把均值RGB下缺口峰值增加当真实补边；不晋升AGENTS。
 - followup_width_occupancy_and_multistage_phase_20261029: 同GT法向剖面应拆开高响应占地、外包跨度和分离段数。无RGB平移约束终态的固定train173窗口中，N1占地/跨度均5.96离散采样格；NAF占地2.51、跨度6.41，297/359高度相邻位置为多轨。量化对角法向步长sqrt(2)，不能把采样格称欧氏像素宽。单窗绑平均最后up相位几乎无效，绑全部四级多轨降至86/359，但自然缺口强点3→0；参数SHA不变、移除hook后原前向exact。支持多级相位参与，不支持直接平均部署或唯一归因PixelShuffle；完整B1又把多轨组织成微环，四缓存小F30→81。复用时同步核原浮点输出、位置/方向、GT可信域、共同平移内域及最终读出，不能只比较线宽或棋盘项。证据`docs/NAF_SHIFT_20261029.md`终态、私有analysis/{phase_probe,phase_profile_supplement,stages_shift,complete}.json；已见不完整GT和固定无标签测试不代替官方成绩，不晋升AGENTS。
+- followup_dual_input_belt_topology_20261031: T8＋连续N1终态的强主脊目检更集中，当前4图高阈值像素仅+2.3%，但同款膨胀/细化后骨架+81%、障碍带+64.7%，marker带50–199像素闭合孔64→442，实际pre200小于200实例43→130。原始阈值图孔洞受点阵通向外界影响，旧图可为0，不宜直接当闭环计数；必须分开raw、实际barrier/marker、S0/面积过滤后的实例。最终F总数436→424而小F13→17，少实例不等于去碎。证据`docs/NAF_DUAL_ANALYSIS_20261031.md`及私有六源readout/structure回执；孔洞不一一对应假实例，原标补缺进步也伴保线覆盖下降，尚无官方净收益，不唯一归因GAN/上采样，不晋升AGENTS。
 
 - followup_bilinear_control_20261029: 同原T8擦断1000更新、数据/GT/LR逐步配对，仅四级up换投影＋bilinear，两个真实原生窗的1px逆对齐MAE0.312→0.052、0.112→0.013，棋盘项同步下降；但359同截面多轨308→302，平滑平行轨经原B1变成狭长碎实例，四固定测试小F30→958。自然缺口2→0/161，原强点支持基本保持，四个指定人工分隔仍保住但另一批176点强响应176→165。冻结实际重建项的合成核对中，单线/中间留黑双轨/实心带同loss4.1223e-9；仅证明重建项不约束单连通，不代表GAN总目标等价。上采样能改善相位却不保证唯一主脊及最终拓扑，应分开验收相位、多轨、弱线和完整实例。证据`docs/NAF_RESIZE_20261029.md`及私有`output/naf_resize/analysis/{complete,training_audit,phase_probe,stages_resize,loss_counterexample}.json`；GT不完整/已见、测试无GT且阶段探针仅101，无官方新分，不晋升AGENTS或部署。
 
@@ -1060,6 +1077,7 @@ Use this shape:
 - evidence: `docs/NAF_RGB_RETRY_20261029.md`的启动故障与恢复节；私有`naf_color/train/train.log`在`save_monitor`报`Expected nonempty floating B4HW input`，正式steps/initial/latest均未生成，旧GPU128回执通过。工作树与冻结monitor源码SHA不同。
 - reuse_hypothesis: 按最终冻结快照核验实现与测试版本，并执行正式monitor0和首步保存路径；收到子进程PID与模型可学性短测，应分别标为“已启动”和“训练推进已确认”。新增输入模式还需检查clean/erased与整图monitor是否使用同一输入合同。比较展示元数据时，先声明输入模式迁移，只归一已明确核对的字段，避免把预期的模式名变化误判为训练差异。
 - limits: 这是部署与观测入口覆盖缺口，不是模型学习或RGB方案无效的证据；旧数据/初态/短测可在明确绑定源码差异后复用。恢复验证结果另记实验文档，不直接晋升AGENTS。
+- followup_teacher_schema_20261101: 新教师Dataset/loss与NAF目标预检通过，旧过程图仍硬读人工`original_covered`，会在正式e0报错。只将教师诊断支持域改为`teacher_known`并明确非人工原标，保留r8旧字段；不补造GT字段、不改loss。4项实际Dataset/训练器monitor入口回归及服务器只读真实教师源CPU缩略图通过，GT与监督数组未改。后继代码单独封存，未修改活训练源码。见`docs/TRAINING_NIGHT_AUDIT_20261101.md`；不能将过程图兼容通过写成完整GPU训练完成或教师准确性证据。
 
 ## 20261030-random-initialization-portability
 
@@ -1081,3 +1099,104 @@ Use this shape:
 - followup_fixed_scores_20261030: 固定e5已见参照上RGB总体净少28错，却在大F/F的未校准.5工作点把keep误合43增到133；全F/F AUC近同、大F/F排序略好，等7个keep参照受损的保守预算下merge命中70→88，而等35错误预算为134→132。跨相可分性、组内排序与分数校准应分开；同阈值不等于同风险，总体拟合也不能认证物理假边。两已见细线窗标签相反仅提示监督歧义，不据图重标。证据`docs/BOUNDARY_RELATION_ANALYSIS_20261030.md`及私有fixed_eval；无实际合并或官方增益，不晋升AGENTS。
 - followup_long1000_20261030: 同初态／数据的1000更新配对显示短训单阈值退化不应被当作RGB内在有害：固定.1大F/F maps误合6／命中78，RGB6／110，AUC .96536→.98088；四个预定阶段均有组内排序增量，但固定阈值的错误不随训练单调变化。净增32中前三源占26，小侧200–499仍误合4／11 KEEP；同错误数也会交换错误对象并涉及更大区域。源级自举支持AUC增量，极低错误预算检出差的区间仍跨0；只能支持小样本最终读出诊断，不能认证安全合并或泛化。旧五轮与新长训学习率日程不同，不归因于单独多训785步。证据`docs/BOUNDARY_RELATION_LONG_ANALYSIS_20261030.md`及私有scores／ranking／risk_notes；无实际合并或官方分数，不晋升AGENTS。
 - followup_actual_readout_20261030: 相同.1固定13源实际合并后，当前9图F733→maps565／RGB564，F总像素变化<.05%，聚合均面积约+30%主要来自少实例，不能当赛题面积项改善。已接受GT仅支持两训练图中3／4个MERGE，余者IGNORE／无标签，故训练排序增量不覆盖实际应用的大量未知关系。全缝未见仅各1次，观测范围不足不是这轮大幅合并的主要解释；不应把合理架构风险直接当实测归因。真实patch tensor／零操作／ID类别／safe-fill工程合同通过仍不构成净收益认证；保留显式推理候选而默认不晋级。证据`docs/BOUNDARY_RELATION_READOUT_20261030.md`及私有actual_summary／context_risk／全缝图库；无官方增益证据，不晋升AGENTS。
+
+## 20261031-stable-match-selection-and-phase-flips
+
+- status: observation; last_verified: 2026-10-31.
+- scope: 无标签预测之间的稳定实例对应、像素翻转与末端小区接管诊断。
+- finding: 双向覆盖至少90%的稳定对应会排除被合并的小区；该集合零翻类不能扩大成全部对象零改类。全图去噪声12源中1220稳定对应零翻类，但169/302原预测P小区200/205像素分别有199/204像素被F接管，另各1像素成背景，最终P409→407；F/P像素翻转1192，像素加权0.00393887%。
+- evidence: `docs/GLOBAL_ZERO_20261031.md`；私有`output/global_zero/received/analysis/summary.json`、两份结果PNG/类别及旧控制ZIP逐文件SHA核验。不同阶段/样本分母均保留，未使用测试GT。
+- reuse_hypothesis: 稳定对应统计之外同时追查未入选对象的空间去向、背景进出和接管类别；显著拆并阈值下的“合并”也可能只是邻区几十像素重分配，不直接命名为整粒合并。
+- limits: 这些是预测变化而非真值错误或官方分数；本次同seed独立重复一致不等于换seed或跨硬件一致，不晋升AGENTS。
+- followup_official_zero150_20261031: 同一全零150包（d484e9e1…aee30a5，TP+FP15666与逐JSON计数一致）获用户转报.7462/.9070、TP/FP/FN10773/4893/2295；旧带噪C为.7461/.9070、10770/4901/2298。按所报四位小数等权仅+.005分，支持本部署取消推理噪声没有实用评分损失，不因差异微小而要求保留注入。该证据不等于输出不变，不证明去掉D5a、WS语义或统一滑窗的收益；包归属按上下文/计数，未取得平台SHA回执。见`docs/GLOBAL_ZERO_PACKAGE_20261031.md`首节与私有`output/zero_full/score_20261031.json`；不泛化所有噪声/TTA配方，不晋升AGENTS。
+
+## 20261031-production-mock-retains-native-arrays
+
+- status: observation; last_verified: 2026-10-31.
+- scope: `infer_boundary_rgb.py`长批次推理中跨图存活的`patch.object(..., side_effect=...)`。
+- finding: MagicMock默认保留调用参数引用；decode_reflect持有semantic/N1两份float32图，revote_instances持有uint16实例图和float32 raw图，合计至少14×累计原图像素字节。138图336919392像素对应约4.393GiB参数引用；本次RSS随图数上升，最终峰约7.36GiB，退出patch上下文后释放，模型/输出验收通过。
+- evidence: `tools/infer_boundary_rgb.py:343`及回调入参；`docs/GLOBAL_ZERO_PACKAGE_20261031.md`；私有`output/zero_full/audit/inference_guard.json`记录实际RSS峰7903608832字节、guard/worker exit0；三尺寸清单固定且无训练。
+- reuse_hypothesis: 大图长批次需区分模型/单图临时峰与测试替换工具保存调用历史的累计保留。可另做`patch(new=普通函数)`与旧回调的最终输出兼容核验，再移除生产调用历史；不在活任务中注入reset_mock或直接放宽资源守卫。
+- limits: 本次没有修改封存推理代码，内存估计不覆盖所有临时分配/碎片；不把完成一次138图外推为任意批次安全，不晋升AGENTS。
+
+## 20261031-cpu-sigmoid-thread-replay
+
+- status: observation; last_verified: 2026-10-31.
+- scope: 封存float32语义logit与CPU sigmoid概率缓存的逐值重算；当前AVX512、torch2.8.0+cu128服务器。
+- finding: 正式入口configure_runtime将torch线程数设为4，会覆盖外围worker的单线程设置。分析使用1线程时，四份缓存中226仅1像素相差1 ULP（1.490116119e-08），阈值掩码差0；按报告中的4线程重算四份全部exact，semantic与概率各自同时匹配两份生产哈希。不能把该差异当成额外噪声或缓存错配，也不能忽略线程条件就承诺CPU浮点逐位一致。
+- evidence: `docs/UNIFIED_SLIDING1024_20261031.md`及私有`runs/unified1024/sigmoid_diag/summary.json`；原`analysis/`失败回执保留，独立诊断guard exit0，RSS峰约594MiB，没有模型前向或CUDA初始化。
+- reuse_hypothesis: 缓存重放先核真实运行时线程数及原始数组哈希；需要精确重算时临时对齐生产线程后恢复分析预算，保留最终实例和类别exact门槛。不能用无依据allclose掩盖差异，更不能为重算差异重跑或改写封存预测。
+- limits: 只证明本环境此算式的线程数关联，未定位底层kernel分块，不推广为所有CPU算子/版本必然有差异，不晋升AGENTS。
+
+## 20261101-teacher-watershed-zero-has-separate-supervision-domains
+
+- status: observation; last_verified: 2026-11-01.
+- scope: 当前全零C/NAF/S0/final200在固定32训练源上的硬实例教师监督，非所有模型的零像素规则。
+- finding: 全32原生已知异ID直接邻接为0；若把全部teacher ID0当几何未知，原NAF正目标为0，只剩137107696个负点。实例/语义/affinity端点未知与明确分界线的边界监督域须分开。显式轴向A-单像素0-B且A!=B派生几何分界、保持ID/class数组exact后，原margin4下恢复1932287个有效正点；宽0/同ID洞仍ignore。
+- evidence: `docs/TEACHER_C32_REHEARSAL_20261101.md`；私有`output/teacher_c_rehearsal_20261101/{teacher_gt_receipt,teacher_target_check,gpu_training_preflight}.json`。教师manifest 42485960…47799、训练合同44ba6f5a…5e1c0；240 CPU与实际batch8 CUDA前后向通过，另NAF小微批经原容差侵蚀仍有18正点/有限非零梯度。
+- reuse_hypothesis: 转换最终watershed PNG为训练目标前，先核原生与实际网格same/different及边界loss真正收到的正负点，分别记录语义known、几何known与明确分界线来源；不能将预测0直接当背景，也不能用原位填0或伪造人工filled元数据绕过目标缺失。
+- limits: 单组教师蒸馏尚在训练，分歧/有效监督不证明物理正确、泛化或官方收益；轴向规则可能漏斜线/交汇点，不推广为任意宽缝修补，不晋升AGENTS。
+
+## 20261101-zero-inference-may-retain-unused-resource-gates
+
+- status: observation; last_verified: 2026-11-01.
+- scope: 当前独立infer_zero/compact C复用旧infer_semifinal源码清单门禁。
+- finding: 数值路径已全零，旧local_module_sources仍硬要求CUDA噪声.cu/.ptx，导致独立源码包0图退出。只给全零入口关闭未使用噪声资源校验、保留旧带噪默认门禁后，不含这些资源的冻结源码包完成32图；未改变网络或最终读出算术。
+- evidence: `tools/infer_semifinal.py::local_module_sources`、`tools/infer_zero.py::run`与`tests/test_infer_zero.py`新增缺资源合同；私有teacher首次失败log与teacher_v2/generation_complete.json，见上述训练记录。
+- reuse_hypothesis: 简化推理时同时检查运行期资源清单、协议元数据和数值调用，CPU替身通过不代表独立打包闭包通过；移除无用依赖须绑定实际零噪路径，不能放宽仍注噪的旧路径。
+- limits: 仅资源门禁与C32证据，不证明任意环境/算式跨机器逐位相同，不晋升AGENTS。
+
+## 20261101-training-source-manifest-is-not-portable-runtime-closure
+
+- status: observation; last_verified: 2026-11-01.
+- scope: 从当前教师重训封存源码建立独立C流程提交工程。
+- finding: 训练归档646文件清单不含作为外部软链接的SAM2包，不能直接当完整交付闭包。构建期复制真实SAM2源码/config/LICENSE成普通文件、独立绑定三模型与全零配置后，同一提交入口从异地cwd、无效外部项目根完成原C单图最终字节回归及新模型三尺寸GPU预检。OpenCV实际发行包是headless contrib，不能仅按另一个包名是否存在判断细化能力。
+- evidence: `docs/TEACHER32_C150_INFERENCE_20261101.md`；私有`output/teacher32_c150_20261101/{prepared,preflight_complete,launch_receipt}.json`，新工程manifest 694文件，旧C包固定d484e9e1…aee30a5。完整150已后台启动，尚未验收。
+- reuse_hypothesis: 训练源清单与独立推理依赖闭包分别封存；查真实外链目标和运行能力，入口在包外cwd与不依赖原项目根条件下预检。公开全零配置及报告明确零噪，不把旧协议元数据和未调用CUDA资源变成门槛。
+- limits: 此处预检不是完整150结果、跨机精确复现或新模型提分；保留训练快照与构建失败记录，不放宽实际模型结构/文件SHA校验，不晋升AGENTS。
+
+## 20261101-small-checkpoint-placement-exception-grew-into-full-pipeline
+
+- status: observation; last_verified: 2026-11-01.
+- scope: 当前AutoDL容器上由小语义头增量实验转为15阶段教师GT全链训练的存储选择。
+- finding: tmp接近10GiB预留线时，小语义头实验采用系统盘seg-local-artifacts例外；后续整链未经重新说明延续该路径，生成1.95GiB边界缓存，本run达2.32GiB。启动仅核所选盘free>12GiB，无法验证符合项目tmp/runs分层。官方同时把系统盘/autodl-tmp列为本地快盘，例外没有速度优势证据。
+- evidence: `docs/SEMANTIC_NATIVE_ZERO_20261031.md`、`docs/SEMANTIC_NATIVE_RANDOM_20261031.md`的placement历史；`config/README.md`与`docs/STORAGE_MAINTENANCE_20261030.md`的tmp/runs约定；`docs/TEACHER_C32_REHEARSAL_20261101.md`及私有storage_snapshot_20261101.json的实际挂载/容量/du。官方https://www.autodl.com/docs/env、https://www.autodl.com/docs/fs/ 于2026-11-01查阅。
+- reuse_hypothesis: 训练范围从小增量变为整链时，重新核输出的真实挂载、分阶段缓存/权重增长和各盘预留，不能把旧临时路径或单一剩余空间检查当成存储分类依据；归位应保留旧身份与明确路径映射，不能运行中盲搬。
+- limits: 未做基准测速，不主张root必然比tmp慢；本次只读检查，未迁移/删除文件或更改正在运行训练，不晋升AGENTS。
+- followup_20261101_user_exception: 用户后来明确“就在root干完…后面统一调整”，该本轮指令优先，不再迁移当前训练。此消息前已完成27个结束旁支载荷的可逆FS冷存，2.51GiB，原路径保留链接并逐SHA核验；停止新增迁移，不额外搬回。不能将这次用户例外推广成全局root默认，见V6_ELISION记录和私有冷存回执。
+
+## 20261101-cudnn-deterministic-is-not-whole-training-exact
+
+- status: observation; last_verified: 2026-11-01.
+- scope: 当前SAM2/S-align highres_v1、实例平衡语义loss，单4080 SUPER、CUDA FP16核验。
+- finding: 普通seed_everything仅设cuDNN deterministic/benchmark。同配置两独立进程的教师/学生初态exact，但实例loss和更新本身有微差；删除V6的首轮GPU比较不能据此判为行为改变。只在核验进程开torch.use_deterministic_algorithms(True,warn_only=False)及CUBLAS_WORKSPACE_CONFIG后，两carrier的两步loss/梯度/AdamW/val/RNG均exact；正式训练数值设置未改。
+- evidence: `docs/V6_ELISION_20261101.md`；私有`gpu_same_control.json`、初次GPU失败stdout及`gpu_strict_report.json`。当前semantic_training含scatter_add求和；PyTorch官方算子与确定性说明链接在该文档。
+- reuse_hypothesis: 核验阶段精简时先比较同控制重复，逐层分开教师/初态、loss、梯度和更新；以强模式隔离数值顺序，保留失败与诊断证据，不能放宽allclose掩盖或把诊断开关偷偷带进正式训练。
+- limits: 128合成输入/真实Stage1 checkpoint两步，不代表完整1024训练、跨机或最终输出逐bit复现；未把某一kernel认定为唯一原因，不晋升AGENTS。
+
+## 20261101-compiled-float-execution-needs-final-output-control
+
+- status: observation; last_verified: 2026-11-01.
+- scope: 当前C全零链、同新三权重与FP32/原TF32配置，torch2.8 Inductor default、单4080 SUPER、三原生尺寸。
+- finding: 模块编译成功、权重state不变和同机重复稳定不保证与普通版最终输出相同。三图两轮编译输出相互byte exact，普通两轮与既有包也exact，但编译相对普通版F/P像素翻转0.01446%，452个稳定对应中1个P→F。模块1.09–1.53倍短测只转化为整图predict省5.61%，因为未编译CPU读出仍占较大部分。
+- evidence: `docs/TORCH_COMPILE_TEACHER32_20261101.md`；私有`output/compile_teacher32_20261101/complete.json`、`verification.json`、`trial.log`，694份源/模型文件逐SHA未变。预热与计时结束计数器相同（23 unique graph），计时段未新增编译；预热中实际记录相同shape的不同stride、NAF尾batch引发额外签名，bool(Tensor)检查保留图中断。
+- reuse_hypothesis: 编译优化对照应分开首次编译、稳定网络/整图时间，并用普通重复控制、编译重复控制及最终分区/类别比较定位变化；输入签名不仅核shape，也核stride、inference_mode及TF32上下文。当前禁随机预测链可在原工况下于禁令作用域之外预热实际签名，保持实际预测的零噪声禁令不变。
+- limits: 未测其它编译模式、所有150图尾batch、独立进程缓存或跨机器；没有测试GT/官方分数，不认定变化为错误或增益，也不将观察直接晋升AGENTS。编译器内部测试张量与推理噪声注入分开记录，不能因编译而重新引入噪声。
+
+## 20261101-integer-readout-scan-elimination
+
+- status: observation; last_verified: 2026-11-01.
+- scope: 原已评分全零C，分水岭后的面积过滤和稳定降序重编号；只替换finish_watershed。
+- finding: 逐ID对整图反复mask是实测可省开销；改为一次整数计数/查表，同时保持原ID cap输入、原cap函数和同面积排序，可保住最终输出。旧三权重三原生尺寸两轮整图predict7.6115→6.1406秒/图（省19.32%），五轮PNG/类别均与原评分包byte exact，网络/种子/高程/WS/final200审计也exact。
+- evidence: `docs/INFERENCE_SPEED_20261101.md`；61项相关CPU测试，私有`output/inference_speed_20261101/cpu_integer_v2/{complete,verification}.json`，冻结旧源码封条7af620dc不变。公开候选`tools/infer_fast_readout.py`仅局部换函数并明确候选审计，旧默认入口未改。
+- reuse_hypothesis: 不先把整个后处理改写为C++，先profile整数逐区全图扫描，利用精确整数计数和LUT映射；同时保留背景、正ID1、稀疏ID、面积门槛、稳定tie-break及cap重计数对照。浮点raw均值投票另处理，不能把整数归约等价推广到浮点归约顺序。
+- limits: 只验证同机三图两轮稳态及局部合成/真实WS合同，未跑全150或跨机计时；合成阶段9–27倍不能当整图倍率，不能据不变输出主张准确率提升或晋升AGENTS。原cap对极端稀疏大ID的内存行为未顺带修改。
+
+## 20261101-static-architecture-values-in-dynamic-ONNX-export
+
+- status: observation; last_verified: 2026-11-01.
+- scope: PyTorch2.8 legacy ONNX17→TensorRT10.12.0.36，旧C Hiera固定1024、NAF动态batch1–16。
+- finding: 动态batch导出可误将固定通道的LayerNorm normalized_shape识别为动态Gather/ListConstruct而失败。导出前逐层从原weight长度得到Python常量，再临时调用相同permute/F.layer_norm/eps与参数，真实NAF B16原/适配logits逐值exact，且实际engine B1/10/15/16均运行有限。Hiera bicubic不被TRT10.12 Resize支持时，固定1024下可保留原函数精确预计算位置常量，不换插值算法或原模型buffer。
+- evidence: `docs/FULL_ACCELERATION_20261101.md`；私有`output/full_accel_20261101/build_complete.json`、`trial_complete.json`与服务器原build/resume失败日志、常量适配源码。原权重/source封条保持；整合入口按role严格核engine来源state与文件SHA，模型对象/命名不改。
+- reuse_hypothesis: 导出失败先区分“架构常量被符号化”和真实动态计算，不为导出盲目改数学算子；将常量固定在导出wrapper作用域并验证原值一致，退出恢复。目标API返回值须核实实际语义：本TRT的profile.set_shape返回None，应核get_shape及profile有效性，不能assert其返回bool。实际动态batch边界仍要GPU检查。
+- limits: 仅该版本/固定1024位置网格与固定NAF通道，不能推广任意分辨率/权重或跨GPU逐位保证；整合短测重复一致不证明与原输出完全相同，精度另待黑盒。不将一次适配或API差异晋升AGENTS。

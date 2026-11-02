@@ -86,11 +86,15 @@ class OffsetGeometryDataset(Dataset):
         center_max_sigma: float = 8.0,
         cache_in_memory: bool = False,
         completed_gt_dir: str | Path | None = None,
+        teacher_gt_dir: str | Path | None = None,
     ):
         self.data_dir = Path(data_dir)
         self.completed_gt_dir = (
             Path(completed_gt_dir) if completed_gt_dir is not None else None
         )
+        self.teacher_gt_dir = Path(teacher_gt_dir) if teacher_gt_dir is not None else None
+        if self.teacher_gt_dir is not None and self.completed_gt_dir is not None:
+            raise ValueError("teacher and manual-completion geometry targets are mutually exclusive")
         self.image_size = int(image_size)
         self.output_grid = int(output_grid)
         self.center_sigma_scale = float(center_sigma_scale)
@@ -104,7 +108,7 @@ class OffsetGeometryDataset(Dataset):
         self.samples = [
             path for path in sorted(self.data_dir.iterdir())
             if path.suffix.lower() in extensions
-            and path.with_suffix(".json").is_file()
+            and (self.teacher_gt_dir is not None or path.with_suffix(".json").is_file())
             and (not requested or path.stem in requested)
         ]
         if requested:
@@ -114,6 +118,11 @@ class OffsetGeometryDataset(Dataset):
                 raise FileNotFoundError(f"requested labeled samples missing: {missing}")
         if not self.samples:
             raise ValueError(f"no labeled samples in {self.data_dir}")
+        if self.teacher_gt_dir is not None:
+            for path in self.samples:
+                for suffix in ("_gt.npz", "_class.json"):
+                    if not (self.teacher_gt_dir / (path.stem + suffix)).is_file():
+                        raise FileNotFoundError(f"requested teacher GT missing: {path.stem}")
         if self.completed_gt_dir is not None:
             missing = [
                 path.stem for path in self.samples
@@ -142,7 +151,12 @@ class OffsetGeometryDataset(Dataset):
             raise FileNotFoundError(image_path)
         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         image_lb, _, _, _ = letterbox(image_rgb, self.image_size)
-        if self.completed_gt_dir is None:
+        if self.teacher_gt_dir is not None:
+            from data.teacher_supervision import load_teacher_instance_source
+            gt_instances, _, _, unknown, _ = load_teacher_instance_source(
+                self.teacher_gt_dir / f"{image_path.stem}_gt.npz", image.shape[:2])
+            uncovered_pixels = int(unknown.sum())
+        elif self.completed_gt_dir is None:
             gt_instances, _, audit = load_labelme_instances(
                 image_path.with_suffix(".json"), image.shape[:2]
             )
@@ -172,7 +186,7 @@ class OffsetGeometryDataset(Dataset):
             "valid_content": torch.from_numpy(valid_content).unsqueeze(0),
             "instance_map": torch.from_numpy(geometry_map.astype(np.int64)),
             # 旧人工缝隙可供历史实验使用；补缝后的 unknown 永不作为负连接。
-            "uncovered_boundary_source": torch.tensor(self.completed_gt_dir is None),
+            "uncovered_boundary_source": torch.tensor(self.completed_gt_dir is None and self.teacher_gt_dir is None),
             "image_name": image_path.name,
             "instance_count": int(len(np.unique(geometry_map)) - 1),
             "uncovered_pixels": uncovered_pixels,

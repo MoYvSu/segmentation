@@ -165,6 +165,12 @@ class BoundaryNAFRealDataset(BoundaryNAFDataset):
             diagnostic_gap_definition='valid GT positive farther than 2 native pixels from input skeleton; not artificial erasure',
             policy='unchanged processed GT/valid and source-balanced native/D4 plan; no GT mask applied to input',
             limitation='Training sources seen; N1 prediction errors paired with recorded GT, not independent correctness.')
+        if self.target_identity.get('target_source_kind') == 'model_teacher':
+            self.identity.update(model_predictions_as_target=True, target_source_kind='model_teacher',
+                policy='student N1 input paired with frozen teacher instances; ID0 ignored; no manual target provenance',
+                limitation='Self-distillation on seen training sources; teacher errors are not independent GT.')
+            if self.target_identity.get('teacher_boundary_policy') == 'explicit_separators_v1':
+                self.identity.update(policy='student N1 input; teacher boundary includes certified A-0-B center separators; ID0 semantic/affinity endpoints ignored; other zero/frame/crop/padding ignored')
 
     def __getitem__(self, index):
         draw = int(index)

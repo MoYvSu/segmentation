@@ -64,3 +64,14 @@ tmp/musam_oracle_smoke/
 .claude/settings*.json
 # 本地赛题PDF保留原位，不纳入版本历史。
 /data/低碳钢金相图像无监督相区分割.pdf
+/submmit_requirement/*.pdf
+
+# 独立提交源码的本地数据、模型、训练输出及编译产物。
+/submission/AIC-2026-59388388-代码与数据/data/
+/submission/AIC-2026-59388388-代码与数据/runs/
+/submission/AIC-2026-59388388-模型文件/
+*.engine
+*.onnx
+
+# 最终独立源码保留随包SAM2代码与许可证；根目录外部安装副本继续忽略。
+!/submission/AIC-2026-59388388-代码与数据/training/source/segment-anything-2/

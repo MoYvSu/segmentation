@@ -1,0 +1,5 @@
+# 可选GPU加速依赖：在既有PyTorch2.8.0+cu128、Python3.12环境的独立venv中安装。
+# 基础依赖沿requirements.txt；不在此重装或升级现有PyTorch/CUDA。
+--extra-index-url https://pypi.nvidia.com
+tensorrt-cu12==10.12.0.36
+onnx==1.19.0

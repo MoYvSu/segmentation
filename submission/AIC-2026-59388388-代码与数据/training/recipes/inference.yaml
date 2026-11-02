@@ -1,0 +1,8 @@
+affinity_deployment:
+  fusion_mode: gated
+  distance2_weight: 0.5
+  distance4_weight: 0.25
+  support_threshold: 0.2
+  support_temperature: 0.05
+  short_reduction: top2
+  short_softmax_temperature: 0.15

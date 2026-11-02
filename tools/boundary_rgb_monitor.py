@@ -11,7 +11,7 @@ import cv2
 import numpy as np
 import torch
 
-from tools.boundary_naf_monitor import _fixed_controls, original_view, real_pair_metrics
+from tools.boundary_naf_monitor import _fixed_controls, diagnostic_support_kind, original_view, real_pair_metrics
 from tools.boundary_restore_monitor import panels, _heat, _overlay, paired_metrics, zoom_box
 from tools.boundary_restore_readout import tiles, _weights, _probability, evaluate_frozen_readout
 from utils.boundary_input import input_normalization_settings, normalize_boundary_input
@@ -275,6 +275,8 @@ def save_monitor(model, config, output, step, dataset, *, force_full=False, sour
             pair_indices += [index for index in extra_indices if index not in pair_indices]
         for index in pair_indices:
             sample = dataset[int(index)]
+            support_kind = diagnostic_support_kind(dataset, sample)
+            teacher_target = support_kind == 'teacher_known'
             source = sample['input_boundary'][0].numpy()
             raw_source = sample.get('raw_input_boundary', sample['input_boundary'])[0].numpy()
             target = sample['target'][0].numpy()
@@ -293,18 +295,19 @@ def save_monitor(model, config, output, step, dataset, *, force_full=False, sour
                 clean_input = clean_model_input(sample, input_mode=inf['input_mode'])
                 clean_prediction = model(clean_input[None].to(device))[0, 0].detach().float().cpu().numpy()
                 erasure_diagnostic = _erasure_pair_diagnostics(sample, prediction, clean_prediction, target, valid)
+            support = original_view(dataset, sample)
             diagnostic, noise = real_pair_metrics(raw_source, target, prediction, valid,
-                                                   original_view(dataset, sample))
+                                                   support, support_kind=support_kind)
             if normalized:
                 normalization_diagnostic, _ = real_pair_metrics(clean_source, target, prediction, valid,
-                                                                 original_view(dataset, sample))
+                                                                 support, support_kind=support_kind)
                 diagnostic.update({'normalized_' + key: value for key, value in normalization_diagnostic.items()})
             rgb = _sample_rgb({'rgb': sample.get('image', sample['rgb'])})
             cells = [('RGB / training source', rgb)]
             conditioning_rgb = _sample_rgb(sample) if cfg.get('restored_rgb_manifest') else None
             if conditioning_rgb is not None:
                 cells.append(('D5a RGB / model condition', conditioning_rgb))
-            cells.extend([('Processed GT', _heat(target)),
+            cells.extend([('Frozen teacher boundary target' if teacher_target else 'Processed GT', _heat(target)),
                      ('Real N1 binary T', _heat(raw_source))])
             if erased_training:
                 cells.extend([('Clean standardized T', _heat(clean_source)),
@@ -319,13 +322,14 @@ def save_monitor(model, config, output, step, dataset, *, force_full=False, sour
                 array[~valid] = 96
             panels(folder / f'pair_{int(index):03d}.jpg',
                    f'{sample["source"]} | step {step} | fixed draw {index}', cells, width,
-                   'Seen training GT; gray ignored; native pixels and aligned RGB/T; no independent accuracy claim.')
+                   'Seen frozen teacher target; teacher-known support; gray ignored; no manual GT or independent accuracy claim.'
+                   if teacher_target else 'Seen training GT; gray ignored; native pixels and aligned RGB/T; no independent accuracy claim.')
             artificial_focus = sample['artificial_gap_mask'][0].numpy() > .5 if erased_training else None
             focus = artificial_focus if erased_training and np.any(artificial_focus & valid) else gap
             (x, y, x1, y1), label = zoom_box(target, valid, focus, noise, side=128)
             if erased_training and np.any(artificial_focus & valid):
                 label = 'Artificial gap / fixed data-only location'
-            local = [('RGB', rgb[y:y1, x:x1]), ('GT', _heat(target[y:y1, x:x1])),
+            local = [('RGB', rgb[y:y1, x:x1]), ('Teacher target' if teacher_target else 'GT', _heat(target[y:y1, x:x1])),
                      ('Raw input T' if normalized else 'Input T', _heat(raw_source[y:y1, x:x1]))]
             if conditioning_rgb is not None:
                 local.insert(1, ('D5a RGB', conditioning_rgb[y:y1, x:x1]))
@@ -342,6 +346,10 @@ def save_monitor(model, config, output, step, dataset, *, force_full=False, sour
                 f'{label} | {sample["source"]} | step {step}', local, width)
             rows.append(dict(kind='fixed_training_pair', source=sample['source'], draw=int(index),
                 meta=sample['meta'], **diagnostic, **paired_metrics(raw_source, target, prediction, valid, gap, noise)))
+            if teacher_target:
+                rows[-1].update(target_source_kind='model_teacher', diagnostic_support_mask='teacher_known',
+                    diagnostic_support_is_manual_original=False,
+                    noise_interpretation='teacher_known_input_farther_than_8px_from_frozen_teacher_target')
             if erased_training:
                 rows[-1].update(erasure_training=True, erasure=erasure_diagnostic,
                     monitor_group='common_control' if index in settings['pair_indices'] else 'erasure_extra',

@@ -1,0 +1,360 @@
+paths:
+  project_root: auto
+  output_dir: outputs/stage1
+sam2:
+  model_version: sam2_hiera_base_plus
+  config_file: configs/sam2/sam2_hiera_b+.yaml
+  device: cuda
+  freeze: true
+  sam2_repo_path: segment-anything-2
+decoder:
+  fpn_channels: 256
+  num_classes: 2
+  dropout: 0.1
+  use_bn: true
+  boundary_refine: false
+  center_head: false
+data:
+  image_size: 1024
+  crop_size: 512
+  center_sigma: 4.0
+  erode_pixels: 5
+  dist_scale_factor: 10.0
+  classes:
+    0: pearlite
+    1: ferrite
+  train_ratio: 0.8
+  seed: 42
+  batch_size: 4
+  num_workers: 8
+  augmentation:
+    horizontal_flip: true
+    vertical_flip: true
+    rotation: true
+train:
+  learning_rate: 0.00015
+  weight_decay: 0.0001
+  epochs: 100
+  warmup_epochs: 25
+  grad_clip: 1.0
+  amp: false
+  focal_gamma: 2.0
+  focal_alpha: 0.75
+  boundary_alpha: 3.0
+  center_weight: 0.0
+  center_gamma: 2.0
+  seg_dice_weight: 0.3
+  composite_sem_weight: 0.2
+  composite_boundary_weight: 0.8
+  save_checkpoints: true
+boundary:
+  gt_dir: data/purified_gt
+  purify_erode_radius: 2
+  purify_dilate_width: 2
+  purify_canny_low: 30
+  purify_canny_high: 100
+  edt_scale_factor: 10.0
+  edt_weight_floor: 1.0
+  edt_weight_ceil: 4.0
+inference:
+  output_dir: outputs/20260919_unified_alignment/deployment
+  threshold: 0.5
+  min_instance_area: 50
+  max_instance_id: 65535
+  boundary_threshold: 0.65
+  boundary_logit_scale: 1.0
+  sem_edge_boost_alpha: 0.0
+  sem_edge_merge_weight: 0.0
+  sem_edge_mode: valley
+  sem_edge_smooth: 1.0
+  tta: false
+  quality_aware:
+    enabled: false
+    weak_min_flags: 2
+    thresholds:
+      brightness_low: 0.58
+      contrast_low: 0.14
+      sharpness_low: 0.02
+      sharpness_critical: 0.008
+      color_cast_high: 0.04
+    enhanced_weight: 0.35
+    enhanced_tta: false
+    boundary_threshold_offsets:
+      standard: 0.0
+      weak: -0.02
+    boundary_threshold_limits:
+    - 0.25
+    - 0.5
+    enhance:
+      white_balance: true
+      white_balance_gain_limit: 0.12
+      gamma: true
+      target_brightness: 0.65
+      gamma_min: 0.75
+      gamma_max: 1.25
+      clahe: true
+      clahe_clip: 1.5
+      unsharp: true
+      unsharp_sigma: 1.0
+      unsharp_amount: 0.35
+  watershed_dilate_width: 1
+  bridge_width: 1
+  marker_border_seal_width: 2
+  marker_boundary_low_threshold: 0.45
+  marker_boundary_reconstruction_steps: 8
+  semantic_vote_mode: probability_mean
+  semantic_vote_erode_width: 0
+  semantic_vote_threshold: 0.5
+  checkpoint_stage: stage2
+  stage1_checkpoint: outputs/stage1/best_model.pth
+  stage2_checkpoint: outputs/stage2_v6/best_model_stage2.pth
+  center_seeds: false
+  center_threshold: 0.25
+  center_nms_kernel: 9
+  marker_partition_restore:
+    enabled: false
+lora:
+  enabled: true
+  rank: 16
+  alpha: 32.0
+  target_layers:
+  - attn.qkv
+  - attn.proj
+  lr_ratio: 2.0
+  init_from: ''
+  freeze: true
+post_process:
+  interpolate_mode: bilinear
+  align_corners: true
+  connectivity: 8
+  min_noise_area: 50
+  save_visualization: false
+semi_supervised:
+  base_checkpoint: outputs/stage2_v6/best_model_stage2.pth
+  unlabeled_dir: data/unlabeled
+  output_dir: outputs/stage2
+  init_from_checkpoint: ''
+  ema_decay: 0.999
+  adaptive_ema: true
+  boundary_teacher_mode: stage1_direct
+  use_cached_pseudo_labels: true
+  pseudo_label_cache_dir: outputs/pseudo_labels/semantic_boundary
+  unsup_weight: 0.3
+  unsup_seg_weight: 0.0
+  unsup_rampup_epochs: 10
+  epochs: 100
+  learning_rate: 5.0e-05
+  seg_lr_ratio: 0.3
+  boundary_lr_ratio: 1.0
+  lr_schedule: flat_decay
+  warmup_epochs: 5
+  warmup_start_factor: 0.01
+  cosine_end_factor: 0.0
+  flat_epochs: 50
+  decay_end_factor: 0.4
+  batch_size_labeled: 4
+  batch_size_unlabeled: 4
+  unlabeled_samples_per_epoch: 250
+  save_checkpoints: true
+  checkpoint_interval: 5
+  monitor:
+    image_dir: data/test
+    num_images: 10
+    output_dir: outputs/stage2/monitor
+  patch_mask_ratio: 0.2
+  patch_mask_size: 160
+  num_patches: 8
+  seg_mask_region_weight: 1.0
+  boundary_mask_region_weight: 1.0
+  boundary_anchor:
+    enabled: true
+    anchor_floor: 0.5
+    anchor_ramp_epochs: 20
+  boundary_consistency:
+    sobel_weight: 0.5
+    tv_weight: 0.05
+    tv_dilate_radius: 2
+    tv_bg_weight: 1.0
+    tv_boundary_weight: 0.1
+    bg_suppress_weight: 0.2
+    bg_suppress_threshold: 0.05
+    pos_weight: 3.0
+    margin_loss_weight: 1.0
+    margin: 0.4
+    peak_hinge_weight: 0.5
+    peak_threshold: 0.8
+    rate_regularizer_weight: 0.2
+    rate_regularizer_weight_end: 0.2
+    rate_regularizer_ramp_epochs: 0
+    rate_slack: 0.03
+  freeze:
+    seg_branch: false
+    boundary_branch: false
+  sem_boundary_align_weight: 0.0
+  sem_degrade_warn_factor: 0.9
+  skeleton_filter:
+    enabled: true
+    threshold: 0.5
+    threshold_end: 0.5
+    threshold_ramp_epochs: 60
+    dilate_width: 1
+    blur_sigma: 0.01
+progressive_aug:
+  enabled: true
+  start_epoch: 5
+  ramp_epochs: 20
+  max_prob: 0.8
+  brightness_range:
+  - 0.55
+  - 1.45
+  contrast_range:
+  - 0.45
+  - 1.45
+  sharpness_range:
+  - -0.5
+  - 1.0
+  gaussian_noise_std: 0.015
+affinity_geometry_g1:
+  output_dir: outputs/affinity_geometry_g4b_gap_weight020
+  unlabeled_dir: data/unlabeled
+  input_size: 1024
+  output_grid: 512
+  fpn_channels: 256
+  up_channels: 128
+  seed: 42
+  val_fraction: 0.2
+  forced_train_names:
+  - train_001
+  - train_002
+  unlabeled_monitor_count: 6
+  batch_size: 2
+  epochs: 20
+  learning_rate: 2.0e-05
+  min_learning_rate: 3.0e-06
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  amp: true
+  semantic_tolerance: 1.0e-06
+  monitor_interval: 5
+  graph_thresholds:
+  - 0.2
+  - 0.2
+  - 0.2
+  - 0.2
+  - 0.25
+  - 0.25
+  - 0.6
+  - 0.6
+  deployment_validation:
+    enabled: true
+    fusion_mode: gated
+    short_reduction: mean
+    boundary_threshold: 0.55
+    distance2_weight: 0.5
+    distance4_weight: 0.25
+    support_threshold: 0.2
+    support_temperature: 0.05
+    short_softmax_temperature: 0.15
+  augmentation:
+    horizontal_flip: true
+    vertical_flip: true
+    rotation90: true
+    brightness: 0.08
+    contrast: 0.08
+    gamma: 0.06
+    noise_probability: 0.25
+    noise_std: 0.01
+    blur_probability: 0.1
+    crop_probability: 0.5
+    crop_scale_min: 0.65
+    crop_scale_max: 0.9
+  sam2_geometry:
+    enabled: true
+    dataset_dir: data/sam2_geometry_g2
+    source_dir: data/unlabeled
+    pseudo_fraction: 0.5
+    samples_per_epoch: 64
+    use_eroded_interiors: false
+    native_crop:
+      enabled: true
+      fraction_within_pseudo: 0.5
+      size: 1024
+      min_coverage: 0.92
+      min_instances: 12
+      min_negative_edge_pixels: 128
+      stride_fraction: 0.5
+      max_candidates_per_image: 8
+  loss:
+    negative_weight: 1.5
+    hard_negative_weight: 1.0
+    hard_negative_gamma: 2.0
+  manual_uncovered_as_boundary: true
+  manual_uncovered_boundary_weight: 0.2
+affinity_deployment:
+  fusion_mode: gated
+  distance2_weight: 0.5
+  distance4_weight: 0.25
+  support_threshold: 0.2
+  support_temperature: 0.05
+  short_reduction: top2
+  short_softmax_temperature: 0.15
+semantic_challenger:
+  enabled: true
+  replace_reference_semantic: true
+backend_adaptation:
+  seed: 20260928
+  epochs: 20
+  manual_repeats: 2
+  expected_manual_sources: 32
+  num_workers: 0
+  learning_rates:
+    semantic: 1.0e-05
+    affinity: 2.0e-05
+    lora: 1.0e-06
+  minimum_lr_ratio: 0.1
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  amp_dtype: bfloat16
+  pseudo_weight: 0.5
+  sam2_geometry:
+    expected_sources: 64
+  restoration:
+    mode: first_x0
+    inference_seed: 314159
+  noise:
+    enabled: true
+    probability: 0.5
+    sigma:
+    - 0.0
+    - 0.006
+  monitor:
+    every_epochs: 5
+direct_semantic_affinity:
+  semantic_loss:
+    dice_weight: 0.3
+    instance_weight: 0.75
+    core_radius: 3
+    core_min_pixels: 12
+    core_boundary_threshold: 0.2
+    class_balance: true
+    ferrite_weight: 1.0
+    hard_gamma: 0.5
+    hard_floor: 0.5
+    pool_weight: 0.5
+    thin_weight: 1.5
+  affinity_loss:
+    negative_weight: 1.0
+    hard_negative_weight: 1.0
+    hard_negative_gamma: 2.0
+    manual_uncovered_as_boundary: false
+    manual_uncovered_boundary_weight: 0.2
+    pseudo_negative_weight: 1.0
+    normalize_edge_weights: true
+affinity_native:
+  sizes:
+  - 1024
+  overlap: 0.25
+  crop_attempts: 32
+  minimum_known_pairs: 16
+  monitor_width: 300
+  mixed_view_seed: 20260930

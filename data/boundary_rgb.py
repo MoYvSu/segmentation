@@ -179,6 +179,9 @@ class BoundaryRGBDataset(BoundaryNAFRealDataset):
             raise ValueError('Enabled erasure requires whole-source skeleton_dilate kernel8 and explicit restored RGB for RGB mode')
         super().__init__(rows_or_manifest, config=outer, epoch=epoch,
                          real_input_manifest=real_input_manifest)
+        teacher_target = self.target_identity.get('target_source_kind') == 'model_teacher'
+        if teacher_target and self.erasure_enabled:
+            raise ValueError('Teacher supervision has no original_covered provenance for the legacy erasure qualification')
         self.input_boundaries, self.rgb_images = {}, {}
         self.model_rgb_images, self.restored_rgb_records = {}, []
         self.restored_rgb_cache = None
@@ -250,6 +253,12 @@ class BoundaryRGBDataset(BoundaryNAFRealDataset):
                 input_skeletonized=True,
                 diagnostic_gap_definition='valid GT positive with no normalized T in the radius-2 L-infinity square',
                 limitation='Seen training sources; normalization can change line position/connectivity; no accuracy or topology preservation claim.')
+        if teacher_target:
+            self.identity.update(target_source_kind='model_teacher', model_predictions_as_target=True,
+                policy='teacher known-positive targets; ID0/unknown/frame/crop/padding ignored; GT never masks student N1 input',
+                limitation='Frozen C teacher self-distillation; no independent label accuracy claim.')
+            if self.target_identity.get('teacher_boundary_policy') == 'explicit_separators_v1':
+                self.identity.update(policy='teacher boundary uses certified A-0-B center separators; ID0 instance/semantic/affinity endpoints ignored; other zero/frame/crop/padding ignored; GT never masks student N1')
         if self.erasure_enabled:
             heat_hashes = {row['source']: row['heat_sha256'] for row in self.real_input_records}
             records = [dict(source=source, gt_file_sha256=self.by_source[source]['gt_sha256'],

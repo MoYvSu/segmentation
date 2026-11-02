@@ -1,0 +1,23 @@
+seed: 20261101
+assets:
+  raw_dir: data/raw
+  unlabeled_dir: data/unlabeled
+  purified_gt_dir: data/purified_gt
+  completed_gt_dir: data/completed_gt
+  completed_gt_manifest: data/completed_gt/manifest.json
+  sam2_geometry_dir: data/sam2_geometry
+  sam2_source_dir: data/unlabeled
+  backbone: ../AIC-2026-59388388-模型文件/pretrained/sam2_hiera_base_plus.pt
+  sam2_repo: training/source/segment-anything-2
+stages:
+  lora_ssl:
+    config: ../recipes/stage1.yaml
+    cli: {epochs: 30, batch_size: 2, lr: 0.0001, mask_ratio: 0.4, rank: 16, alpha: 32.0, num_workers: 4}
+  stage1: {config: ../recipes/stage1.yaml}
+  stage1_boundary: {config: ../recipes/stage1.yaml}
+  joint: {config: ../recipes/joint.yaml}
+  semantic: {config: ../recipes/semantic.yaml}
+  affinity: {config: ../recipes/affinity.yaml}
+  d5a: {config: ../recipes/d5a.yaml, seed: 42}
+  r1: {config: ../recipes/r1.yaml, seed: 20260928, mixed_view_seed: 20260930}
+  naf_train: {config: ../recipes/naf.yaml}

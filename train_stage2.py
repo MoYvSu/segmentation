@@ -517,6 +517,13 @@ def build_dataloaders(config, disable_unlabeled_appearance_aug=False,
         if float(train_cfg.get("center_weight", 0.0)) > 0:
             raise ValueError("completed semantic GT does not provide center-head supervision")
     labeled_kwargs = {}
+    teacher_dir = data_cfg.get("teacher_gt_dir", "")
+    if teacher_dir:
+        if completed_train or completed_val:
+            raise ValueError("teacher supervision cannot mix manual-completion targets")
+        labeled_kwargs.update(teacher_gt_dir=project_path(config, teacher_dir),
+            teacher_center_supervision=float(train_cfg.get("center_weight", 0.0)) > 0,
+            teacher_boundary_policy=data_cfg.get("teacher_boundary_policy", "known_neighbors_v1"))
     if completed_train:
         labeled_kwargs["completed_gt_dir"] = project_path(config, completed_train)
 
@@ -540,7 +547,7 @@ def build_dataloaders(config, disable_unlabeled_appearance_aug=False,
         **labeled_kwargs,
     )
 
-    val_uses_labeled = include_instance_map or bool(completed_val)
+    val_uses_labeled = include_instance_map or bool(completed_val) or bool(teacher_dir)
     val_dataset_cls = LabeledDataset if val_uses_labeled else BoundaryDataset
     val_kwargs = dict(
         data_dir=data_dir,
@@ -561,6 +568,10 @@ def build_dataloaders(config, disable_unlabeled_appearance_aug=False,
         val_kwargs["include_instance_map"] = True
     if completed_val:
         val_kwargs["completed_gt_dir"] = project_path(config, completed_val)
+    if teacher_dir:
+        val_kwargs.update(teacher_gt_dir=project_path(config, teacher_dir),
+            teacher_center_supervision=float(train_cfg.get("center_weight", 0.0)) > 0,
+            teacher_boundary_policy=data_cfg.get("teacher_boundary_policy", "known_neighbors_v1"))
     val_dataset = val_dataset_cls(**val_kwargs)
 
     if len(labeled_dataset) == 0:
@@ -1113,7 +1124,7 @@ def validate(model, loader, criterion, device):
         bnd_prob = torch.sigmoid(bnd_logits)
         bnd_pred = (bnd_prob > 0.5).long()
         bnd_gt = (targets[:, 1] > 0.5).long()
-        valid = targets[:, 0] >= 0
+        valid = (targets[:, 1] >= 0) & ((targets[:, 0] >= 0) | (targets[:, 1] > 0))
         bnd_tp += ((bnd_pred == 1) & (bnd_gt == 1) & valid).sum().item()
         bnd_fp += ((bnd_pred == 1) & (bnd_gt == 0) & valid).sum().item()
         bnd_fn += ((bnd_pred == 0) & (bnd_gt == 1) & valid).sum().item()
@@ -2757,7 +2768,8 @@ def main():
             )
             recorder.copy_checkpoint(best_path)
 
-        if (epoch + 1) % checkpoint_interval == 0 and semi_cfg.get("save_checkpoints", True):
+        if ((epoch + 1) % checkpoint_interval == 0
+                or epoch + 1 in semi_cfg.get("checkpoint_epochs", [])) and semi_cfg.get("save_checkpoints", True):
             ckpt_path = os.path.join(output_dir, f"stage2_epoch{epoch + 1}.pth")
             torch.save(build_checkpoint(
                 model=student_model, config=config, epoch=epoch,

@@ -121,8 +121,10 @@ def _rgb_view(dataset,sample):
     return np.ascontiguousarray(image)
 
 
-def real_pair_metrics(source,target,prediction,valid,original):
-    """真实输入的三类拟合门槛；只对记录GT及原标域作机制诊断。"""
+def real_pair_metrics(source,target,prediction,valid,original,*,support_kind='original_covered'):
+    """只对记录目标及明确来源的支持域作诊断，不参与训练loss。"""
+    if support_kind not in ('original_covered','teacher_known'):
+        raise ValueError('Unknown diagnostic support provenance')
     source=np.asarray(source)>0.5;target=np.asarray(target)>0.5
     valid=np.asarray(valid,bool);original=np.asarray(original,bool)
     if not (source.shape==target.shape==prediction.shape==valid.shape==original.shape):
@@ -136,19 +138,30 @@ def real_pair_metrics(source,target,prediction,valid,original):
     near2=cv2.dilate(prediction,np.ones((5,5),np.uint8))
     near1=cv2.dilate(prediction,np.ones((3,3),np.uint8))
     result={}
+    deep_name='teacher_known_deep_input' if support_kind=='teacher_known' else 'original_deep_input'
     for name,mask,values in [('supported_gt',supported,near2),('natural_missing_gt',missing,near2),
-                             ('original_deep_input',wrong_input,near1)]:
+                             (deep_name,wrong_input,near1)]:
         result[name+'_pixels']=int(mask.sum())
         result[name+'_probability']=float(values[mask].mean()) if mask.any() else None
         result[name+'_above065']=float((values[mask]>.65).mean()) if mask.any() else None
     return result,wrong_input
 
 
+def diagnostic_support_kind(dataset,sample):
+    """教师支持域不能冒充人工原标；兼容旧monitor的轻量Dataset替身。"""
+    row=next((r for r in getattr(dataset,'records',[]) if r['source']==sample['source']),{})
+    return 'teacher_known' if row.get('source_kind')=='model_teacher' else 'original_covered'
+
+
 def original_view(dataset,sample):
-    """来源只用于诊断，不进入输入生成或训练loss。"""
+    """来源只用于诊断；teacher读已知域，r8仍读原标域，不改GT文件。"""
     from data.boundary_naf import _crop_pair
     row=next(r for r in dataset.records if r['source']==sample['source'])
-    with np.load(row['gt'],allow_pickle=False) as arrays:original=arrays['original_covered'].astype(bool)
+    if diagnostic_support_kind(dataset,sample)=='teacher_known':
+        from data.teacher_supervision import load_teacher_instance_source
+        _,_,original,_,_=load_teacher_instance_source(row['gt'],class_path=row.get('classes'))
+    else:
+        with np.load(row['gt'],allow_pickle=False) as arrays:original=arrays['original_covered'].astype(bool)
     g=sample['meta']['geometry']
     result,_,_=_crop_pair(original,np.ones_like(original),sample['box'],sample['input'].shape[-1],
         int(g['rotation']),bool(g['flip']),0)
@@ -165,29 +178,37 @@ def save_monitor(model,config,output,step,dataset,*,force_full=False,source_limi
     real_input=cfg.get('input_source')=='real_n1'
     for index in settings['pair_indices']:
         sample=dataset[int(index)]
+        support_kind=diagnostic_support_kind(dataset,sample)
+        teacher_target=support_kind=='teacher_known'
         source=sample['input'][0].numpy(); target=sample['target'][0].numpy()
         valid=sample['valid'][0].numpy()>0; gap=sample['gap_mask'][0].numpy()>0
         prediction=model(sample['input'][None].to(device))[0,0].detach().float().cpu().numpy()
         diagnostic={};noise=np.zeros_like(gap)
         if real_input:
-            diagnostic,noise=real_pair_metrics(source,target,prediction,valid,original_view(dataset,sample))
+            diagnostic,noise=real_pair_metrics(source,target,prediction,valid,original_view(dataset,sample),
+                                              support_kind=support_kind)
         rgb=_rgb_view(dataset,sample)
-        cells=[('RGB / training source',rgb),('Complete processed GT',_heat(target)),
+        cells=[('RGB / training source',rgb),('Frozen teacher boundary target' if teacher_target else 'Complete processed GT',_heat(target)),
                ('Real N1 skeleton input' if real_input else 'Broken GT input',_heat(source)),
                ('NAF restored',_heat(prediction))]
         for _,array in cells[1:]: array[~valid]=96
         panels(folder/f'pair_{int(index):03d}.jpg',f'{sample["source"]} | step {step} | fixed draw {index}',
-               cells,width,'Seen training GT; gray ignored; real N1 errors are paired with unchanged GT, not synthetic gaps.'
+               cells,width,'Seen frozen teacher target; teacher-known support; gray ignored; no manual GT or independent accuracy claim.'
+               if teacher_target else 'Seen training GT; gray ignored; real N1 errors are paired with unchanged GT, not synthetic gaps.'
                if real_input else 'GT source seen during training; gray is ignored; no independent accuracy claim.')
         (x,y,x1,y1),label=zoom_box(target,valid,gap,noise,side=128)
         panels(folder/f'pair_{int(index):03d}_local.jpg',f'{label} | {sample["source"]} | step {step}',
-               [('RGB',rgb[y:y1,x:x1]),('GT',_heat(target[y:y1,x:x1])),
+               [('RGB',rgb[y:y1,x:x1]),('Teacher target' if teacher_target else 'GT',_heat(target[y:y1,x:x1])),
                 ('Input',_heat(source[y:y1,x:x1])),('Output',_heat(prediction[y:y1,x:x1]))],width)
         rows.append(dict(kind='fixed_training_pair',source=sample['source'],draw=int(index),
                          gap_interpretation='natural_GT_missing_input_support_not_artificial_gap' if real_input else 'synthetic_erased_GT',
-                         noise_interpretation='original_covered_input_skeleton_farther_than_8px_from_recorded_GT' if real_input else 'none',
+                         noise_interpretation=('teacher_known_input_skeleton_farther_than_8px_from_frozen_teacher_target'
+                             if teacher_target else 'original_covered_input_skeleton_farther_than_8px_from_recorded_GT') if real_input else 'none',
                          untouched_interpretation='other_known_region_error_not_identity_preservation' if real_input else 'uncorrupted_GT_region',
                          meta=sample['meta'],**diagnostic,**paired_metrics(source,target,prediction,valid,gap,noise)))
+        if teacher_target:
+            rows[-1].update(target_source_kind='model_teacher',diagnostic_support_mask='teacher_known',
+                            diagnostic_support_is_manual_original=False)
     full=force_full or step in settings['full_readout_steps']
     if full:
         controls=_fixed_controls(config,settings)

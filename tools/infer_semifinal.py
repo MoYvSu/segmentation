@@ -243,7 +243,7 @@ def verify_source_manifest(root=ROOT):
     return dict(manifest_present=True, manifest_sha256=sha(manifest), checked_files=len(rows))
 
 
-def local_module_sources():
+def local_module_sources(*, include_noise_resources=True):
     result = {}
     for module in list(sys.modules.values()):
         name = getattr(module, '__file__', None)
@@ -257,7 +257,8 @@ def local_module_sources():
     result[Path(__file__).resolve().relative_to(ROOT).as_posix()] = sha(__file__)
     # 驱动直接读取PTX，Python模块清单不会自动发现这两份协议资源。
     # 正式包必须携带它们，并同其他源码一样在运行前后核验实际文件摘要。
-    for relative in ('utils/cuda/restore_noise.cu', 'utils/cuda/restore_noise.ptx'):
+    for relative in (('utils/cuda/restore_noise.cu', 'utils/cuda/restore_noise.ptx')
+                     if include_noise_resources else ()):
         path = ROOT / relative
         if not path.is_file():
             raise RuntimeError('Required restoration noise resource missing: ' + relative)

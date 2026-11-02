@@ -12,10 +12,13 @@ PRIVATE_DIRS = (
     "data/raw", "data/test", "data/unlabeled", "data/purified_gt",
     "data/purified_gt_uncovered", "data/sam2_geometry", "data/sam2_geometry_g2",
     "tmp/musam_oracle_smoke",
+    "submission/aic-2026-59388388-代码与数据/data",
+    "submission/aic-2026-59388388-代码与数据/runs",
+    "submission/aic-2026-59388388-模型文件",
 )
 PRIVATE_SUFFIXES = (
     ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff",
-    ".npz", ".npy", ".pth", ".pt", ".ckpt", ".zip", ".7z", ".tar", ".gz",
+    ".npz", ".npy", ".pth", ".pt", ".ckpt", ".engine", ".onnx", ".zip", ".7z", ".tar", ".gz",
     "_class.json", "_class_confidence.json",
 )
 EMBEDDED_IMAGE = re.compile(

@@ -1,0 +1,49 @@
+# -*- coding: utf-8 -*-
+# C教师32源完整替换的单组训练演习；新run内重新建立全部监督权重谱系。
+_base: current_pipeline.yaml
+recipe: C_teacher32_joint_teacher_v2
+semantic_teacher_source: joint
+teacher_boundary_policy: explicit_separators_v1
+assets:
+  teacher_gt_dir: output/teacher_c32/derived_maps
+  teacher_gt_manifest: output/teacher_c32/training_contract/manifest.json
+  completed_gt_dir: output/teacher_c32/derived_maps
+  completed_gt_manifest: output/teacher_c32/training_contract/manifest.json
+  purified_gt_dir: output/teacher_c32/derived_maps
+stages:
+  lora_ssl:
+    import_checkpoint: weights/lora_ssl_4701.pth
+    import_sha256: 4701e770e658a4f152da695c4b3a3dbb3a0b66152d63c03626399cfea2f4c152
+    import_provenance:
+      segmentation_GT_used: false
+      source: original_30epoch_RGB_masked_reconstruction_SSL
+      rank: 16
+      alpha: 32
+      original_meta_best_loss: 0.2653634955137968
+      imported_not_retrained: true
+  stage1:
+    overrides:
+      train:
+        # 保留best/final，省去中间周期性大文件；不改变训练预算或选优。
+        save_checkpoints: false
+        process_monitor:
+          enabled: true
+          every_epochs: 10
+          thumbnail_size: 384
+  joint:
+    overrides:
+      semi_supervised:
+        save_checkpoints: false
+  semantic:
+    overrides:
+      semi_supervised:
+        save_checkpoints: false
+  d5a:
+    import_checkpoint: outputs/d5a/candidate/epoch_060.pt
+    import_sha256: 048954795dc634f82fecf96d5e02bb2f2505afe5eb76298dff5a1b0713b3c80a
+    import_provenance:
+      segmentation_GT_used: false
+      source: original_1000image_RGB_self_supervised_D5a
+      epoch: 60
+      updates: 15000
+      imported_not_retrained: true

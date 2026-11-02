@@ -16,11 +16,12 @@ from data.direct_dual_head_dataset import _spatial_transform
 from data.rgb_restoration_dataset import PROFILES, _add_achromatic_noise, degrade_rgb, read_rgb
 from data.rgb_spatial_blur import make_endpoint_sigma_map, validate_spatial_blur_config
 from data.semantic_targets import load_completed_semantic_source, semantic_targets_from_instances
+from data.teacher_supervision import is_teacher_supervision
 from utils.offset_letterbox import letterbox_instance_geometry
 
 
 class CanonicalBackendDataset(Dataset):
-    """全人工图无划分；语义、实例、有效域及辅助边界只来自补缝实例图。
+    """32人工源图无划分；目标来自明确的补缝实例或完整教师实例。
 
     LabelMe 文件仅确认人工源图身份，不读取旧多边形或 purified GT 作为目标。
     semantic_boundary 供语义 core 损失排除边缘，不训练额外的边界分支。
@@ -45,6 +46,12 @@ class CanonicalBackendDataset(Dataset):
                 target_path = self.completed_gt_dir / (path.stem + suffix)
                 if not target_path.is_file():
                     raise FileNotFoundError(f"incomplete canonical manual cohort: {target_path}")
+        teacher_flags = {is_teacher_supervision(self.completed_gt_dir / (path.stem + '_gt.npz'))
+                         for path in self.samples}
+        if len(teacher_flags) != 1:
+            raise ValueError('Canonical supervision must not silently mix teacher and manual provenance')
+        self.teacher_supervision = teacher_flags == {True}
+        self.supervision_source_kind = 'model_teacher' if self.teacher_supervision else 'manual_completed'
 
     def __len__(self):
         return len(self.samples)
@@ -62,10 +69,11 @@ class CanonicalBackendDataset(Dataset):
         affinity_ids, affinity_content, metadata = letterbox_instance_geometry(
             instances, input_size=self.image_size, output_grid=self.affinity_grid
         )
-        semantic, boundary = semantic_targets_from_instances(semantic_ids, classes)
+        semantic, boundary = semantic_targets_from_instances(semantic_ids, classes,
+            known_boundaries_only=self.teacher_supervision)
         affinity_tensor = torch.from_numpy(affinity_ids.astype(np.int64))
         affinity_valid = torch.from_numpy(affinity_content).unsqueeze(0)
-        return {
+        sample = {
             "image": torch.from_numpy(image_lb.copy()).permute(2, 0, 1).float() / 255.0,
             "instance_map": affinity_tensor,
             "foreground": (affinity_tensor > 0).unsqueeze(0),
@@ -89,6 +97,9 @@ class CanonicalBackendDataset(Dataset):
             "image_name": path.name,
             "image_path": str(path),
         }
+        if self.teacher_supervision:
+            sample['supervision_source_kind'] = self.supervision_source_kind
+        return sample
 
 
 class PairedDegradationDataset(Dataset):

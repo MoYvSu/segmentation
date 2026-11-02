@@ -1,0 +1,11 @@
+# -*- coding: utf-8 -*-
+# 时间受限，仅训练完整随机语义头一组；与既有微调相比初始化与学习率同时改变。
+_base: semantic_native_zero.yaml
+
+semantic_native_zero:
+  output_dir: outputs/semantic_native_random
+  learning_rate: 0.0001
+
+semantic_native_random:
+  initialization: random_full_v1
+  initialization_seed: 1101
